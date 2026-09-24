@@ -27,6 +27,7 @@ import org.apache.flink.runtime.scheduler.adaptive.JobSchedulingPlan.SlotAssignm
 import org.apache.flink.runtime.scheduler.adaptive.allocator.SlotSharingSlotAllocator.ExecutionSlotSharingGroup;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
 
+import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
@@ -40,6 +41,8 @@ import java.util.stream.Collectors;
 
 /** Simple {@link SlotAssigner} that treats all slots and slot sharing groups equally. */
 public class JustinSlotAssigner implements SlotAssigner {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JustinSlotAssigner.class);
 
     static List<ExecutionSlotSharingGroup> createExecutionSlotSharingGroups(
             VertexParallelism vertexParallelism, SlotSharingGroup slotSharingGroup) {
@@ -88,8 +91,7 @@ public class JustinSlotAssigner implements SlotAssigner {
                                 .getVertexInformation(jobVertexID)
                                 .getSlotSharingGroup()
                                 .getResourceProfile();
-                LoggerFactory.getLogger(JustinSlotAssigner.class)
-                        .debug(jobVertexID + " -> " + resourceProfile);
+                LOG.debug("{} -> {}", jobVertexID, resourceProfile);
                 if (slotInfo.getResourceProfile().isMatching(resourceProfile)) {
                     used.add(slotInfo.getAllocationId());
                     assignments.add(new SlotAssignment(slotInfo, group));
@@ -97,6 +99,16 @@ public class JustinSlotAssigner implements SlotAssigner {
                 }
             }
         }
+
+        if (assignments.size() != allGroups.size()) {
+            LOG.debug(
+                    "Justin slot assignment is incomplete: assigned {} of {} slot sharing groups. "
+                            + "Waiting for the remaining resource profiles.",
+                    assignments.size(),
+                    allGroups.size());
+            assignments.clear();
+        }
+
         return assignments;
     }
 }
