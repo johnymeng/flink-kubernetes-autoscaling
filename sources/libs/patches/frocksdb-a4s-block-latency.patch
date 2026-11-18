@@ -1,0 +1,241 @@
+diff --git a/include/rocksdb/statistics.h b/include/rocksdb/statistics.h
+index 70c0c84..0680994 100644
+--- a/include/rocksdb/statistics.h
++++ b/include/rocksdb/statistics.h
+@@ -484,6 +484,10 @@ enum Histograms : uint32_t {
+   // Error handler statistics
+   ERROR_HANDLER_AUTORESUME_RETRY_COUNT,
+ 
++  A4S_DATA_BLOCK_HIT_NANOS,
++  A4S_DATA_BLOCK_MISS_DIRECT_NANOS,
++  A4S_DATA_BLOCK_MISS_NON_DIRECT_FILE_NANOS,
++  A4S_DATA_BLOCK_MISS_OTHER_NANOS,
+   HISTOGRAM_ENUM_MAX,
+ };
+ 
+diff --git a/java/rocksjni/portal.h b/java/rocksjni/portal.h
+index 330b9e9..f7decec 100644
+--- a/java/rocksjni/portal.h
++++ b/java/rocksjni/portal.h
+@@ -5443,6 +5443,14 @@ class HistogramTypeJni {
+         return 0x31;
+       case ROCKSDB_NAMESPACE::Histograms::ERROR_HANDLER_AUTORESUME_RETRY_COUNT:
+         return 0x31;
++      case ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_HIT_NANOS:
++        return 0x33;
++      case ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_MISS_DIRECT_NANOS:
++        return 0x34;
++      case ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_MISS_NON_DIRECT_FILE_NANOS:
++        return 0x35;
++      case ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_MISS_OTHER_NANOS:
++        return 0x36;
+       case ROCKSDB_NAMESPACE::Histograms::HISTOGRAM_ENUM_MAX:
+         // 0x1F for backwards compatibility on current minor version.
+         return 0x1F;
+@@ -5560,6 +5568,14 @@ class HistogramTypeJni {
+       case 0x32:
+         return ROCKSDB_NAMESPACE::Histograms::
+             ERROR_HANDLER_AUTORESUME_RETRY_COUNT;
++      case 0x33:
++        return ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_HIT_NANOS;
++      case 0x34:
++        return ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_MISS_DIRECT_NANOS;
++      case 0x35:
++        return ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_MISS_NON_DIRECT_FILE_NANOS;
++      case 0x36:
++        return ROCKSDB_NAMESPACE::Histograms::A4S_DATA_BLOCK_MISS_OTHER_NANOS;
+       case 0x1F:
+         // 0x1F for backwards compatibility on current minor version.
+         return ROCKSDB_NAMESPACE::Histograms::HISTOGRAM_ENUM_MAX;
+diff --git a/java/rocksjni/statistics.cc b/java/rocksjni/statistics.cc
+index f59e79e..3577c82 100644
+--- a/java/rocksjni/statistics.cc
++++ b/java/rocksjni/statistics.cc
+@@ -15,6 +15,11 @@
+ #include "rocksjni/portal.h"
+ #include "rocksjni/statisticsjni.h"
+ 
++JNIEXPORT jint JNICALL Java_org_rocksdb_Statistics_a4sBlockLatencyAbiVersion(
++    JNIEnv*, jclass) {
++  return 1;
++}
++
+ /*
+  * Class:     org_rocksdb_Statistics
+  * Method:    newStatistics
+diff --git a/java/src/main/java/org/rocksdb/HistogramType.java b/java/src/main/java/org/rocksdb/HistogramType.java
+index 5953a7d..a5be13e 100644
+--- a/java/src/main/java/org/rocksdb/HistogramType.java
++++ b/java/src/main/java/org/rocksdb/HistogramType.java
+@@ -181,7 +181,11 @@ public enum HistogramType {
+   ERROR_HANDLER_AUTORESUME_RETRY_COUNT((byte) 0x32),
+ 
+   // 0x1F for backwards compatibility on current minor version.
+-  HISTOGRAM_ENUM_MAX((byte) 0x1F);
++  HISTOGRAM_ENUM_MAX((byte) 0x1F),
++  A4S_DATA_BLOCK_HIT_NANOS((byte) 0x33),
++  A4S_DATA_BLOCK_MISS_DIRECT_NANOS((byte) 0x34),
++  A4S_DATA_BLOCK_MISS_NON_DIRECT_FILE_NANOS((byte) 0x35),
++  A4S_DATA_BLOCK_MISS_OTHER_NANOS((byte) 0x36);
+ 
+   private final byte value;
+ 
+diff --git a/java/src/main/java/org/rocksdb/Statistics.java b/java/src/main/java/org/rocksdb/Statistics.java
+index 0938a6d..5b4b4a6 100644
+--- a/java/src/main/java/org/rocksdb/Statistics.java
++++ b/java/src/main/java/org/rocksdb/Statistics.java
+@@ -134,6 +134,9 @@ public class Statistics extends RocksObject {
+     return toString(nativeHandle_);
+   }
+ 
++  /** ABI version for the optional A4S sampled data-block latency histograms. */
++  public static native int a4sBlockLatencyAbiVersion();
++
+   private native static long newStatistics();
+   private native static long newStatistics(final long otherStatisticsHandle);
+   private native static long newStatistics(final byte[] ignoreHistograms);
+diff --git a/monitoring/statistics.cc b/monitoring/statistics.cc
+index 2b690dd..e3a2037 100644
+--- a/monitoring/statistics.cc
++++ b/monitoring/statistics.cc
+@@ -258,6 +258,13 @@ const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap = {
+     {NUM_SST_READ_PER_LEVEL, "rocksdb.num.sst.read.per.level"},
+     {ERROR_HANDLER_AUTORESUME_RETRY_COUNT,
+      "rocksdb.error.handler.autoresume.retry.count"},
++    {A4S_DATA_BLOCK_HIT_NANOS, "rocksdb.a4s.data.block.hit.nanos"},
++    {A4S_DATA_BLOCK_MISS_DIRECT_NANOS,
++     "rocksdb.a4s.data.block.miss.direct.nanos"},
++    {A4S_DATA_BLOCK_MISS_NON_DIRECT_FILE_NANOS,
++     "rocksdb.a4s.data.block.miss.non.direct.file.nanos"},
++    {A4S_DATA_BLOCK_MISS_OTHER_NANOS,
++     "rocksdb.a4s.data.block.miss.other.nanos"},
+ };
+ 
+ std::shared_ptr<Statistics> CreateDBStatistics() {
+diff --git a/table/block_based/block_based_table_reader.cc b/table/block_based/block_based_table_reader.cc
+index 0a4f5b2..7a6f957 100644
+--- a/table/block_based/block_based_table_reader.cc
++++ b/table/block_based/block_based_table_reader.cc
+@@ -10,8 +10,12 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cstdlib>
++#include <cstring>
++#include <functional>
+ #include <limits>
+ #include <string>
++#include <thread>
+ #include <utility>
+ #include <vector>
+ 
+@@ -58,6 +62,7 @@
+ #include "test_util/sync_point.h"
+ #include "util/coding.h"
+ #include "util/crc32c.h"
++#include "util/random.h"
+ #include "util/stop_watch.h"
+ #include "util/string_util.h"
+ 
+@@ -67,6 +72,23 @@ extern const uint64_t kBlockBasedTableMagicNumber;
+ extern const std::string kHashIndexPrefixesBlock;
+ extern const std::string kHashIndexPrefixesMetadataBlock;
+ 
++namespace {
++// Shadow telemetry only. Sample before looking up the block so hit/miss class
++// cannot affect selection. Do not call the clock on unsampled accesses.
++bool SampleA4SDataBlockLatency(Statistics* statistics) {
++  static const bool enabled = [] {
++    const char* value = std::getenv("FLINK_A4S_SAMPLE_BLOCK_LATENCY");
++    return value != nullptr && std::strcmp(value, "1") == 0;
++  }();
++  if (!enabled || statistics == nullptr) {
++    return false;
++  }
++  thread_local Random sampler(static_cast<uint32_t>(
++      std::hash<std::thread::id>{}(std::this_thread::get_id())));
++  return sampler.OneIn(128);
++}
++}  // namespace
++
+ BlockBasedTable::~BlockBasedTable() {
+   delete rep_;
+ }
+@@ -1478,6 +1500,14 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
+                          compressed_cache_key);
+     }
+ 
++    Statistics* a4s_statistics = rep_->ioptions.statistics;
++    const bool a4s_sample =
++        !contents && !no_io && ro.fill_cache && block_type == BlockType::kData &&
++        get_context != nullptr && block_cache != nullptr &&
++        block_cache_compressed == nullptr &&
++        SampleA4SDataBlockLatency(a4s_statistics);
++    const uint64_t a4s_start = a4s_sample ? rep_->ioptions.clock->NowNanos() : 0;
++    auto a4s_histogram = A4S_DATA_BLOCK_MISS_OTHER_NANOS;
+     if (!contents) {
+       s = GetDataBlockFromCache(key, ckey, block_cache, block_cache_compressed,
+                                 ro, block_entry, uncompression_dict, block_type,
+@@ -1486,6 +1516,7 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
+         // TODO(haoyu): Differentiate cache hit on uncompressed block cache and
+         // compressed block cache.
+         is_cache_hit = true;
++        a4s_histogram = A4S_DATA_BLOCK_HIT_NANOS;
+       }
+     }
+ 
+@@ -1510,6 +1541,11 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
+             GetMemoryAllocator(rep_->table_options),
+             GetMemoryAllocatorForCompressedBlock(rep_->table_options));
+         s = block_fetcher.ReadBlockContents();
++        if (a4s_sample && block_fetcher.did_read_from_file()) {
++          a4s_histogram = rep_->file->use_direct_io()
++                              ? A4S_DATA_BLOCK_MISS_DIRECT_NANOS
++                              : A4S_DATA_BLOCK_MISS_NON_DIRECT_FILE_NANOS;
++        }
+         raw_block_comp_type = block_fetcher.get_compression_type();
+         contents = &raw_block_contents;
+         if (get_context) {
+@@ -1540,6 +1576,12 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
+             GetMemoryAllocator(rep_->table_options), block_type, get_context);
+       }
+     }
++    if (a4s_sample && s.ok()) {
++      const uint64_t a4s_end = rep_->ioptions.clock->NowNanos();
++      if (a4s_end > a4s_start) {
++        a4s_statistics->recordInHistogram(a4s_histogram, a4s_end - a4s_start);
++      }
++    }
+   }
+ 
+   // Fill lookup_context.
+diff --git a/table/block_fetcher.cc b/table/block_fetcher.cc
+index dd39c09..13ddfb8 100644
+--- a/table/block_fetcher.cc
++++ b/table/block_fetcher.cc
+@@ -258,6 +258,8 @@ IOStatus BlockFetcher::ReadBlockContents() {
+       }
+     }
+ 
++    did_read_from_file_ = io_status_.ok();
++
+     // TODO: introduce dedicated perf counter for range tombstones
+     switch (block_type_) {
+       case BlockType::kFilter:
+diff --git a/table/block_fetcher.h b/table/block_fetcher.h
+index 9405040..e2f04fa 100644
+--- a/table/block_fetcher.h
++++ b/table/block_fetcher.h
+@@ -75,7 +75,12 @@ class BlockFetcher {
+   }
+ 
+ #endif
++  // True only for a successful direct call to the SST file reader, not for
++  // fetches served through the prefetch or persistent-cache paths.
++  bool did_read_from_file() const { return did_read_from_file_; }
++
+  private:
++  bool did_read_from_file_ = false;
+ #ifndef NDEBUG
+   int num_stack_buf_memcpy_ = 0;
+   int num_heap_buf_memcpy_ = 0;
