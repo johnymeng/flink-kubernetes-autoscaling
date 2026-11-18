@@ -71,6 +71,7 @@ public class ScalingMetricEvaluator {
                         : latestCollectedMetrics.getMissRateCurves();
         double hitLatencySec = conf.getDouble(AutoScalerOptions.A4S_HIT_LATENCY_SEC);
         double missLatencySec = conf.getDouble(AutoScalerOptions.A4S_MISS_LATENCY_SEC);
+        var calibratedCacheCosts = conf.get(AutoScalerOptions.A4S_CALIBRATED_CACHE_COSTS);
         int vertexMinParallelism = conf.get(AutoScalerOptions.VERTEX_MIN_PARALLELISM);
         int vertexMaxParallelism = conf.get(AutoScalerOptions.VERTEX_MAX_PARALLELISM);
 
@@ -95,15 +96,33 @@ public class ScalingMetricEvaluator {
                 LOG.warn("A4S: No miss rate curve found for vertex {}, skipping", vertex);
                 continue;
             }
-            MemoryParallelismCurve mpc = MemoryParallelismCurve.fromMissRateCurve(
-                scalingOutput.get(vertex).get(TARGET_DATA_RATE).getAverage(),
-                missLatencySec, 
-                hitLatencySec, 
-                vertexMinParallelism,
-                vertexMaxParallelism,
-                missRateCurve);
-            if (mpc != null) {
-                memoryParallelismCurves.put(vertex, mpc);
+            double targetRate = scalingOutput.get(vertex).get(TARGET_DATA_RATE).getAverage();
+            String calibratedCosts = calibratedCacheCosts.get(vertex.toHexString());
+            if (calibratedCosts == null) {
+                memoryParallelismCurves.put(
+                        vertex,
+                        MemoryParallelismCurve.fromMissRateCurve(
+                                targetRate,
+                                missLatencySec,
+                                hitLatencySec,
+                                vertexMinParallelism,
+                                vertexMaxParallelism,
+                                missRateCurve));
+            } else {
+                MemoryParallelismCurve curve =
+                        calibratedCurve(
+                                vertex,
+                                calibratedCosts,
+                                targetRate,
+                                vertexMinParallelism,
+                                vertexMaxParallelism,
+                                missRateCurve);
+                if (curve.getPoints().isEmpty()) {
+                    throw new IllegalStateException(
+                            "No feasible calibrated A4S curve for vertex " + vertex
+                                    + " at " + targetRate + " records/s");
+                }
+                memoryParallelismCurves.put(vertex, curve);
             }
         }
 
@@ -114,6 +133,33 @@ public class ScalingMetricEvaluator {
                 globalMetrics, 
                 memoryParallelismCurves, 
                 collectedMissRateCurves);
+    }
+
+    private static MemoryParallelismCurve calibratedCurve(
+            JobVertexID vertex,
+            String costs,
+            double targetRate,
+            int minParallelism,
+            int maxParallelism,
+            MissRateCurve missRateCurve) {
+        String[] values = costs.split("/", -1);
+        String error =
+                "Invalid " + AutoScalerOptions.A4S_CALIBRATED_CACHE_COSTS.key() + " for vertex "
+                        + vertex + ": expected positive finite zeroMissCost/missPenalty";
+        if (values.length != 2) {
+            throw new IllegalArgumentException(error);
+        }
+        try {
+            return MemoryParallelismCurve.fromCalibratedMissRateCurve(
+                    targetRate,
+                    Double.parseDouble(values[0]),
+                    Double.parseDouble(values[1]),
+                    minParallelism,
+                    maxParallelism,
+                    missRateCurve);
+        } catch (IllegalArgumentException invalidCosts) {
+            throw new IllegalArgumentException(error, invalidCosts);
+        }
     }
 
     @VisibleForTesting
