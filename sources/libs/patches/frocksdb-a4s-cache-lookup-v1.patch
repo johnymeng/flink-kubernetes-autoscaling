@@ -1,0 +1,401 @@
+diff --git a/cache/lru_cache.cc b/cache/lru_cache.cc
+index 4ba3aa2..e00ad03 100644
+--- a/cache/lru_cache.cc
++++ b/cache/lru_cache.cc
+@@ -14,6 +14,8 @@
+ #include <cstdint>
+ #include <cmath>
+ #include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ #include <string>
+ 
+ #include "util/mutexlock.h"
+@@ -22,6 +24,19 @@ namespace ROCKSDB_NAMESPACE {
+ 
+ namespace {
+ constexpr size_t kQuickMRCBlockSize = 4096;
++
++bool A4SCacheLookupCountingEnabled() {
++  static const bool enabled = [] {
++    const char* value = std::getenv("FLINK_A4S_COUNT_CACHE_LOOKUPS");
++    return value != nullptr && std::strcmp(value, "1") == 0;
++  }();
++  return enabled;
++}
++
++uint64_t NewA4SCacheId() {
++  static std::atomic<uint64_t> next_id{1};
++  return next_id.fetch_add(1, std::memory_order_relaxed);
++}
+ }  // namespace
+ 
+ LRUHandleTable::LRUHandleTable() : list_(nullptr), length_(0), elems_(0) {
+@@ -109,7 +124,8 @@ LRUCacheShard::LRUCacheShard(size_t capacity, bool strict_capacity_limit,
+                              uint32_t quick_mrc_max_bucket_size,
+                              uint32_t quick_mrc_ghost_cache_multiplier,
+                              double quick_mrc_sampling_rate,
+-                             uint32_t quick_mrc_histogram_bin_size)
++                             uint32_t quick_mrc_histogram_bin_size,
++                             bool a4s_count_cache_lookups)
+     : capacity_(0),
+       high_pri_pool_usage_(0),
+       strict_capacity_limit_(strict_capacity_limit),
+@@ -118,6 +134,7 @@ LRUCacheShard::LRUCacheShard(size_t capacity, bool strict_capacity_limit,
+       usage_(0),
+       lru_usage_(0),
+       mutex_(use_adaptive_mutex),
++      a4s_count_cache_lookups_(a4s_count_cache_lookups),
+       quick_mrc_enabled_(quick_mrc_enabled),
+       quick_mrc_max_bucket_size_(quick_mrc_max_bucket_size),
+       quick_mrc_ghost_cache_multiplier_(quick_mrc_ghost_cache_multiplier),
+@@ -508,6 +525,9 @@ void LRUCacheShard::SetCapacity(size_t capacity) {
+   autovector<LRUHandle*> last_reference_list;
+   {
+     MutexLock l(&mutex_);
++    if (a4s_count_cache_lookups_ && capacity_ != capacity) {
++      ++a4s_capacity_generation_;
++    }
+     capacity_ = capacity;
+     high_pri_pool_capacity_ = capacity_ * high_pri_pool_ratio_;
+     EvictFromLRU(0, &last_reference_list);
+@@ -527,6 +547,12 @@ void LRUCacheShard::SetStrictCapacityLimit(bool strict_capacity_limit) {
+ Cache::Handle* LRUCacheShard::Lookup(const Slice& key, uint32_t hash) {
+   MutexLock l(&mutex_);
+   LRUHandle* e = table_.Lookup(key, hash);
++  if (a4s_count_cache_lookups_) {
++    ++a4s_lookups_;
++    // The resident table decides hit/miss; a subsequent ghost hit is still
++    // a resident miss. Do not depend on MRC probabilistic observation.
++    a4s_resident_misses_ += (e == nullptr);
++  }
+   if (e != nullptr) {
+     if (quick_mrc_enabled_ && QuickMRCShouldSample()) {
+       bool found = false;
+@@ -835,6 +861,11 @@ LRUCache::LRUCache(size_t capacity, int num_shard_bits,
+     : ShardedCache(capacity, num_shard_bits, strict_capacity_limit,
+                    std::move(allocator)) {
+   num_shards_ = 1 << num_shard_bits;
++  const bool count_lookups =
++      quick_mrc_enabled && num_shards_ == 1 && A4SCacheLookupCountingEnabled();
++  if (count_lookups) {
++    a4s_cache_id_ = NewA4SCacheId();
++  }
+   shards_ = reinterpret_cast<LRUCacheShard*>(
+       port::cacheline_aligned_alloc(sizeof(LRUCacheShard) * num_shards_));
+   size_t per_shard = (capacity + (num_shards_ - 1)) / num_shards_;
+@@ -844,7 +875,7 @@ LRUCache::LRUCache(size_t capacity, int num_shard_bits,
+                       use_adaptive_mutex, metadata_charge_policy,
+                       quick_mrc_enabled, quick_mrc_max_bucket_size,
+                       quick_mrc_ghost_cache_multiplier, quick_mrc_sampling_rate,
+-                      quick_mrc_histogram_bin_size);
++                      quick_mrc_histogram_bin_size, count_lookups);
+   }
+ }
+ 
+@@ -927,6 +958,30 @@ std::vector<uint64_t> LRUCache::GetQuickMRCStackDistanceHistogram() const {
+   return merged;
+ }
+ 
++bool LRUCacheShard::GetA4SCacheLookupCounters(
++    A4SCacheLookupSnapshot* snapshot) const {
++  if (!a4s_count_cache_lookups_) {
++    return false;
++  }
++  MutexLock l(&mutex_);
++  snapshot->capacity_bytes = capacity_;
++  snapshot->capacity_generation = a4s_capacity_generation_;
++  snapshot->lookups = a4s_lookups_;
++  snapshot->resident_misses = a4s_resident_misses_;
++  return true;
++}
++
++bool LRUCache::GetA4SCacheLookupSnapshot(
++    A4SCacheLookupSnapshot* snapshot) const {
++  if (num_shards_ != 1 || a4s_cache_id_ == 0 ||
++      !shards_[0].GetA4SCacheLookupCounters(snapshot)) {
++    return false;
++  }
++  snapshot->cache_id = a4s_cache_id_;
++  snapshot->shard_count = num_shards_;
++  return true;
++}
++
+ void LRUCache::ResetQuickMRCStats() {
+   for (int i = 0; i < num_shards_; i++) {
+     shards_[i].ResetQuickMRCStats();
+diff --git a/cache/lru_cache.h b/cache/lru_cache.h
+index 60c50e7..1d01515 100644
+--- a/cache/lru_cache.h
++++ b/cache/lru_cache.h
+@@ -197,6 +197,17 @@ class LRUHandleTable {
+   uint32_t elems_;
+ };
+ 
++// One atomic observation of exact resident lookup counters. Counts are
++// cumulative for the physical cache, independent of histogram reset/sampling.
++struct A4SCacheLookupSnapshot {
++  uint64_t cache_id = 0;
++  uint64_t capacity_bytes = 0;
++  uint64_t capacity_generation = 0;
++  uint64_t shard_count = 0;
++  uint64_t lookups = 0;
++  uint64_t resident_misses = 0;
++};
++
+ // A single shard of sharded cache.
+ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+  public:
+@@ -206,7 +217,8 @@ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+                 bool quick_mrc_enabled, uint32_t quick_mrc_max_bucket_size,
+                 uint32_t quick_mrc_ghost_cache_multiplier,
+                 double quick_mrc_sampling_rate,
+-                uint32_t quick_mrc_histogram_bin_size);
++                uint32_t quick_mrc_histogram_bin_size,
++                bool a4s_count_cache_lookups = false);
+   virtual ~LRUCacheShard() override = default;
+ 
+   // Separate from constructor so caller can easily make an array of LRUCache
+@@ -249,6 +261,7 @@ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+   std::vector<uint64_t> GetQuickMRCStackDistanceHistogram() const;
+   void ResetQuickMRCStats();
+   uint64_t GetQuickMRCCompleteMissCount() const;
++  bool GetA4SCacheLookupCounters(A4SCacheLookupSnapshot* snapshot) const;
+ 
+   void TEST_GetLRUList(LRUHandle** lru, LRUHandle** lru_low_pri);
+ 
+@@ -345,6 +358,12 @@ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+   // don't mind mutex_ invoking the non-const actions.
+   mutable port::Mutex mutex_;
+ 
++  // Optional, exact per-shard counters; protected by mutex_.
++  const bool a4s_count_cache_lookups_;
++  uint64_t a4s_capacity_generation_ = 0;
++  uint64_t a4s_lookups_ = 0;
++  uint64_t a4s_resident_misses_ = 0;
++
+   // quickMRC config
+   bool quick_mrc_enabled_;
+   uint32_t quick_mrc_max_bucket_size_;
+@@ -399,9 +418,13 @@ class LRUCache
+       const override;
+   virtual void ResetQuickMRCStats() override;
+ 
++  // V1 supports a single physical shard so there is one snapshot boundary.
++  bool GetA4SCacheLookupSnapshot(A4SCacheLookupSnapshot* snapshot) const;
++
+  private:
+   LRUCacheShard* shards_ = nullptr;
+   int num_shards_ = 0;
++  uint64_t a4s_cache_id_ = 0;
+ };
+ 
+ }  // namespace ROCKSDB_NAMESPACE
+diff --git a/cache/lru_cache_test.cc b/cache/lru_cache_test.cc
+index aacd7d6..f4a33c4 100644
+--- a/cache/lru_cache_test.cc
++++ b/cache/lru_cache_test.cc
+@@ -5,7 +5,9 @@
+ 
+ #include "cache/lru_cache.h"
+ 
++#include <atomic>
+ #include <string>
++#include <thread>
+ #include <vector>
+ #include "port/port.h"
+ #include "test_util/testharness.h"
+@@ -26,7 +28,8 @@ class LRUCacheTest : public testing::Test {
+   }
+ 
+   void NewCache(size_t capacity, double high_pri_pool_ratio = 0.0,
+-                bool use_adaptive_mutex = kDefaultToAdaptiveMutex) {
++                bool use_adaptive_mutex = kDefaultToAdaptiveMutex,
++                bool count_a4s_lookups = false) {
+     DeleteCache();
+     cache_ = reinterpret_cast<LRUCacheShard*>(
+         port::cacheline_aligned_alloc(sizeof(LRUCacheShard)));
+@@ -37,7 +40,8 @@ class LRUCacheTest : public testing::Test {
+                                60 /*quick_mrc_max_bucket_size*/,
+                                1 /*quick_mrc_ghost_cache_multiplier*/,
+                                1.0 /*quick_mrc_sampling_rate*/,
+-                               1 /*quick_mrc_histogram_bin_size*/);
++                               1 /*quick_mrc_histogram_bin_size*/,
++                               count_a4s_lookups);
+   }
+ 
+   void Insert(const std::string& key,
+@@ -93,7 +97,7 @@ class LRUCacheTest : public testing::Test {
+     ASSERT_EQ(num_high_pri_pool_keys, high_pri_pool_keys);
+   }
+ 
+- private:
++ protected:
+   LRUCacheShard* cache_ = nullptr;
+ };
+ 
+@@ -232,6 +236,78 @@ TEST_F(LRUCacheTest, QuickMRCAppendsCompleteMissBucket) {
+   ASSERT_EQ(2U, histogram.back());
+ }
+ 
++TEST_F(LRUCacheTest, A4SLookupAccountingIsOffByDefault) {
++  NewCache(3);
++  ASSERT_FALSE(Lookup("cold"));
++  A4SCacheLookupSnapshot snapshot;
++  ASSERT_FALSE(cache_->GetA4SCacheLookupCounters(&snapshot));
++}
++
++TEST_F(LRUCacheTest, A4SLookupCountsGhostMissAndIgnoresHistogramReset) {
++  NewCache(3, 0.0, kDefaultToAdaptiveMutex, true);
++  Insert("a");
++  Insert("b");
++  Insert("c");
++  ASSERT_TRUE(Lookup("a"));
++  Insert("d");  // evicts "b", but the ghost index remembers it.
++  ASSERT_FALSE(Lookup("b"));
++  ASSERT_FALSE(Lookup("unknown"));
++
++  // Only "unknown" is a QuickMRC complete miss.
++  ASSERT_EQ(1U, cache_->GetQuickMRCCompleteMissCount());
++  A4SCacheLookupSnapshot snapshot;
++  ASSERT_TRUE(cache_->GetA4SCacheLookupCounters(&snapshot));
++  ASSERT_EQ(3U, snapshot.capacity_bytes);
++  ASSERT_EQ(3U, snapshot.lookups);
++  ASSERT_EQ(2U, snapshot.resident_misses);
++  const uint64_t original_generation = snapshot.capacity_generation;
++
++  cache_->ResetQuickMRCStats();
++  ASSERT_EQ(0U, cache_->GetQuickMRCCompleteMissCount());
++  ASSERT_TRUE(cache_->GetA4SCacheLookupCounters(&snapshot));
++  ASSERT_EQ(3U, snapshot.lookups);
++  ASSERT_EQ(2U, snapshot.resident_misses);
++  ASSERT_EQ(original_generation, snapshot.capacity_generation);
++
++  // A resize round-trip invalidates cross-boundary intervals even when the
++  // configured capacity equals its old value again.
++  cache_->SetCapacity(5);
++  cache_->SetCapacity(3);
++  cache_->SetCapacity(3);
++  ASSERT_TRUE(cache_->GetA4SCacheLookupCounters(&snapshot));
++  ASSERT_EQ(3U, snapshot.capacity_bytes);
++  ASSERT_EQ(original_generation + 2, snapshot.capacity_generation);
++  ASSERT_EQ(3U, snapshot.lookups);
++  ASSERT_EQ(2U, snapshot.resident_misses);
++}
++
++TEST_F(LRUCacheTest, A4SLookupSnapshotsAreCoherentDuringLookups) {
++  NewCache(3, 0.0, kDefaultToAdaptiveMutex, true);
++  constexpr uint64_t count = 4096;
++  std::atomic<bool> done{false};
++  std::thread writer([&] {
++    for (uint64_t i = 0; i < count; ++i) {
++      cache_->Lookup("always-absent", 0 /*hash*/);
++    }
++    done.store(true, std::memory_order_release);
++  });
++
++  uint64_t last = 0;
++  do {
++    A4SCacheLookupSnapshot snapshot;
++    EXPECT_TRUE(cache_->GetA4SCacheLookupCounters(&snapshot));
++    EXPECT_EQ(snapshot.lookups, snapshot.resident_misses);
++    EXPECT_GE(snapshot.lookups, last);
++    last = snapshot.lookups;
++  } while (!done.load(std::memory_order_acquire));
++
++  writer.join();
++  A4SCacheLookupSnapshot last_snapshot;
++  ASSERT_TRUE(cache_->GetA4SCacheLookupCounters(&last_snapshot));
++  ASSERT_EQ(count, last_snapshot.lookups);
++  ASSERT_EQ(count, last_snapshot.resident_misses);
++}
++
+ }  // namespace ROCKSDB_NAMESPACE
+ 
+ int main(int argc, char** argv) {
+diff --git a/java/rocksjni/lru_cache.cc b/java/rocksjni/lru_cache.cc
+index ee497cb..530f9d2 100644
+--- a/java/rocksjni/lru_cache.cc
++++ b/java/rocksjni/lru_cache.cc
+@@ -7,6 +7,7 @@
+ // ROCKSDB_NAMESPACE::LRUCache.
+ 
+ #include <jni.h>
++#include <limits>
+ #include <vector>
+ 
+ #include "cache/lru_cache.h"
+@@ -67,6 +68,39 @@ jlongArray Java_org_rocksdb_LRUCache_getStackDistanceHistogram(
+   return result;
+ }
+ 
++jlongArray Java_org_rocksdb_LRUCache_getA4SCacheLookupSnapshot(
++    JNIEnv* env, jclass /*jcls*/, jlong jhandle) {
++  auto* sptr_lru_cache =
++      reinterpret_cast<std::shared_ptr<ROCKSDB_NAMESPACE::Cache>*>(jhandle);
++  auto* cache =
++      static_cast<ROCKSDB_NAMESPACE::LRUCache*>(sptr_lru_cache->get());
++  ROCKSDB_NAMESPACE::A4SCacheLookupSnapshot snapshot;
++  if (cache == nullptr || !cache->GetA4SCacheLookupSnapshot(&snapshot)) {
++    return nullptr;
++  }
++
++  const uint64_t values[] = {1,
++                             snapshot.cache_id,
++                             snapshot.capacity_bytes,
++                             snapshot.capacity_generation,
++                             snapshot.shard_count,
++                             snapshot.lookups,
++                             snapshot.resident_misses};
++  constexpr jsize length = sizeof(values) / sizeof(values[0]);
++  jlong java_values[length];
++  for (jsize i = 0; i < length; ++i) {
++    if (values[i] > static_cast<uint64_t>(std::numeric_limits<jlong>::max())) {
++      return nullptr;
++    }
++    java_values[i] = static_cast<jlong>(values[i]);
++  }
++  auto result = env->NewLongArray(length);
++  if (result != nullptr) {
++    env->SetLongArrayRegion(result, 0, length, java_values);
++  }
++  return result;
++}
++
+ void Java_org_rocksdb_LRUCache_resetQuickMRCStats(JNIEnv* /*env*/,
+                                                    jclass /*jcls*/,
+                                                    jlong jhandle) {
+diff --git a/java/src/main/java/org/rocksdb/LRUCache.java b/java/src/main/java/org/rocksdb/LRUCache.java
+index 8d0af2e..c08fe69 100644
+--- a/java/src/main/java/org/rocksdb/LRUCache.java
++++ b/java/src/main/java/org/rocksdb/LRUCache.java
+@@ -117,6 +117,29 @@ public class LRUCache extends Cache {
+     resetQuickMRCStats(this.nativeHandle_);
+   }
+ 
++  /**
++   * Returns a coherent, versioned native cache lookup snapshot, or null when
++   * unavailable (disabled, closed, or unsupported cache geometry).
++   *
++   * <p>V1 array: [schemaVersion, cacheId, capacityBytes, capacityGeneration,
++   * shardCount, totalLookups, totalResidentMisses]. Counters are cumulative
++   * physical-cache events and do not reset with the stack-distance histogram.
++   * Cache ID is local to this JNI process; scope it by TaskManager attempt.
++   *
++   * @return a snapshot or null
++   */
++  public synchronized long[] getA4SCacheLookupSnapshot() {
++    return isOwningHandle() ? getA4SCacheLookupSnapshot(nativeHandle_) : null;
++  }
++
++  @Override
++  public synchronized void close() {
++    // Keep the Java-owned pointer alive for the full snapshot JNI call.
++    super.close();
++  }
++
++  private native static long[] getA4SCacheLookupSnapshot(final long handle);
++
+   private native static long newLRUCache(final long capacity,
+       final int numShardBits, final boolean strictCapacityLimit,
+       final double highPriPoolRatio);
