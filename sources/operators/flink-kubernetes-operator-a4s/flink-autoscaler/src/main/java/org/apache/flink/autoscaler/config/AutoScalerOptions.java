@@ -441,6 +441,7 @@ public class AutoScalerOptions {
             autoScalerConfig("a4s.calibrated-cache-costs")
                     .mapType()
                     .defaultValue(Map.of())
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.calibrated-cache-costs"))
                     .withDescription(
                             "Measured cache costs keyed by hexadecimal job vertex ID. Each value "
                                     + "is zeroMissCost/missPenalty in seconds per input record. "
