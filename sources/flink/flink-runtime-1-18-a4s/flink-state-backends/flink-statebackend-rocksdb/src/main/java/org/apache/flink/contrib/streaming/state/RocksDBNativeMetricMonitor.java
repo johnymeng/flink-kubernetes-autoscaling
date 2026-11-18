@@ -27,6 +27,8 @@ import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 
 import org.rocksdb.Cache;
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.HistogramData;
+import org.rocksdb.HistogramType;
 import org.rocksdb.LRUCache;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -41,6 +43,7 @@ import javax.annotation.concurrent.GuardedBy;
 
 import java.io.Closeable;
 import java.math.BigInteger;
+import java.util.Locale;
 
 /**
  * A monitor which pulls {{@link RocksDB}} native metrics and forwards them to Flink's metric group.
@@ -67,6 +70,8 @@ public class RocksDBNativeMetricMonitor implements Closeable {
 
     @Nullable private final LRUCache lruCache;
 
+    @Nullable private A4SBlockLatencyWindow a4sBlockLatency;
+
     public RocksDBNativeMetricMonitor(
             @Nonnull RocksDBNativeMetricOptions options,
             @Nonnull MetricGroup metricGroup,
@@ -81,6 +86,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         this.lock = new Object();
         registerStatistics();
         registerStackDistanceHistogram();
+        registerA4SBlockLatency();
     }
 
     /** Register gauges to pull native metrics for the database. */
@@ -90,6 +96,82 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                 metricGroup.gauge(
                         String.format("rocksdb.%s", tickerType.name().toLowerCase()),
                         new RocksDBNativeStatisticsMetricView(tickerType));
+            }
+        }
+    }
+
+    private void registerA4SBlockLatency() {
+        if (!options.isA4SBlockLatencyEnabled() || statistics == null) {
+            return;
+        }
+        A4SBlockLatencyWindow.Kind[] kinds = A4SBlockLatencyWindow.KINDS;
+        HistogramType[] histograms = new HistogramType[kinds.length];
+        try {
+            // Reflective for compatibility with the stock FRocksDB jar. A Java enum by itself
+            // is not sufficient: old JNI can silently map unknown histogram IDs to DB_GET.
+            Object abiVersion = Statistics.class.getMethod("a4sBlockLatencyAbiVersion").invoke(null);
+            if (!Integer.valueOf(1).equals(abiVersion)) {
+                LOG.warn("A4S block latency unavailable: unsupported RocksDB sampling ABI.");
+                return;
+            }
+            for (A4SBlockLatencyWindow.Kind kind : kinds) {
+                histograms[kind.ordinal()] =
+                        HistogramType.valueOf("A4S_DATA_BLOCK_" + kind.name() + "_NANOS");
+            }
+        } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            LOG.warn("A4S block latency unavailable: RocksDB JNI lacks the sampling patch.", e);
+            return;
+        }
+
+        A4SBlockLatencyWindow window = new A4SBlockLatencyWindow();
+        a4sBlockLatency = window;
+        metricGroup.gauge(
+                "rocksdb.a4s_block_miss_penalty_seconds",
+                new A4SBlockLatencyGauge(window, histograms));
+        for (A4SBlockLatencyWindow.Kind kind : kinds) {
+            String prefix = "rocksdb.a4s_block_" + kind.name().toLowerCase(Locale.ROOT);
+            metricGroup.gauge(
+                    prefix + "_samples", () -> window.latest(System.nanoTime()).count(kind));
+            metricGroup.gauge(
+                    prefix + "_seconds", () -> window.latest(System.nanoTime()).meanSeconds(kind));
+        }
+    }
+
+    private class A4SBlockLatencyGauge implements View, Gauge<Double> {
+        private final A4SBlockLatencyWindow window;
+        private final HistogramType[] histograms;
+        private boolean unavailable;
+
+        private A4SBlockLatencyGauge(A4SBlockLatencyWindow window, HistogramType[] histograms) {
+            this.window = window;
+            this.histograms = histograms;
+        }
+
+        @Override
+        public Double getValue() {
+            return window.latest(System.nanoTime()).missPenaltySeconds();
+        }
+
+        @Override
+        public void update() {
+            synchronized (lock) {
+                if (statistics == null || unavailable) {
+                    return;
+                }
+                try {
+                    long[] counts = new long[histograms.length];
+                    long[] sumsNs = new long[histograms.length];
+                    for (int i = 0; i < histograms.length; i++) {
+                        HistogramData histogram = statistics.getHistogramData(histograms[i]);
+                        counts[i] = histogram.getCount();
+                        sumsNs[i] = histogram.getSum();
+                    }
+                    window.observe(System.nanoTime(), counts, sumsNs);
+                } catch (RuntimeException | LinkageError e) {
+                    window.clear();
+                    unavailable = true;
+                    LOG.warn("Disabling unavailable A4S block latency telemetry for this database.", e);
+                }
             }
         }
     }
@@ -159,6 +241,9 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         synchronized (lock) {
             rocksDB = null;
             statistics = null;
+            if (a4sBlockLatency != null) {
+                a4sBlockLatency.clear();
+            }
         }
     }
 

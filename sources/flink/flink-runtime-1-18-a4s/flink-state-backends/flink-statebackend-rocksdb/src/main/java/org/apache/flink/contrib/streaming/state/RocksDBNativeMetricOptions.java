@@ -249,6 +249,14 @@ public class RocksDBNativeMetricOptions implements Serializable {
     //  RocksDB statistics based metrics, report at database level
     // --------------------------------------------------------------------------------------------
 
+    /** Reports sampled, point-read block latency for A4S diagnostics only. */
+    public static final ConfigOption<Boolean> MONITOR_A4S_BLOCK_LATENCY =
+            ConfigOptions.key("state.backend.rocksdb.metrics.a4s-block-latency")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Export shadow A4S block latency from a sampling-enabled native library.");
+
     public static final ConfigOption<Boolean> MONITOR_BLOCK_CACHE_HIT =
             ConfigOptions.key("state.backend.rocksdb.metrics.block-cache-hit")
                     .booleanType()
@@ -436,6 +444,7 @@ public class RocksDBNativeMetricOptions implements Serializable {
 
     private static void configureStatisticsMetrics(
             RocksDBNativeMetricOptions options, ReadableConfig config) {
+        options.monitorA4SBlockLatency = config.get(MONITOR_A4S_BLOCK_LATENCY);
         for (Map.Entry<ConfigOption<Boolean>, TickerType> entry : tickerTypeMapping.entrySet()) {
             if (config.get(entry.getKey())) {
                 options.monitorTickerTypes.add(entry.getValue());
@@ -472,6 +481,7 @@ public class RocksDBNativeMetricOptions implements Serializable {
 
     private final Set<String> properties;
     private final Set<TickerType> monitorTickerTypes;
+    private boolean monitorA4SBlockLatency;
     private boolean columnFamilyAsVariable = COLUMN_FAMILY_AS_VARIABLE.defaultValue();
     private boolean monitorStackDistanceHistogram = MONITOR_STACK_DISTANCE_HISTOGRAM.defaultValue();
     private int stackDistanceHistogramBucketSizeScaling =
@@ -670,7 +680,11 @@ public class RocksDBNativeMetricOptions implements Serializable {
 
     /** @return true if RocksDB statistics metrics are enabled, false otherwise. */
     public boolean isStatisticsEnabled() {
-        return !monitorTickerTypes.isEmpty();
+        return !monitorTickerTypes.isEmpty() || isA4SBlockLatencyEnabled();
+    }
+
+    boolean isA4SBlockLatencyEnabled() {
+        return monitorA4SBlockLatency;
     }
 
     /** Enables the stack distance histogram metric. */
