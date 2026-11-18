@@ -25,6 +25,7 @@ import org.apache.flink.configuration.MemorySize;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 /** Config options related to the autoscaler module. */
 public class AutoScalerOptions {
@@ -435,6 +436,15 @@ public class AutoScalerOptions {
                     .defaultValue(5e-6 * 1000)
                     .withDescription(
                             "Latency (in sec) for a cache miss operation.");
+
+    public static final ConfigOption<Map<String, String>> A4S_CALIBRATED_CACHE_COSTS =
+            autoScalerConfig("a4s.calibrated-cache-costs")
+                    .mapType()
+                    .defaultValue(Map.of())
+                    .withDescription(
+                            "Measured cache costs keyed by hexadecimal job vertex ID. Each value "
+                                    + "is zeroMissCost/missPenalty in seconds per input record. "
+                                    + "Vertices without an entry use the configured legacy latencies.");
 
     public static final ConfigOption<Boolean> A4S_MANAGED_MEMORY_OVERRIDE_ENABLED =
             autoScalerConfig("a4s.managed-memory-override.enabled")

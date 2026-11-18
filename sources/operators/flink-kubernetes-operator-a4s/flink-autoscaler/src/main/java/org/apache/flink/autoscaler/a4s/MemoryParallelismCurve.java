@@ -159,21 +159,76 @@ public class MemoryParallelismCurve {
             int minParallelism,
             int maxParallelism,
             MissRateCurve mrc) {
-        Builder builder = builder().targetThroughput(targetThroughputPerSec);
         double latencyDiff = missLatencySec - hitLatencySec;
 
         if (latencyDiff <= 0) {
             throw new IllegalArgumentException("missLatencySec (" + missLatencySec + ") should be greater than hitLatencySec (" + hitLatencySec + ")");
         }
 
+        return buildFromMissRateCurve(
+                targetThroughputPerSec,
+                hitLatencySec,
+                latencyDiff,
+                minParallelism,
+                maxParallelism,
+                mrc,
+                false);
+    }
+
+    /** Invert the measured per-record cost, omitting parallelisms below the zero-miss budget. */
+    public static MemoryParallelismCurve fromCalibratedMissRateCurve(
+            double targetThroughputPerSec,
+            double zeroMissSecPerRecord,
+            double missPenaltySecPerRecord,
+            int minParallelism,
+            int maxParallelism,
+            MissRateCurve mrc) {
+        if (!Double.isFinite(zeroMissSecPerRecord)
+                || zeroMissSecPerRecord <= 0
+                || !Double.isFinite(missPenaltySecPerRecord)
+                || missPenaltySecPerRecord <= 0) {
+            throw new IllegalArgumentException("Calibrated cache costs must be positive and finite");
+        }
+        if (!Double.isFinite(targetThroughputPerSec)
+                || targetThroughputPerSec < 0
+                || mrc.getPoints().isEmpty()) {
+            return builder().targetThroughput(targetThroughputPerSec).build();
+        }
+        return buildFromMissRateCurve(
+                targetThroughputPerSec,
+                zeroMissSecPerRecord,
+                missPenaltySecPerRecord,
+                minParallelism,
+                maxParallelism,
+                mrc,
+                true);
+    }
+
+    private static MemoryParallelismCurve buildFromMissRateCurve(
+            double targetThroughputPerSec,
+            double zeroMissSecPerRecord,
+            double missPenaltySecPerRecord,
+            int minParallelism,
+            int maxParallelism,
+            MissRateCurve mrc,
+            boolean calibrated) {
+        Builder builder = builder().targetThroughput(targetThroughputPerSec);
         for (int parallelism = minParallelism; parallelism <= maxParallelism; parallelism++) {
             // This is the maximum acceptable miss rate. We need a cache size
             // that achieves this miss rate or lower
-            double maximumMissRate = ((parallelism / targetThroughputPerSec) - hitLatencySec) / latencyDiff;
+            double maximumMissRate =
+                    ((parallelism / targetThroughputPerSec) - zeroMissSecPerRecord)
+                            / missPenaltySecPerRecord;
 
-            // It's impossible to achieve the desired throughput with the given parallelism and hit latency
-            if (maximumMissRate <= 0) {
-                throw new IllegalStateException(String.format("Maximum miss-rate <= 0. parallelism=%d targetThroughput=%f hitLatencySec=%f missLatencySec=%f", parallelism, targetThroughputPerSec, hitLatencySec, missLatencySec));
+            if (calibrated && maximumMissRate < 0) {
+                continue;
+            }
+            if (!calibrated && maximumMissRate <= 0) {
+                throw new IllegalStateException(
+                        String.format(
+                                "Maximum miss-rate <= 0. parallelism=%d targetThroughput=%f hitLatencySec=%f missLatencySec=%f",
+                                parallelism, targetThroughputPerSec, zeroMissSecPerRecord,
+                                zeroMissSecPerRecord + missPenaltySecPerRecord));
             }
 
             // Perhaps any level miss rate is acceptable, so we clamp to 1.0

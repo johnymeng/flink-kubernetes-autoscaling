@@ -95,8 +95,14 @@ public class A4S {
                             getCurrent();
                     })
         ));
-        
-        
+
+        // Calibrated curves may start above the requested parallelism when the all-hit
+        // processing time alone exceeds the budget. Placement and retries start at the same point.
+        mpcs.forEach(
+                (vertex, curve) ->
+                        parallelismForVertex.computeIfPresent(
+                                vertex, (id, requested) -> Math.max(requested, curve.getMinParallelism())));
+
         double maxManagedMemoryMB = 600 - conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
         int maxAttempts = conf.get(AutoScalerOptions.A4S_MAX_ATTEMPTS);
 
