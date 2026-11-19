@@ -160,6 +160,25 @@ def analyze(folder):
         native = proof.get("native_cache_bytes", {})
         if set(native) != {str(i) for i in range(p)} or any(value <= 0 for value in native.values()):
             issues.append(f"Missing live join cache capacity for {transaction}")
+        if (not restored.get("is_savepoint") or restored.get("external_path") != end["savepoint"]
+                or proof.get("savepoint") != end["savepoint"]):
+            issues.append(f"Restored savepoint path disagrees with the resize receipt for {transaction}")
+        requested = start.get("proposed_parallelism") or {}
+        running = {v["id"]: str(v["parallelism"]) for v in proof.get("job", {}).get("vertices", [])}
+        managed = end["join_managed_bytes"]
+        if (requested != running or requested != end["observed_parallelism"]
+                or start.get("proposed_managed_bytes", {}).get(JOIN) != managed):
+            issues.append(f"Live vertex parallelism or slot request disagrees with proposal {transaction}")
+        locations = {str(task["subtask"]): task["taskmanager-id"] for task in proof.get("join", {}).get("subtasks", [])
+                     if task.get("status") == "RUNNING"}
+        by_pod = proof.get("join_placement_by_pod", {})
+        placed = {index: pod for pod, slots in by_pod.items() for index in slots}
+        matching_slots = sum(slot.get("jobId") == start.get("job_id") and
+                             slot.get("resource", {}).get("managedMemory", -1) * 1024**2 == managed
+                             for tm in proof.get("taskmanagers", {}).values() for slot in tm.get("allocatedSlots", []))
+        if (locations != placed or len(placed) != p or matching_slots < p
+                or proof.get("allocated_slot_count_for_join_bytes") != matching_slots):
+            issues.append(f"Running subtasks and allocated managed-memory slots disagree for {transaction}")
         off = {e["type"]: e["epoch"] for e in events if e.get("transaction") == transaction}
         offline = (off["source_offline_end"] - off["source_offline_start"]
                    if {"source_offline_start", "source_offline_end"} <= off.keys() else None)
@@ -211,6 +230,8 @@ def analyze(folder):
     elapsed = end_epoch - release if finished and end_epoch and end_epoch > release else None
     if not finished or drained != set(expected):
         issues.append("Terminal FINISHED and every partition end offset were not both verified")
+    if finished and not elapsed:
+        issues.append("Missing positive wall time from input release to job completion")
     completed = full if finished and drained == set(expected) else None
     samples = [(r["epoch"], sum(r[k]["q8Backlog"] for k in expected)) for r in progress
                if r["epoch"] >= release and all(r.get(k, {}).get("q8Backlog") is not None for k in expected)]
