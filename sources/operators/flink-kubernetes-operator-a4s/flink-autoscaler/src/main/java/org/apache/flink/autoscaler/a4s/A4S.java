@@ -83,7 +83,17 @@ public class A4S {
      * Make a scaling decision using the A4S algorithm.
      */
     public Map<JobVertexID, Decision> makeDecision(Configuration conf) {
-        Map<JobVertexID, MemoryParallelismCurve> mpcs = this.evaluatedMetrics.getMemoryParallelismCurves();
+        if (!conf.getBoolean("state.backend.rocksdb.memory.managed", true)
+                || conf.getString("state.backend.rocksdb.memory.fixed-per-slot", null) != null) {
+            // Changing a slot reservation cannot resize an independently sized native cache.
+            // The executor retains the live reservation when a cache has no placement decision.
+            LOG.info("A4S: Retaining cache budgets because RocksDB cache size is independent of managed slot memory");
+            return Map.of();
+        }
+        double writeBufferRatio = conf.getDouble("state.backend.rocksdb.memory.write-buffer-ratio", 0.5);
+        Map<JobVertexID, MemoryParallelismCurve> mpcs = new HashMap<>();
+        evaluatedMetrics.getMemoryParallelismCurves().forEach((vertex, curve) ->
+                mpcs.put(vertex, curve.forManagedMemoryPerSlot(writeBufferRatio)));
         Map<JobVertexID, Integer> parallelismForVertex = operators.
             stream().collect(Collectors.toMap(
                 operator -> operator,

@@ -106,6 +106,26 @@ public class MemoryParallelismCurve {
             .findFirst();
     }
 
+    /**
+     * Convert a curve in whole-vertex native cache MiB to per-slot managed MiB.
+     * The merged MRC scales the capacity axis by the number of source partitions.
+     * At a candidate parallelism, A4S assumes an even split of that working set.
+     * Flink's RocksDBMemoryControllerUtils allocates (3 - writeBufferRatio) / 3
+     * of the RocksDB managed budget as native cache capacity.
+     */
+    MemoryParallelismCurve forManagedMemoryPerSlot(double writeBufferRatio) {
+        if (!(writeBufferRatio > 0 && writeBufferRatio < 1)) {
+            throw new IllegalArgumentException("Invalid RocksDB write-buffer ratio: " + writeBufferRatio);
+        }
+        Builder slots = builder().targetThroughput(targetThroughput);
+        for (Point point : points) {
+            double nativeMiBPerSlot = point.memoryMB / point.parallelism;
+            double managedMiBPerSlot = nativeMiBPerSlot * 3.0 / (3.0 - writeBufferRatio);
+            slots.addPoint(point.parallelism, managedMiBPerSlot, point.supportedCacheSize);
+        }
+        return slots.build();
+    }
+
     /** A target below 100% that a point on the measured miss-rate curve can meet. */
     public boolean hasSupportedCacheSize(int parallelism) {
         return points.stream()
