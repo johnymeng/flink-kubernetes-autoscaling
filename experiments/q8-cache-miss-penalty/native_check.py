@@ -38,13 +38,40 @@ def targets(overrides, join_id=JOIN):
         amount = re.search(r"managedMemory=[^,]*?\((\d+) bytes\)", resource)
         if amount:
             memory[vertex] = int(amount[1])
-    if join_id in counts and join_id in memory:
+    if join_id in counts and counts.keys() == memory.keys():
         return {"parallelism": counts, "join_bytes_per_slot": memory[join_id], "managed_bytes_by_vertex": memory}
     return None
 
 
+def slot_profile(row):
+    """Reconcile the job's occupied physical slots with the cluster overview."""
+    overview = row.get("overview") or {}
+    workers = row.get("physical_slots") or []
+    join_p = row.get("parallelism", {}).get(row.get("join_id", JOIN))
+    join_bytes = row.get("join_managed_slot_bytes")
+    if not join_p or join_bytes is None or not workers:
+        return None
+    total = sum(w["total_slots"] for w in workers)
+    occupied = sum(len(w["job_slot_managed_mib"]) for w in workers)
+    if (len({w["id"] for w in workers}) != len(workers)
+            or overview.get("taskmanagers") != len(workers) or overview.get("slots-total") != total
+            or overview.get("slots-available") != total - occupied
+            or any(w["total_slots"] - w["free_slots"] != len(w["job_slot_managed_mib"]) for w in workers)):
+        return None
+    return {"join_parallelism": join_p, "join_managed_slot_bytes": join_bytes,
+            "occupied_slots": occupied, "total_slots": total, "workers": len(workers)}
+
+
+def recorded_profile(row):
+    if row is None:
+        return None
+    # Effective RocksDB capacity is a separate observation from task managed memory.
+    cache = allocation(row) or {}
+    return {**slot_profile(row), "native_bytes_per_join": cache.get("native_bytes_per_join")}
+
+
 def verified(row, target):
-    profile = allocation(row)
+    profile = slot_profile(row)
     wanted = target["parallelism"]
     if (not profile or row.get("state") != "RUNNING" or row.get("running_tasks") != row.get("parallelism")
             or any(row["parallelism"].get(key) != p for key, p in wanted.items())
@@ -53,11 +80,13 @@ def verified(row, target):
             or profile["join_managed_slot_bytes"] != target["join_bytes_per_slot"]):
         return False
     locations = row.get("join_locations", {})
-    if set(locations) != {str(i) for i in range(wanted[row.get("join_id", JOIN)])}:
+    join_id = row.get("join_id", JOIN)
+    if join_id not in wanted or set(locations) != {str(i) for i in range(wanted[join_id])}:
         return False
-    matching = {tm["id"]: sum(size * MIB == target["join_bytes_per_slot"] for size in tm["job_slot_managed_mib"])
-                for tm in row.get("physical_slots", [])}
-    return all(matching.get(tm, 0) >= count for tm, count in Counter(locations.values()).items())
+    slots = {tm["id"]: tm["job_slot_managed_mib"] for tm in row["physical_slots"]}
+    # The job endpoint identifies a subtask's TaskManager, not its slot within the manager.
+    return all(len(slots.get(tm, [])) >= count and all(size * MIB == target["join_bytes_per_slot"] for size in slots[tm])
+               for tm, count in Counter(locations.values()).items())
 
 
 def kafka_evidence(folder, release, end):
@@ -174,8 +203,9 @@ def analyze_arm(folder):
     workers = initial.get("physical_slots", [])
     initial_slots = {"total": sum(tm["total_slots"] for tm in workers),
                      "occupied_by_job": sum(len(tm["job_slot_managed_mib"]) for tm in workers)}
-    baseline = next((p for row in initial_rows if row.get("parallelism") == initial.get("parallelism")
-                     and (p := allocation(row)) and p["occupied_slots"] == initial_slots["occupied_by_job"]), None)
+    initial_row = next((row for row in initial_rows if row.get("parallelism") == initial.get("parallelism")
+                        and (p := slot_profile(row)) and p["occupied_slots"] == initial_slots["occupied_by_job"]), None)
+    baseline = slot_profile(initial_row) if initial_row else None
     if initial_slots != {"total": 2, "occupied_by_job": 2}:
         issues.append("Initial physical allocation of two occupied slots was not confirmed")
     filled = [s for s in resources if s["values"]["task_slots_used"] is not None]
@@ -220,12 +250,12 @@ def analyze_arm(folder):
                       "observed_from_release_s": complete - release if complete else None,
                       "decision_to_observed_s": complete - report if complete and report is not None else None,
                       "ack_to_observed_s": complete - ack if complete else None,
-                      "observed_profile": allocation(snapshot) if snapshot else None})
+                      "observed_profile": recorded_profile(snapshot)})
     if reissued:
         outcome = "restart_observed"
     elif spans:
         outcome = "in_place_verified" if same_jm and all(s["observed_profile"] for s in spans) else "in_place_acknowledged_only"
-    elif changes or (baseline and any(allocation(r) and allocation(r) != baseline for r in progress)):
+    elif changes or (baseline and any((p := slot_profile(r)) and p != baseline for r in progress)):
         outcome = "target_or_resource_change_without_in_place_ack"
         issues.append("Observed target or physical allocation changed without a native acknowledgement")
     else:
@@ -246,6 +276,9 @@ def analyze_arm(folder):
     if kafka:
         generations, live_rate, broker_issues = kafka_evidence(folder, release, end)
         issues.extend(broker_issues)
+        producer = read(folder / "kafka-result.json")
+        if producer.get("status") != "complete":
+            issues.append("The Kafka producer coordinator did not complete the measured window")
     if not kafka and live_rate is None:
         issues.append("Insufficient live source offer counters to verify sustained 80k input")
     scoped_log = folder / "operator.log"
@@ -265,10 +298,11 @@ def analyze_arm(folder):
         issues.append("Operator logs did not confirm a qualified online cache cost for the Q8 join")
     return {"outcome": outcome, "window_s": end - release,
             "source_mode": plan.get("source_mode", "replay"), "join_id": join_id,
-            "sampling_period_s": 5, "initial_profile": baseline, "initial_slots": initial_slots,
+            "sampling_period_s": 5, "initial_profile": recorded_profile(initial_row), "initial_slots": initial_slots,
             "last_observed_occupied_slots": filled[-1]["values"]["task_slots_used"] if filled else None,
             "observed_occupied_slots": sorted({s["values"]["task_slots_used"] for s in filled}),
             "failed_in_place_requests": fallbacks,
+            "join_cost_at_scaling_reports": join_cost_at_reports(lines, join_id, plan["arm"] == "calibrated"),
             "kafka_producer_generations": generations, "observed_offered_records_per_second": live_rate, "job_start_epochs_ms": starts,
             "jobmanager_pods": sorted(pods), "scaling_reports_from_release_s": [t-release for t in decisions],
             "suspended_from_release_s": [t-release for t in suspended], "transactions": spans,
@@ -280,6 +314,23 @@ def analyze_arm(folder):
 
 def created_time(created):
     return datetime.fromisoformat(created["metadata"]["creationTimestamp"].replace("Z", "+00:00")).timestamp()
+
+
+def join_cost_at_reports(lines, join_id, online_enabled):
+    """Read the join evaluation immediately preceding each operator ScalingReport."""
+    reports = []
+    model = "unobserved"
+    for line in lines:
+        if f"Evaluating metrics for vertex {join_id}" in line:
+            model = "fixed_fallback" if online_enabled else "fixed"
+        elif f"No usable miss rate curve found for vertex {join_id}" in line:
+            model = "no_usable_curve"
+        elif f"A4S online cache costs for vertex {join_id}:" in line:
+            model = "online"
+        elif "SCALINGREPORT" in line and "Scaling execution enabled" in line:
+            reports.append({"operator_utc": line.split(" ", 1)[0], "join_cost": model})
+            model = "unobserved"
+    return reports
 
 
 def fallback_failures(lines, release, end, reports):

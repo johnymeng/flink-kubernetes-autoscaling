@@ -64,6 +64,25 @@ class NativeTimingTest(unittest.TestCase):
             sample = capture(pool, get, "/job", kafka=True)
         self.assertEqual(sample["values"]["source_records_per_second"], 123.5)
 
+    def test_stale_kafka_meters_after_native_resize_leave_a_chart_gap(self):
+        from quick_series import confirmed_kafka_rates
+        def row(t, persons, auctions, start=1):
+            sources = []
+            for vid, count in (("p", persons), ("a", auctions)):
+                prefix = f"0.Source__{vid}."
+                sources.append({"vertex_id": vid, "values": [
+                    {"id": prefix + "numRecordsOut", "value": str(count)},
+                    {"id": prefix + "numRecordsOutPerSecond", "value": "10"}]})
+            return {"elapsed_sec": t, "job_state": "RUNNING", "job_start_epoch_ms": start,
+                    "values": {"source_records_per_second": 20}, "sources": sources}
+        rows = [row(0, 3, 5), row(5, 3, 5), row(10, 3, 5), row(15, 3, 5),
+                row(20, 4, 6), row(25, 5, 6), row(30, 6, 7, start=2), row(35, 7, 8, start=2),
+                row(40, 8, 9, start=2)]
+        transactions = [{"in_place_ack_from_release_s": 5, "ack_to_running_requested_parallelism_s": 5},
+                        {"in_place_ack_from_release_s": 40, "ack_to_running_requested_parallelism_s": None}]
+        self.assertEqual(list(confirmed_kafka_rates(rows, transactions)),
+                         [20, None, None, None, 20, None, None, 20, None])
+
     def test_sql_q8_identifies_join_without_datastream_uid(self):
         vertices = [{"id": "p", "name": "Source: person_kafka[1] -> Calc[2]"},
                     {"id": "a", "name": "Source: auction_kafka[7] -> Calc[8]"},
@@ -74,18 +93,44 @@ class NativeTimingTest(unittest.TestCase):
         self.assertEqual(join, "j")
 
     def test_observed_tasks_and_slots_distinguish_ack_from_placement(self):
-        target = {"parallelism": {JOIN: 2}, "join_bytes_per_slot": 32 * MIB}
+        target = {"parallelism": {JOIN: 2}, "join_bytes_per_slot": 32 * MIB,
+                  "managed_bytes_by_vertex": {JOIN: 32 * MIB}}
         sample = {"state": "RUNNING", "parallelism": {JOIN: 2}, "running_tasks": {JOIN: 1},
                   "native": {"0": 1024, "1": 1024}, "join_managed_slot_bytes": 32 * MIB,
-                  "overview": {"slots-total": 4, "slots-available": 0, "taskmanagers": 2},
+                  "managed_bytes_by_vertex": {JOIN: 32 * MIB},
+                  "overview": {"slots-total": 4, "slots-available": 1, "taskmanagers": 2},
                   "join_locations": {"0": "tm1", "1": "tm2"},
-                  "physical_slots": [{"id": "tm1", "job_slot_managed_mib": [32, 32]},
-                                     {"id": "tm2", "job_slot_managed_mib": [32]}]}
+                  "physical_slots": [{"id": "tm1", "total_slots": 2, "free_slots": 0, "job_slot_managed_mib": [32, 32]},
+                                     {"id": "tm2", "total_slots": 2, "free_slots": 1, "job_slot_managed_mib": [32]}]}
         self.assertFalse(verified(sample, target))
         sample["running_tasks"][JOIN] = 2
         self.assertTrue(verified(sample, target))
+        sample["native"] = {}
+        self.assertTrue(verified(sample, target))
+        self.assertFalse(verified(sample | {"join_locations": {"0": "tm1"}}, target))
+        self.assertFalse(verified(sample | {"managed_bytes_by_vertex": {}}, target))
+        self.assertFalse(verified(sample | {"physical_slots": sample["physical_slots"][:1]}, target))
+        # Flink recorded the join's TaskManager, but not its specific slot ID.
+        sample["physical_slots"][0]["job_slot_managed_mib"] = [32, 158]
+        self.assertFalse(verified(sample, target))
+        sample["physical_slots"][0]["job_slot_managed_mib"] = [32, 32]
         sample["physical_slots"][1]["job_slot_managed_mib"] = [158]
         self.assertFalse(verified(sample, target))
+
+    def test_incomplete_requested_memory_cannot_verify_a_resize(self):
+        other_vertex = "0" * 32
+        overrides = {P_KEY: f"{JOIN}:2,{other_vertex}:1", RP_KEY:
+                     f"'{JOIN}:ResourceProfile{{managedMemory=32.000mb (33554432 bytes)}}'"}
+        self.assertIsNone(targets(overrides))
+
+    def test_scaling_report_keeps_its_join_evaluation(self):
+        from native_check import join_cost_at_reports
+        reports = join_cost_at_reports([
+            f"t1 Evaluating metrics for vertex {JOIN}", f"t2 A4S online cache costs for vertex {JOIN}: fit",
+            f"t3 Evaluating metrics for vertex {JOIN}", f"t4 No usable miss rate curve found for vertex {JOIN}",
+            "t5 SCALINGREPORT Scaling execution enabled",
+            "t6 SCALINGREPORT Scaling execution enabled"], JOIN, True)
+        self.assertEqual([item["join_cost"] for item in reports], ["no_usable_curve", "unobserved"])
 
     def test_duplicate_kubernetes_event_polls_and_aggregate_repeats(self):
         event = {"uid": "evt", "reason": "Scaling", "message": "In-place scaling triggered",

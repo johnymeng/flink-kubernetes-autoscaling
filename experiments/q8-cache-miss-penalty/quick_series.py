@@ -23,6 +23,51 @@ COLS = ("source_records_per_second", "managed_memory_used_bytes",
 PERIOD = 5
 
 
+def kafka_source_counters(row):
+    readings = {}
+    for source in row.get("sources", []):
+        metrics = {m["id"]: m["value"] for m in source.get("values") or []}
+        counts = {key for key in metrics if key.endswith(".numRecordsOut")}
+        rates = {key.removesuffix("PerSecond") for key in metrics if key.endswith(".numRecordsOutPerSecond")}
+        if not counts or counts != rates:
+            return {}
+        for key in counts:
+            try:
+                count = int(metrics[key])
+                rate = float(metrics[key + "PerSecond"])
+            except (TypeError, ValueError, OverflowError):
+                return {}
+            if count < 0 or not isfinite(rate) or rate < 0:
+                return {}
+            readings[source["vertex_id"], key] = (count, rate)
+    return readings
+
+
+def confirmed_kafka_rates(rows, transactions):
+    """After native scaling, Flink REST can retain the prior execution's meters."""
+    previous = {}
+    previous_execution = None
+    for row in rows:
+        elapsed = row["elapsed_sec"]
+        rate = row["values"]["source_records_per_second"]
+        change = next((step for step in reversed(transactions) if step["in_place_ack_from_release_s"] <= elapsed), None)
+        if change is None:
+            yield rate
+            continue
+        ack = change["in_place_ack_from_release_s"]
+        recovery = change.get("ack_to_running_requested_parallelism_s")
+        execution = (ack, row.get("job_start_epoch_ms"))
+        current = {}
+        if recovery is not None and elapsed >= ack + recovery and row.get("job_state") == "RUNNING":
+            current = kafka_source_counters(row)
+        confirmed = (execution == previous_execution and current and current.keys() == previous.keys()
+                     and all(count >= previous[key][0] and (meter == 0 or count > previous[key][0])
+                             for key, (count, meter) in current.items())
+                     and any(count > previous[key][0] for key, (count, _) in current.items()))
+        yield rate if confirmed else None
+        previous, previous_execution = current, execution
+
+
 def measure(metrics, names):
     if not isinstance(metrics, list):
         return None

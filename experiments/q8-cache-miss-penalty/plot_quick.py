@@ -14,6 +14,7 @@ from pathlib import Path
 
 from matplotlib import pyplot as plt
 from matplotlib.ticker import MaxNLocator, StrMethodFormatter
+from quick_series import confirmed_kafka_rates
 
 METRICS = ("source_records_per_second", "managed_memory_used_bytes",
            "managed_memory_allocated_bytes", "task_slots_used")
@@ -182,6 +183,8 @@ def main():
             result_path = args.pair.parent / "quick-results.json"
         native_results = json.loads(result_path.read_text())
     kafka = native and all(result.get("source_mode") == "kafka" for result in native_results.values())
+    if native:
+        cases["calibrated"] = "a4s-cache-miss-penalty · online estimation enabled"
     producer_rate = offered if kafka else None
     if kafka:
         # The producer also writes bids; the Q8 source throughput counts only persons and auctions.
@@ -192,6 +195,10 @@ def main():
     for case in cases:
         records[case], elapsed_finish[case], ended_at_deadline[case] = read_arm(
             args.pair / case, case, args.window_seconds)
+        if kafka:
+            samples = records[case]
+            for sample, rate in zip(samples, confirmed_kafka_rates(samples, native_results[case]["transactions"])):
+                sample["values"]["source_records_per_second"] = rate
     upstream = load_ryan_plotter(args.ryan_plotter, args.output)
     if native:
         controllers = {arm: {"mode": mode, "revision": json.loads((args.pair / arm / "operator.json").read_text())["revision"]}
@@ -217,7 +224,7 @@ def main():
         "pdf.fonttype": 42,
     })
     fig, axes = plt.subplots(3, 2, figsize=(11, 7.7), sharex=True, sharey="row")
-    fig.subplots_adjust(left=0.11, bottom=0.125, right=0.975, top=0.81, wspace=0.13, hspace=0.24)
+    fig.subplots_adjust(left=0.11, bottom=0.17, right=0.975, top=0.81, wspace=0.13, hspace=0.24)
     fig.suptitle("Nexmark Q8 on the lab cluster", fontsize=19, fontweight="bold", x=0.11,
                  y=0.963, ha="left")
     release_times = [records[arm][0]["release_epoch"] for arm in cases]
@@ -228,7 +235,8 @@ def main():
     subtitle = f"{schedule} · identical paced input · {method}"
     if any(ended_at_deadline.values()):
         horizon = max(elapsed_finish[c] for c in cases if ended_at_deadline[c])
-        subtitle = f"{schedule} · first {horizon:g} s from input release · {method}"
+        origin = "scheduled producer start" if kafka else "input release"
+        subtitle = f"{schedule} · {horizon:g} s from {origin} · {method}"
     if producer_rate:
         subtitle += f" · producer target {producer_rate:,.0f} mixed events/s"
     fig.text(0.11, 0.908, subtitle, fontsize=10.5, color="#475569")
@@ -296,11 +304,14 @@ def main():
     axes[0, 0].yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
     axes[2, 0].yaxis.set_major_locator(MaxNLocator(integer=True))
     axes[1, 0].legend(loc="best", frameon=True, framealpha=0.95, edgecolor="#e2e8f0")
-    shading = "in-place acknowledgement to observed placement or cutoff" if native else "resize to verified restore or cutoff"
-    caption = f"5 s REST samples. Gaps mark missing data. Shading spans {shading}. Memory sums TaskManager managed pools."
+    shading = "scale acknowledgement to verified placement" if native else "resize to verified restore"
+    caption = ["5 s REST samples. Gaps mark missing data. Memory sums the TaskManager managed pools.",
+               f"Shading shows {shading}, ending at the observation cutoff if unverified."]
+    if kafka and any(result["transactions"] for result in native_results.values()):
+        caption.append("Post-resize throughput requires fresh Kafka source output counters.")
     if any(result.get("failed_in_place_requests") for result in native_results.values()):
-        caption += "\nDashed red lines mark failed in-place updates."
-    fig.text(0.11, 0.039, caption,
+        caption.append("Dashed red lines mark failed in-place updates.")
+    fig.text(0.11, 0.022, "\n".join(caption),
              fontsize=8.7, color="#475569")
     for format_ in ("png",):
         fig.savefig(args.output / f"q8-resource-comparison.{format_}", dpi=200, format=format_)
