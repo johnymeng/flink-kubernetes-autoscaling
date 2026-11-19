@@ -48,7 +48,7 @@ public final class A4SBlockLatencySmoke {
             throw new IllegalArgumentException("Use a new disposable DB path");
         }
         RocksDB.loadLibrary();
-        if (Statistics.a4sBlockLatencyAbiVersion() != 1) {
+        if (Statistics.a4sBlockLatencyAbiVersion() != 3) {
             throw new AssertionError("unexpected RocksDB ABI");
         }
 

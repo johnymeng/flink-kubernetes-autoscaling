@@ -51,6 +51,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.IdentityHashMap;
+import java.util.Map;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -63,6 +65,10 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
  */
 public final class RocksDBResourceContainer implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBResourceContainer.class);
+
+    private static final boolean TRACK_CACHE_OWNERS =
+            "1".equals(System.getenv("FLINK_A4S_COUNT_CACHE_LOOKUPS"));
+    private static final Map<Cache, CacheOwners> CACHE_OWNERS = new IdentityHashMap<>();
 
     private static final String ROCKSDB_RELOCATE_LOG_SUFFIX = "_LOG";
 
@@ -87,6 +93,8 @@ public final class RocksDBResourceContainer implements AutoCloseable {
      * want exceptions to be reported.
      */
     @Nullable private final OpaqueMemoryResource<RocksDBSharedResources> sharedResources;
+    @Nullable private final Cache observedCache;
+    private boolean observingCache;
 
     private final boolean enableStatistics;
 
@@ -134,6 +142,31 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
         this.enableStatistics = enableStatistics;
         this.handlesToClose = new ArrayList<>();
+        this.observedCache = TRACK_CACHE_OWNERS ? getBlockCache() : null;
+        if (observedCache != null) {
+            synchronized (CACHE_OWNERS) {
+                CacheOwners owners =
+                        CACHE_OWNERS.computeIfAbsent(observedCache, cache -> new CacheOwners());
+                if (owners.count > 0) {
+                    owners.exclusive = false;
+                }
+                owners.count++;
+                observingCache = true;
+            }
+        }
+    }
+
+    static boolean hasExclusiveCacheOwner(Cache cache) {
+        synchronized (CACHE_OWNERS) {
+            CacheOwners owners = CACHE_OWNERS.get(cache);
+            return owners != null && owners.exclusive && owners.count == 1;
+        }
+    }
+
+    private static final class CacheOwners {
+        private int count;
+        // A previously shared cache carries cumulative observations from the other owner.
+        private boolean exclusive = true;
     }
 
     /** Gets the RocksDB {@link DBOptions} to be used for RocksDB instances. */
@@ -284,6 +317,17 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
+        if (observedCache != null) {
+            synchronized (CACHE_OWNERS) {
+                if (observingCache) {
+                    CacheOwners owners = CACHE_OWNERS.get(observedCache);
+                    if (--owners.count == 0) {
+                        CACHE_OWNERS.remove(observedCache);
+                    }
+                    observingCache = false;
+                }
+            }
+        }
         handlesToClose.forEach(IOUtils::closeQuietly);
         handlesToClose.clear();
 

@@ -19,11 +19,16 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.Internal;
+import org.apache.flink.a4s.core.StackDistanceHistogram;
+import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.View;
-import org.apache.flink.a4s.core.StackDistanceHistogram;
-import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
+import org.apache.flink.runtime.executiongraph.IOMetrics;
+import org.apache.flink.runtime.metrics.A4SHistogramMetricCodec;
+import org.apache.flink.runtime.metrics.groups.InternalOperatorMetricGroup;
+import org.apache.flink.runtime.metrics.scope.ScopeFormat;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SCacheCostSample;
 
 import org.rocksdb.Cache;
 import org.rocksdb.ColumnFamilyHandle;
@@ -42,6 +47,7 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
 import java.io.Closeable;
+import java.lang.reflect.Method;
 import java.math.BigInteger;
 import java.util.Locale;
 
@@ -106,11 +112,13 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         }
         A4SBlockLatencyWindow.Kind[] kinds = A4SBlockLatencyWindow.KINDS;
         HistogramType[] histograms = new HistogramType[kinds.length];
+        int abiVersion;
         try {
             // Reflective for compatibility with the stock FRocksDB jar. A Java enum by itself
             // is not sufficient: old JNI can silently map unknown histogram IDs to DB_GET.
-            Object abiVersion = Statistics.class.getMethod("a4sBlockLatencyAbiVersion").invoke(null);
-            if (!Integer.valueOf(1).equals(abiVersion)) {
+            abiVersion =
+                    (Integer) Statistics.class.getMethod("a4sBlockLatencyAbiVersion").invoke(null);
+            if (abiVersion < 1 || abiVersion > 3) {
                 LOG.warn("A4S block latency unavailable: unsupported RocksDB sampling ABI.");
                 return;
             }
@@ -134,6 +142,113 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                     prefix + "_samples", () -> window.latest(System.nanoTime()).count(kind));
             metricGroup.gauge(
                     prefix + "_seconds", () -> window.latest(System.nanoTime()).meanSeconds(kind));
+        }
+        if (abiVersion >= 2
+                && lruCache != null
+                && metricGroup instanceof InternalOperatorMetricGroup) {
+            registerCacheCostSample(
+                    (InternalOperatorMetricGroup) metricGroup, histograms, abiVersion);
+        }
+    }
+
+    private void registerCacheCostSample(
+            InternalOperatorMetricGroup operator, HistogramType[] histograms, int abiVersion) {
+        try {
+            Method readCache = LRUCache.class.getMethod("getA4SCacheLookupSnapshot");
+            TickerType coveredHits = TickerType.valueOf("A4S_BLOCK_LATENCY_COVERED_HIT");
+            TickerType coveredMisses = TickerType.valueOf("A4S_BLOCK_LATENCY_COVERED_MISS");
+            TickerType compactionHits =
+                    abiVersion >= 3 ? TickerType.valueOf("A4S_BLOCK_LATENCY_COMPACTION_HIT") : null;
+            TickerType compactionMisses =
+                    abiVersion >= 3 ? TickerType.valueOf("A4S_BLOCK_LATENCY_COMPACTION_MISS") : null;
+            String attempt = operator.getAllVariables().get(ScopeFormat.SCOPE_TASK_ATTEMPT_ID);
+            if (attempt != null) {
+                metricGroup.addGroup("rocksdb")
+                        .gauge(
+                                A4SCacheCostSample.METRIC_NAME,
+                                () ->
+                                        readCacheCostSample(
+                                                operator,
+                                                attempt,
+                                                histograms,
+                                                readCache,
+                                                coveredHits,
+                                                coveredMisses,
+                                                compactionHits,
+                                                compactionMisses,
+                                                abiVersion));
+            }
+        } catch (ReflectiveOperationException | IllegalArgumentException | LinkageError e) {
+            LOG.warn("A4S online cache cost telemetry is unavailable.", e);
+        }
+    }
+
+    private String readCacheCostSample(
+            InternalOperatorMetricGroup operator,
+            String attempt,
+            HistogramType[] histograms,
+            Method readCache,
+            TickerType coveredHits,
+            TickerType coveredMisses,
+            @Nullable TickerType compactionHits,
+            @Nullable TickerType compactionMisses,
+            int abiVersion) {
+        synchronized (lock) {
+            if (statistics == null
+                    || lruCache == null
+                    || !RocksDBResourceContainer.hasExclusiveCacheOwner(lruCache)) {
+                return "";
+            }
+            try {
+                long observedAtMillis = System.currentTimeMillis();
+                long[] cache = (long[]) readCache.invoke(lruCache);
+                if (cache == null || cache.length != 7 || cache[0] != 1 || cache[4] != 1) {
+                    return "";
+                }
+                IOMetrics task = operator.getTaskIOMetricGroup().createSnapshot();
+                HistogramData hit = statistics.getHistogramData(histograms[0]);
+                long missSamples = 0;
+                long missNanos = 0;
+                for (int index = 1; index < histograms.length; index++) {
+                    HistogramData miss = statistics.getHistogramData(histograms[index]);
+                    missSamples = Math.addExact(missSamples, miss.getCount());
+                    missNanos = Math.addExact(missNanos, miss.getSum());
+                }
+                long hitCount = statistics.getTickerCount(coveredHits);
+                long missCount = statistics.getTickerCount(coveredMisses);
+                Long compactionHitCount =
+                        compactionHits == null ? null : statistics.getTickerCount(compactionHits);
+                Long compactionMissCount =
+                        compactionMisses == null ? null : statistics.getTickerCount(compactionMisses);
+                if (!RocksDBResourceContainer.hasExclusiveCacheOwner(lruCache)
+                        || System.currentTimeMillis() - observedAtMillis > 100) {
+                    return "";
+                }
+                return new A4SCacheCostSample(
+                                0,
+                                attempt,
+                                cache[1],
+                                cache[2],
+                                cache[3],
+                                cache[5],
+                                cache[6],
+                                hitCount,
+                                missCount,
+                                hit.getCount(),
+                                missSamples,
+                                hit.getSum(),
+                                missNanos,
+                                task.getNumRecordsIn(),
+                                task.getAccumulateBusyTime(),
+                                observedAtMillis,
+                                abiVersion,
+                                compactionHitCount,
+                                compactionMissCount)
+                        .toMetricString();
+            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+                LOG.debug("Could not read the A4S online cache cost sample.", e);
+                return "";
+            }
         }
     }
 
@@ -437,7 +552,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                         new StackDistanceHistogram(
                                 new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
             }
-            return histogram.toMetricString();
+            return A4SHistogramMetricCodec.encode(histogram.toMetricString());
         }
     }
 }

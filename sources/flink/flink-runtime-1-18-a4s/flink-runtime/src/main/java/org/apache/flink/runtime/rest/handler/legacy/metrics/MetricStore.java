@@ -22,6 +22,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails;
 import org.apache.flink.runtime.messages.webmonitor.JobDetails.CurrentAttempts;
 import org.apache.flink.runtime.metrics.MetricNames;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SCacheCostSample;
 import org.apache.flink.runtime.metrics.dump.MetricDump;
 import org.apache.flink.runtime.metrics.dump.QueryScopeInfo;
 import org.apache.flink.util.CollectionUtil;
@@ -63,14 +64,15 @@ public class MetricStore {
     /**
      * The set holds the names of the transient metrics which are no longer useful after a subtask
      * reaches terminal state and shall be removed to avoid misleading users. Note that there may be
-     * other transient metrics, we currently only support cleaning these three.
+     * other transient metrics. We currently only clean the metrics listed here.
      */
     private static final Set<String> TRANSIENT_METRIC_NAMES =
             new HashSet<>(
                     Arrays.asList(
                             MetricNames.TASK_IDLE_TIME,
                             MetricNames.TASK_BACK_PRESSURED_TIME,
-                            MetricNames.TASK_BUSY_TIME));
+                            MetricNames.TASK_BUSY_TIME,
+                            A4SCacheCostSample.METRIC_NAME));
 
     private final ComponentMetricStore jobManager = new ComponentMetricStore();
     private final Map<String, TaskManagerMetricStore> taskManagers = new ConcurrentHashMap<>();

@@ -437,6 +437,16 @@ public class AutoScalerOptions {
                     .withDescription(
                             "Latency (in sec) for a cache miss operation.");
 
+    public static final ConfigOption<Boolean> A4S_ONLINE_CACHE_COSTS_ENABLED =
+            autoScalerConfig("a4s.online-cache-costs.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.online-cache-costs.enabled"))
+                    .withDescription(
+                            "Learn the incremental per-record cache miss cost from recent "
+                                    + "RocksDB lookup timings. Use configured legacy latencies "
+                                    + "until a qualified same-attempt window is available.");
+
     public static final ConfigOption<Map<String, String>> A4S_CALIBRATED_CACHE_COSTS =
             autoScalerConfig("a4s.calibrated-cache-costs")
                     .mapType()

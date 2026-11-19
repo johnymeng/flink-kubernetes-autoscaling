@@ -39,6 +39,8 @@ import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsHeaders;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +55,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
+import java.util.concurrent.TimeUnit;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.*;
 import static org.apache.flink.autoscaler.event.AutoScalerEventHandler.SCALING_EXECUTION_DISABLED_REASON;
@@ -151,6 +154,22 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             return false;
         }
 
+        boolean useA4s = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
+        Map<JobVertexID, Decision> a4sDecisions = Map.of();
+        Map<JobVertexID, Double> retainedMemory = Map.of();
+        if (useA4s) {
+            LOG.debug("A4S: Evaluated Metrics: {}", evaluatedMetrics);
+            a4sDecisions = new A4S(jobTopology, evaluatedMetrics, scalingSummaries).makeDecision(conf);
+            if (!conf.get(A4S_MANAGED_MEMORY_OVERRIDE_ENABLED)) {
+                var retained = retainUnsupportedCacheBudgets(
+                        context, evaluatedMetrics, scalingSummaries, a4sDecisions);
+                if (retained.isEmpty()) {
+                    return false;
+                }
+                retainedMemory = retained.get();
+            }
+        }
+
         addToScalingHistoryAndStore(
                 autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
 
@@ -170,27 +189,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                             scalingSummaries,
                             periods.getOrDefault(context.getJobID(), 0));
             
-            if (conf.get(A4S_ENABLED)) {
-                LOG.debug("A4S: Evaluated Metrics: {}", evaluatedMetrics);
-
-                A4S a4s = new A4S(jobTopology, evaluatedMetrics, scalingSummaries);
-                Map<JobVertexID, Decision> decisions = a4s.makeDecision(conf);
-
-                boolean a4sManagedMemoryOverrideEnabled =
-                conf.get(A4S_ENABLED) && conf.get(A4S_MANAGED_MEMORY_OVERRIDE_ENABLED);
-                double a4sManagedMemoryOverrideMb = conf.get(A4S_MANAGED_MEMORY_OVERRIDE_MB);
-                double a4sMemoryBaseMb = conf.get(A4S_MEMORY_BASE_MB);
-                
-                // piggy-back off of justin's scaling algorithm for now
-                currentScalingConf.getScaling().forEach((id, information) -> {
-                    information.setParallelism(Optional.ofNullable(decisions.get(id)).map(Decision::getParallelism).orElse(information.getParallelism()));
-                    double memoryMb = Optional.ofNullable(decisions.get(id)).map(Decision::getMemoryMB).orElse(0.0);
-                    information.setManagedMemoryMB(memoryMb + a4sMemoryBaseMb);
-                    if (a4sManagedMemoryOverrideEnabled) {
-                        information.setManagedMemoryMB(a4sManagedMemoryOverrideMb);
-                    }
-                    LOG.debug("A4S: Vertex {} has parallelism {} and memory {}MB", id, information.getParallelism(), information.getManagedMemoryMB());
-                });
+            if (useA4s) {
+                applyA4sDecisions(conf, currentScalingConf, a4sDecisions, retainedMemory);
             } else {
                 policy(context, currentScalingConf, conf);
             }
@@ -212,6 +212,90 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         delayedScaleDown.clearAll();
 
         return true;
+    }
+
+    private Optional<Map<JobVertexID, Double>> retainUnsupportedCacheBudgets(
+            Context context,
+            EvaluatedMetrics evaluated,
+            Map<JobVertexID, ScalingSummary> summaries,
+            Map<JobVertexID, Decision> decisions) throws Exception {
+        var candidates = new HashMap<JobVertexID, Integer>();
+        evaluated.getVertexMetrics().forEach((id, metrics) -> {
+            var curve = evaluated.getMemoryParallelismCurves().get(id);
+            var decision = decisions.get(id);
+            var summary = summaries.get(id);
+            int current = (int) metrics.get(PARALLELISM).getCurrent();
+            int requested = decision != null ? decision.getParallelism()
+                    : summary != null ? summary.getNewParallelism() : current;
+            boolean hasCache = curve != null || metrics.containsKey(ROCKS_DB_BLOCK_CACHE_HIT_RATE);
+            if (hasCache && (decision == null || curve == null || !curve.hasSupportedCacheSize(requested))) {
+                candidates.put(id, requested);
+            }
+        });
+        if (candidates.isEmpty()) {
+            return Optional.of(Map.of());
+        }
+
+        var headers = JustinResourceRequirementsHeaders.INSTANCE;
+        var parameters = headers.getUnresolvedMessageParameters();
+        parameters.jobPathParameter.resolve(context.getJobID());
+        try (var client = context.getRestClusterClient()) {
+            var requirements = client.sendRequest(headers, parameters, EmptyRequestBody.getInstance())
+                    .get(10, TimeUnit.SECONDS).asJobResourceRequirements();
+            if (requirements.isEmpty()) {
+                LOG.warn("A4S: Deferring resize because live managed-memory profiles are unavailable");
+                return Optional.empty();
+            }
+            var profiles = requirements.get();
+            var retained = new HashMap<JobVertexID, Double>();
+            for (var candidate : candidates.entrySet()) {
+                var id = candidate.getKey();
+                var profile = profiles.getJobVertices().contains(id) ? profiles.getResourceProfile(id) : null;
+                if (profile == null || profile.equals(ResourceProfile.UNKNOWN)
+                        || profile.equals(ResourceProfile.ANY) || profile.getManagedMemory().getBytes() <= 0) {
+                    LOG.warn("A4S: Deferring resize because vertex {} has no known managed-memory budget", id);
+                    return Optional.empty();
+                }
+                int current = (int) evaluated.getVertexMetrics().get(id).get(PARALLELISM).getCurrent();
+                int requested = candidate.getValue();
+                long bytesPerSlot = profile.getManagedMemory().getBytes();
+                double memoryMb = Math.max(context.getConfiguration().get(A4S_MEMORY_BASE_MB),
+                        retainedManagedMemoryMiB(bytesPerSlot, current, requested));
+                if (Math.ceil(memoryMb) > A4S.MAX_MANAGED_MEMORY_MB) {
+                    LOG.warn("A4S: Deferring resize for vertex {} because the retained budget needs {} MiB per slot", id, memoryMb);
+                    return Optional.empty();
+                }
+                LOG.info("A4S: Retaining managed-memory budget for vertex {} ({} bytes × {} slots, {} MiB per new slot at parallelism {})",
+                        id, bytesPerSlot, current, memoryMb, requested);
+                retained.put(id, memoryMb);
+            }
+            return Optional.of(retained);
+        }
+    }
+
+    @VisibleForTesting
+    static double retainedManagedMemoryMiB(long bytesPerSlot, int current, int requested) {
+        return bytesPerSlot / (1024.0 * 1024.0) * current / requested;
+    }
+
+    private void applyA4sDecisions(
+            Configuration conf,
+            ScalingConfigurations.ScalingConfiguration scaling,
+            Map<JobVertexID, Decision> decisions,
+            Map<JobVertexID, Double> retainedMemory) {
+        double base = conf.get(A4S_MEMORY_BASE_MB);
+        scaling.getScaling().forEach((id, information) -> {
+            var decision = decisions.get(id);
+            if (decision != null) {
+                information.setParallelism(decision.getParallelism());
+            }
+            double memory = retainedMemory.getOrDefault(id, (decision == null ? 0.0 : decision.getMemoryMB()) + base);
+            if (conf.get(A4S_MANAGED_MEMORY_OVERRIDE_ENABLED)) {
+                memory = conf.get(A4S_MANAGED_MEMORY_OVERRIDE_MB);
+            }
+            information.setManagedMemoryMB(memory);
+            LOG.debug("A4S: Vertex {} has parallelism {} and memory {}MB", id, information.getParallelism(), memory);
+        });
     }
 
     private void updateRecommendedParallelism(
