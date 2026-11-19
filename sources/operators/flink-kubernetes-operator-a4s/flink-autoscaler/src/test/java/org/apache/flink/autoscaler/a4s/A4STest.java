@@ -17,6 +17,8 @@
 
 package org.apache.flink.autoscaler.a4s;
 
+import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.autoscaler.ScalingSummary;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -69,7 +71,29 @@ public class A4STest {
 
         assertThat(result).containsKey(operator);
         assertThat(result.get(operator).getParallelism()).isEqualTo(3);
-        assertThat(result.get(operator).getMemoryMB()).isEqualTo(350.0);
+        assertThat(result.get(operator).getMemoryMB()).isEqualTo(140.0);
+    }
+
+    @Test
+    void placesMergedNativeCacheInDedicatedManagedSlots() {
+        JobVertexID vertex = new JobVertexID();
+        JobTopology topology = new JobTopology(new VertexInfo(vertex, Map.of(), 2, 4));
+        // Two independent histograms each reach 50% misses at 64 MiB per cache.
+        var local = new StackDistanceHistogram(
+                new long[] {50}, 50, 1, 16384, 4096);
+        var merged = StackDistanceHistogram.merge(List.of(local, local));
+        var mrc = MissRateCurve.fromStackDistanceHistogram(merged);
+        var mpc = MemoryParallelismCurve.fromCalibratedMissRateCurve(
+                1000.0, 0.001, 0.002, 2, 2, mrc);
+        assertThat(mpc.hasSupportedCacheSize(2)).isTrue();
+        var metrics = new EvaluatedMetrics(Map.of(), Map.of(), Map.of(vertex, mpc), Map.of());
+        var planner = new A4S(topology, metrics, Map.of(vertex, new ScalingSummary(2, 2, Map.of())));
+        var config = new Configuration();
+        assertThat(planner.makeDecision(config).get(vertex).getMemoryMB()).isEqualTo(76.8);
+        config.setDouble("state.backend.rocksdb.memory.write-buffer-ratio", 0.6);
+        assertThat(planner.makeDecision(config).get(vertex).getMemoryMB()).isEqualTo(80.0);
+        config.setString("state.backend.rocksdb.memory.fixed-per-slot", "64m");
+        assertThat(planner.makeDecision(config)).isEmpty();
     }
 
     @ParameterizedTest

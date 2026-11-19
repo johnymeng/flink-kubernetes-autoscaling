@@ -1,5 +1,5 @@
 diff --git a/cache/lru_cache.cc b/cache/lru_cache.cc
-index 4ba3aa2..e00ad03 100644
+index 4ba3aa2..9344318 100644
 --- a/cache/lru_cache.cc
 +++ b/cache/lru_cache.cc
 @@ -14,6 +14,8 @@
@@ -49,7 +49,18 @@ index 4ba3aa2..e00ad03 100644
        quick_mrc_enabled_(quick_mrc_enabled),
        quick_mrc_max_bucket_size_(quick_mrc_max_bucket_size),
        quick_mrc_ghost_cache_multiplier_(quick_mrc_ghost_cache_multiplier),
-@@ -508,6 +525,9 @@ void LRUCacheShard::SetCapacity(size_t capacity) {
+@@ -185,7 +202,9 @@ void LRUCacheShard::QuickMRCRecordDistance(size_t stack_distance,
+   if (quick_mrc_histogram_bin_size_ == 0) {
+     return;
+   }
+-  const size_t bin = stack_distance / quick_mrc_histogram_bin_size_;
++  // Distance includes the referenced item. A bin covers (lower, upper].
++  const size_t bin = (stack_distance == 0 ? 0 : stack_distance - 1) /
++                     quick_mrc_histogram_bin_size_;
+   if (quick_mrc_histogram_.size() <= bin) {
+     quick_mrc_histogram_.resize(bin + 1, 0);
+   }
+@@ -508,6 +527,9 @@ void LRUCacheShard::SetCapacity(size_t capacity) {
    autovector<LRUHandle*> last_reference_list;
    {
      MutexLock l(&mutex_);
@@ -59,7 +70,7 @@ index 4ba3aa2..e00ad03 100644
      capacity_ = capacity;
      high_pri_pool_capacity_ = capacity_ * high_pri_pool_ratio_;
      EvictFromLRU(0, &last_reference_list);
-@@ -527,6 +547,12 @@ void LRUCacheShard::SetStrictCapacityLimit(bool strict_capacity_limit) {
+@@ -527,6 +549,12 @@ void LRUCacheShard::SetStrictCapacityLimit(bool strict_capacity_limit) {
  Cache::Handle* LRUCacheShard::Lookup(const Slice& key, uint32_t hash) {
    MutexLock l(&mutex_);
    LRUHandle* e = table_.Lookup(key, hash);
@@ -72,7 +83,7 @@ index 4ba3aa2..e00ad03 100644
    if (e != nullptr) {
      if (quick_mrc_enabled_ && QuickMRCShouldSample()) {
        bool found = false;
-@@ -835,6 +861,11 @@ LRUCache::LRUCache(size_t capacity, int num_shard_bits,
+@@ -835,6 +863,11 @@ LRUCache::LRUCache(size_t capacity, int num_shard_bits,
      : ShardedCache(capacity, num_shard_bits, strict_capacity_limit,
                     std::move(allocator)) {
    num_shards_ = 1 << num_shard_bits;
@@ -84,7 +95,7 @@ index 4ba3aa2..e00ad03 100644
    shards_ = reinterpret_cast<LRUCacheShard*>(
        port::cacheline_aligned_alloc(sizeof(LRUCacheShard) * num_shards_));
    size_t per_shard = (capacity + (num_shards_ - 1)) / num_shards_;
-@@ -844,7 +875,7 @@ LRUCache::LRUCache(size_t capacity, int num_shard_bits,
+@@ -844,7 +877,7 @@ LRUCache::LRUCache(size_t capacity, int num_shard_bits,
                        use_adaptive_mutex, metadata_charge_policy,
                        quick_mrc_enabled, quick_mrc_max_bucket_size,
                        quick_mrc_ghost_cache_multiplier, quick_mrc_sampling_rate,
@@ -93,7 +104,7 @@ index 4ba3aa2..e00ad03 100644
    }
  }
  
-@@ -927,6 +958,30 @@ std::vector<uint64_t> LRUCache::GetQuickMRCStackDistanceHistogram() const {
+@@ -927,6 +960,30 @@ std::vector<uint64_t> LRUCache::GetQuickMRCStackDistanceHistogram() const {
    return merged;
  }
  
@@ -192,7 +203,7 @@ index 60c50e7..1d01515 100644
  
  }  // namespace ROCKSDB_NAMESPACE
 diff --git a/cache/lru_cache_test.cc b/cache/lru_cache_test.cc
-index aacd7d6..f4a33c4 100644
+index aacd7d6..b057d34 100644
 --- a/cache/lru_cache_test.cc
 +++ b/cache/lru_cache_test.cc
 @@ -5,7 +5,9 @@
@@ -234,10 +245,22 @@ index aacd7d6..f4a33c4 100644
    LRUCacheShard* cache_ = nullptr;
  };
  
-@@ -232,6 +236,78 @@ TEST_F(LRUCacheTest, QuickMRCAppendsCompleteMissBucket) {
+@@ -232,6 +236,90 @@ TEST_F(LRUCacheTest, QuickMRCAppendsCompleteMissBucket) {
    ASSERT_EQ(2U, histogram.back());
  }
  
++TEST_F(LRUCacheTest, QuickMRCResidentUnitFitsFirstBin) {
++  NewCache(4096);
++  ASSERT_OK(cache_->Insert("only", 0 /*hash*/, nullptr /*value*/, 4096,
++                           nullptr /*deleter*/, nullptr /*handle*/,
++                           Cache::Priority::LOW));
++  for (int i = 0; i < 100; ++i) {
++    ASSERT_TRUE(Lookup("only"));
++  }
++  ASSERT_EQ(std::vector<uint64_t>({100}),
++            cache_->GetQuickMRCStackDistanceHistogram());
++}
++
 +TEST_F(LRUCacheTest, A4SLookupAccountingIsOffByDefault) {
 +  NewCache(3);
 +  ASSERT_FALSE(Lookup("cold"));
