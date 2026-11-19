@@ -155,7 +155,7 @@ def cleanup_steps(steps, prior_error):
 
 
 def arm_run(args, owner, arm, hashes, cp_hash, template_hash, pair, *, release_ms=None,
-            config=None, extra_observer=None, main_empty_curves=None, observation_seconds=0):
+            config=None, extra_observer=None, main_empty_curves=None, observation_seconds=0, configure=None):
     directory = pair / arm
     directory.mkdir()
     job_id = uuid4().hex
@@ -169,6 +169,8 @@ def arm_run(args, owner, arm, hashes, cp_hash, template_hash, pair, *, release_m
     manifest = render("deployment.json", replacements)
     if config:
         manifest["spec"]["flinkConfiguration"].update(config)
+    if configure:
+        configure(manifest)
     save(directory / "manifest.json", manifest)
     save(directory / "plan.json", {"plan": args.plan, "release_ms": release, "arm": arm, "artifacts": hashes,
          "policy_sha256": digest(args.policy), "controller_classpath_sha256": cp_hash,

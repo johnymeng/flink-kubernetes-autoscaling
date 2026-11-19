@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Run the short matched Q8 pair, validate its decisions, then render the resource charts.
 set -euo pipefail
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-    echo "Usage: $0 NEW_RESULTS_DIRECTORY [literal|omit-empty]" >&2
+if [[ $# -lt 1 || $# -gt 3 ]]; then
+    echo "Usage: $0 NEW_RESULTS_DIRECTORY [literal|omit-empty] [burst|two-slot-80k]" >&2
     exit 2
 fi
 results=$(realpath -m "$1")
 mode=${2:-literal}
+scenario=${3:-burst}
 case "$mode" in
     literal) driver=main-literal-driver.jar; label='main · unmodified evaluator' ;;
     omit-empty) driver=main-driver.jar; label='main · empty curves omitted' ;;
@@ -24,7 +25,7 @@ plot_args=()
 if [[ -n "${RYAN_PLOTTER:-}" ]]; then
     plot_args+=(--ryan-plotter "$RYAN_PLOTTER")
 fi
-python3 "$here/quick_pair.py" --output "$results" --worker "${Q8_WORKER:-c167}" --artifacts "$ARTIFACTS" \
+python3 "$here/quick_pair.py" --output "$results" --scenario "$scenario" --worker "${Q8_WORKER:-c167}" --artifacts "$ARTIFACTS" \
     --main-classpath "$BUILD/main/main-autoscaler.jar:$shared" --main-policy "$BUILD/main/$driver" \
     --main-revision "$main_revision" --main-empty-curves "$mode" \
     --branch-classpath "$ARTIFACTS/branch-autoscaler.jar:$shared" --branch-policy "$BUILD/policy.jar" \

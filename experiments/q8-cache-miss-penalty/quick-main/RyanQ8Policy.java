@@ -208,6 +208,16 @@ public final class RyanQ8Policy {
                         proof.put("snapshot", when.toString());
                         proof.put("empty_curve_mode", "literal");
                         proof.put("curve_points_by_vertex", curves == null ? Map.of() : counts(curves));
+                        // Archive ingress demand even when main fails before evaluating the join.
+                        double sourceDemand = 0;
+                        for (var source : history.getJobTopology().get(JOIN).getInputs().keySet()) {
+                            double input = getRate(ScalingMetric.NUM_RECORDS_IN, source, samples);
+                            double backlogGrowth = getRate(ScalingMetric.LAG, source, samples);
+                            sourceDemand += Math.max(0, input + backlogGrowth);
+                        }
+                        if (Double.isFinite(sourceDemand)) {
+                            proof.put("source_demand_records_s", sourceDemand);
+                        }
                         proof.put("exception", error.toString());
                         if (!recordedFailureStack) {
                             proof.put("stack", java.util.Arrays.toString(error.getStackTrace()));

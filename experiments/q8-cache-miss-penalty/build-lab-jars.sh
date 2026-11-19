@@ -30,7 +30,9 @@ cp -R "$query/src" "$query/pom.xml" "$build/replay"
 cp "$build/replay/target/Query8.jar" "$out/Query8.jar"
 javac --release 11 -cp "$out/Query8.jar" -d "$build/tests" \
     "$repo/scripts/autoscaling/smoke/Q8ReplaySmoke.java"
-java -ea -cp "$build/tests:$out/Query8.jar" be.uclouvain.gepiciad.sources.Q8ReplaySmoke
+for pending_records in 0 1; do
+    FLINK_Q8_REPORT_PENDING_RECORDS=$pending_records java -ea -cp "$build/tests:$out/Query8.jar" be.uclouvain.gepiciad.sources.Q8ReplaySmoke
+done
 
 javac --release 11 -cp "$cp" -d "$build/profiles" \
     "$runtime/dispatcher/Dispatcher.java" "$runtime/jobgraph/JobVertexResourceProfileOverrides.java"

@@ -115,7 +115,14 @@ public abstract class Q8ReplaySource<T> extends RichParallelSourceFunction<T>
         getRuntimeContext().getMetricGroup().gauge("q8CheckpointedOffset", () -> checkpointedOffset);
         getRuntimeContext().getMetricGroup().gauge("q8InputEnd", () -> plan.endOffset);
         getRuntimeContext().getMetricGroup().gauge("q8Offered", this::offered);
-        getRuntimeContext().getMetricGroup().gauge("q8Backlog", () -> Math.max(0L, offered() - nextOffset));
+        getRuntimeContext().getMetricGroup().gauge("q8Backlog", this::backlog);
+        if ("1".equals(System.getenv("FLINK_Q8_REPORT_PENDING_RECORDS"))) {
+            getRuntimeContext().getMetricGroup().gauge("pendingRecords", this::backlog);
+        }
+    }
+
+    private long backlog() {
+        return Math.max(0L, offered() - nextOffset);
     }
 
     private synchronized long offered() {

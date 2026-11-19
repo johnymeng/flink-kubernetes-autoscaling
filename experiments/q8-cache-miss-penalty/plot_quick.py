@@ -170,6 +170,8 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(exist_ok=True, parents=True)
     cases = {"hardcoded": args.main_label, "calibrated": "a4s-cache-miss-penalty · online costs"}
+    pair_manifest = args.pair / "pair.json"
+    offered = json.loads(pair_manifest.read_text()).get("offered_records_per_second") if pair_manifest.exists() else None
     records = {}
     elapsed_finish = {}
     ended_at_deadline = {}
@@ -222,6 +224,10 @@ def main():
         t = [event["elapsed_sec"] for event in rows]
         a.plot(t, [value(event, METRICS[0]) for event in rows], linewidth=1.75, marker="o",
                markersize=2.5, color="#0369a1")
+        if offered is not None:
+            a.axhline(offered, color="#9a3412", linestyle="--", linewidth=1.2,
+                      label=f"Offered {offered:,} records/s")
+            a.legend(loc="upper right", framealpha=.95, fontsize=8)
         b.step(t, [value(event, METRICS[2], MIB) for event in rows], where="post", linewidth=1.7,
                color="#16734e", linestyle="--", label="Allocated")
         b.step(t, [value(event, METRICS[1], MIB) for event in rows], where="post", linewidth=1.7,
@@ -241,6 +247,8 @@ def main():
                                  (2, (METRICS[3],), 1)):
         observed = [row["values"][key] / divisor for rows in records.values() for row in rows
                     for key in keys if row["values"][key] is not None]
+        if panel == 0 and offered is not None:
+            observed.append(offered)
         highest = max(observed, default=0)
         axes[panel, 0].set_ylim(0, max(1, highest * 1.10))
     axes[0, 0].yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))

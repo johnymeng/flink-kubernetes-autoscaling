@@ -54,6 +54,39 @@ def controller(args, arm):
             "policy": str(policy), "policy_sha256": run.digest(policy), "loaded": loaded}
 
 
+def configure_manifest(manifest, scenario):
+    spec = manifest["spec"]
+    config = spec["flinkConfiguration"]
+    config.update(CONFIG)
+    if scenario != "two-slot-80k":
+        return
+    config.update({
+        "benchmark.q8.initial-slot-sharing.enabled": "true",
+        # The Justin scheduler needs every proposed slot before it can place the graph.
+        "jobmanager.adaptive-scheduler.resource-stabilization-timeout": "300 s",
+        "taskmanager.numberOfTaskSlots": "2",
+        "taskmanager.cpu.cores": "2",
+        "taskmanager.memory.managed.size": "316m",
+        "job.autoscaler.vertex.max-parallelism": config["pipeline.max-parallelism"],
+    })
+    spec["taskManager"]["resource"]["cpu"] = 2
+    containers = spec["taskManager"]["podTemplate"]["spec"]["containers"]
+    container = next(item for item in containers if item["name"] == "flink-main-container")
+    container["env"].append({"name": "FLINK_Q8_REPORT_PENDING_RECORDS", "value": "1"})
+
+
+def check_shared_start_artifacts(artifacts):
+    required = {
+        "savepoint-profiles.jar": ("org/apache/flink/runtime/scheduler/adaptive/AdaptiveScheduler.class",
+                                   b"benchmark.q8.initial-slot-sharing.enabled"),
+        "Query8.jar": ("be/uclouvain/gepiciad/sources/Q8ReplaySource.class", b"FLINK_Q8_REPORT_PENDING_RECORDS"),
+    }
+    for jar, (entry, flag) in required.items():
+        with ZipFile(artifacts / jar) as archive:
+            if entry not in archive.namelist() or flag not in archive.read(entry):
+                raise ValueError(f"{jar} needs the two-slot benchmark build; see QUICK.md")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -67,7 +100,8 @@ def main():
     parser.add_argument("--worker", choices=("c167", "c182"), default="c167")
     parser.add_argument("--order", choices=("parallel", "AB", "BA"), default="parallel",
                         help="Simultaneous on one worker by default, AB or BA for sequential timing")
-    parser.add_argument("--plan", default=PLAN)
+    parser.add_argument("--scenario", choices=("burst", "two-slot-80k"), default="burst")
+    parser.add_argument("--plan", help="Override the input phases for the burst scenario")
     parser.add_argument("--release-lead-seconds", type=int, default=125)
     parser.add_argument("--observation-seconds", type=int, default=360,
                         help="Observe from each source release for this many seconds; 0 drains all sealed input")
@@ -75,6 +109,13 @@ def main():
     args = parser.parse_args()
     if min(args.release_lead_seconds, args.timeout) <= 0 or args.observation_seconds < 0:
         parser.error("Release lead and timeout must be positive; observation seconds must be nonnegative")
+    if args.scenario == "two-slot-80k":
+        if args.plan:
+            parser.error("The two-slot scenario sets its sustained 80,000 records/s schedule")
+        args.plan = f"{args.observation_seconds or 360}:8000:32000"
+        check_shared_start_artifacts(args.artifacts)
+    elif args.plan is None:
+        args.plan = PLAN
     args.output = args.output.resolve()
     args.output.mkdir()
     started = time.time()
@@ -87,7 +128,7 @@ def main():
         raise ValueError("The main and branch JVMs loaded the same autoscaler JAR")
     template = run.render("deployment.json", {"WORKER": args.worker, "PLAN": args.plan,
                           **{"HASH_" + key: value for key, value in hashes.items()}})
-    template["spec"]["flinkConfiguration"].update(CONFIG)
+    configure_manifest(template, args.scenario)
     template_hash = value_hash(template)
     order = "BA" if args.order == "BA" else "AB"
     arms = ["hardcoded", "calibrated"] if order == "AB" else ["calibrated", "hardcoded"]
@@ -97,6 +138,11 @@ def main():
     owner = "r8pen-" + datetime.now(timezone.utc).strftime("%H%M%S")
     result = {"execution_order": args.order, "arm_names": arms, "owner": owner, "worker": args.worker,
               "input_plan": args.plan, "observation_seconds": args.observation_seconds, "main_empty_curves": args.main_empty_curves, "started_epoch": started}
+    if args.scenario == "two-slot-80k":
+        result.update(scenario=args.scenario, offered_records_per_second=80000,
+                      expected_initial_occupied_slots=2, expected_initial_total_slots=2,
+                      expected_initial_join_parallelism=1, expected_initial_job_slot_managed_mib=158,
+                      expected_initial_managed_pool_bytes_per_taskmanager=316 * 1024**2)
     run.save(pair / "pair.json", result)
     try:
         run.stage_objects(owner, args.worker, args.artifacts, hashes, pair, created)
@@ -108,7 +154,8 @@ def main():
             record = controllers[arm]
             options = argparse.Namespace(**vars(args), policy=Path(record["policy"]), classpath=record["classpath"])
             run.arm_run(options, owner, arm, hashes, record["controller_classpath_sha256"],
-                        template_hash, pair, release_ms=release_ms, config=CONFIG,
+                        template_hash, pair, release_ms=release_ms,
+                        configure=lambda manifest: configure_manifest(manifest, args.scenario),
                         extra_observer=run.HERE / "quick_series.py", observation_seconds=args.observation_seconds,
                         main_empty_curves=args.main_empty_curves if arm == "hardcoded" else None)
 

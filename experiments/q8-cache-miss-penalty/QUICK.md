@@ -38,6 +38,26 @@ The summary is in `quick-results.json`. The `plots/` directory contains a matche
 
 For sequential measurements use `quick_pair.py --order AB` and `--order BA` in fresh output directories. The result checker and same Q8 plotter also accept those runs.
 
+## Sustained 80,000 inputs/s with two starting task slots
+
+The `two-slot-80k` scenario offers 8,000 Persons and 32,000 Auctions per second from each of two source partitions per stream for the whole observation window. A six-minute run releases 28,800,000 input records per job. During backpressure, pending input accumulates and resumes from checkpointed source offsets. Both autoscalers receive Flink's standard `pendingRecords` gauge. They calculate target rate from measured ingress and lag growth. The chart shows observed source throughput and a reference at the offered rate.
+
+Both jobs start with one two-slot TaskManager. Its two CPU cores and 316 MiB managed pool provide 158 MiB per slot. Flink's standard slot-sharing allocator places the four source subtasks and one join subtask into those two slots. The common scheduler overlay enables this layout before a controller submits per-vertex resource requests. A savepoint rescale uses the A4S runtime's normal per-vertex slot allocator. Both JobManagers wait up to five minutes for a partial resource allocation to stabilize and proceed immediately when the full request arrives. The default ten-second stabilization window allowed the runtime to build a partial placement while new TaskManagers were still registering. A jump in slot count therefore includes the move to dedicated slots. Each controller chooses its join parallelism and memory. The source partition count stays fixed to preserve logical input offsets, and the join can scale to the job's 24 key groups. The checker compares the starting physical allocations with the four zero source offsets and records proposals, applied placements and measured join targets.
+
+Build the common artifacts and the two drivers above from this revision. Create a separate artifact directory for the shared-start scheduler, then launch from the experiment directory with a fresh result path.
+
+```bash
+shared_artifacts=$(mktemp -d)
+for jar in Query8.jar rocksdbjni.jar abi3-mrc-telemetry.jar branch-autoscaler.jar; do
+    cp "$ARTIFACTS/$jar" "$shared_artifacts/$jar"
+done
+bash shared-start/build-shared-start-overlay.sh "$REPO" "$DIST_LIB" "$BUILD_DEPS" \
+    "$ARTIFACTS/savepoint-profiles.jar" "$shared_artifacts/savepoint-profiles.jar"
+ARTIFACTS="$shared_artifacts" bash quick_test.sh "$RESULTS/q8-80k-two-slots" literal two-slot-80k
+```
+
+`quick-results.json` reports the actual starting and ending occupied slots, input processed at the comparison sample, and the target rates observed by each controller. Both controllers may choose to keep their allocations. The runner verifies live measurements in that case as well.
+
 ## Verified lab runs on November 19, 2026
 
 Both pairs used the same Q8 runtime and matched starting allocations. Each result below uses four logical source offsets at the last complete five-second observation at or before 360 seconds, or the exact end offsets for a job that had already finished. Sampling timestamps are included so the counts can be compared at the same phase.

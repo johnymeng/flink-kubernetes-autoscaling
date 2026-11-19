@@ -1,6 +1,8 @@
 """Check that two Q8 controllers ran the same workload and applied different join resources."""
 import argparse
 import json
+from math import isfinite
+from statistics import median
 from pathlib import Path
 
 import analyze
@@ -39,10 +41,128 @@ def input_at_cutoff(folder, arm, seconds):
             "next_sample_seconds": following[0] - release if following else None, "finished_before_cutoff": False}
 
 
+def demand_evidence(folder, arm, meta, seconds):
+    """Check the requested load and physical slot count against the live receipts."""
+    issues = []
+    rate = meta["offered_records_per_second"]
+    expected_slots = meta["expected_initial_occupied_slots"]
+    manifest = analyze.read(folder / "deployment-created.json")
+    expected, flags = analyze.input_spec(manifest)
+    stages = [tuple(map(int, stage.split(":"))) for stage in flags["--q8-input-plan"].split(",")]
+    # A full-drain run continues draining after the last scheduled arrival.
+    if not seconds:
+        seconds = sum(length for length, _, _ in stages)
+    persons, auctions = (int(flags["--p-" + source + "-source"]) for source in ("person", "auction"))
+    if (rate <= 0 or expected_slots <= 0 or sum(length for length, _, _ in stages) < seconds
+            or any(length <= 0 or p < 0 or a < 0 or persons * p + auctions * a != rate
+                   for length, p, a in stages)):
+        issues.append("Source input plan does not sustain the requested aggregate rate throughout the window")
+
+    initial = arm.get("matched_start_profile") or {}
+    if initial.get("occupied_slots") != expected_slots:
+        issues.append("Flink's cold-start occupied task slots differ from the requested allocation")
+    expected_join = meta.get("expected_initial_join_parallelism")
+    if expected_join is not None and initial.get("join_parallelism") != expected_join:
+        issues.append("Cold-start join parallelism differs from the requested parallelism")
+
+    release = arm["release_ms"] / 1000
+    progress = analyze.rows(folder / "progress.jsonl")
+    cold = arm.get("cold_start_evidence") or {}
+    physical = next((r["physical_slots"] for r in progress
+                     if r["epoch"] == cold.get("native_sample_epoch") and r.get("physical_slots")), [])
+    slot_mib = [v for tm in physical for v in tm["job_slot_managed_mib"]]
+    total_slots = sum(tm["total_slots"] for tm in physical)
+    if (len(slot_mib) != expected_slots
+            or sum(tm["total_slots"] - tm["free_slots"] for tm in physical) != expected_slots):
+        issues.append("Physical TaskManager allocations do not confirm cold-start occupancy")
+    if "expected_initial_total_slots" in meta and total_slots != meta["expected_initial_total_slots"]:
+        issues.append("Cold-start physical slot capacity differs from the requested slot capacity")
+    if ("expected_initial_job_slot_managed_mib" in meta
+            and any(v != meta["expected_initial_job_slot_managed_mib"] for v in slot_mib)):
+        issues.append("Physical starting slot memory differs from the requested per-slot reservation")
+    if ("expected_initial_managed_pool_bytes_per_taskmanager" in meta
+            and any(tm["pool_bytes"] != meta["expected_initial_managed_pool_bytes_per_taskmanager"]
+                    for tm in physical)):
+        issues.append("Cold-start TaskManager managed pool differs from the requested pool")
+    samples = []
+    lag_errors = []
+    per_source_bounds = {key: max(stage[1 if key.startswith("Persons/") else 2]
+                                  for stage in stages) for key in expected}
+    for row in progress:
+        elapsed = row["epoch"] - release
+        if row.get("state") != "RUNNING" or not 0 <= elapsed <= seconds:
+            continue
+        partitions = [row.get(key, {}) for key in expected]
+        fields = ("q8Offered", "q8Backlog", "pendingRecords", "q8NextOffset")
+        if not all(all(isinstance(part.get(field), int) and part[field] >= 0 for field in fields)
+                   for part in partitions):
+            continue
+        samples.append((elapsed, sum(part["q8Offered"] for part in partitions),
+                        sum(part["pendingRecords"] for part in partitions)))
+        for key, part in zip(expected, partitions):
+            # Gauges have independent callbacks and the Flink metrics cache refreshes each second.
+            # Check agreement to one second of scheduled arrivals per partition.
+            delta = abs(part["q8Backlog"] - part["pendingRecords"])
+            lag_errors.append(delta / max(1, per_source_bounds[key]))
+    offered_rate = None
+    if len(samples) >= 2:
+        t0, offered0, _ = samples[0]
+        t1, offered1, _ = samples[-1]
+        if t1 > t0:
+            offered_rate = (offered1 - offered0) / (t1 - t0)
+            # Allow two one-second metric refresh intervals across the endpoint polls.
+            if t1 - t0 < 30 or abs((offered1 - offered0) - rate * (t1 - t0)) > 2 * rate:
+                issues.append("Live source offers do not corroborate the configured sustained rate")
+    if offered_rate is None or not lag_errors:
+        issues.append("Missing live offered and standard pending-record gauges for all source partitions")
+    elif median(lag_errors) > 1:
+        issues.append("Standard pending-record gauges disagree with replay backlog")
+
+    policy = analyze.rows(folder / "policy.jsonl")
+    targets = []
+    failed_input_rates = []
+    for row in policy:
+        elapsed = row["epoch"] - release
+        if not 0 <= elapsed <= seconds:
+            continue
+        ingress = row.get("source_demand_records_s")
+        if (row.get("type") == "literal_main_empty_curve" and isinstance(ingress, (int, float))
+                and isfinite(ingress) and ingress >= 0):
+            failed_input_rates.append({"elapsed_seconds": elapsed, "source_demand_records_per_second": ingress})
+        value = row.get("target_records_s")
+        if isinstance(value, (int, float)) and isfinite(value) and value >= 0 and row.get("type") == "selection":
+            targets.append({"elapsed_seconds": elapsed, "join_target_records_per_second": value,
+                                "online_fit_qualified": bool(row.get("online_fit_qualified"))})
+    resources = [r for r in analyze.rows(folder / "resource-series.jsonl")
+                 if r.get("type") == "sample" and 0 <= r["capture_epoch"] - release <= seconds
+                 and r.get("job_state") == "RUNNING" and r["values"].get("task_slots_used") is not None]
+    if not resources or resources[0]["values"]["task_slots_used"] != expected_slots:
+        issues.append("TaskManager slot series does not confirm the requested start")
+    if not arm["applied"]:
+        events = analyze.rows(folder / "rescale-events.jsonl")
+        stable_profiles = [a for row in progress if (a := analyze.allocation(row)) is not None
+                           and a["join_managed_slot_bytes"] is not None]
+        keys = ("occupied_slots", "join_parallelism", "join_managed_slot_bytes", "native_bytes_per_join")
+        if (not stable_profiles or any(a[k] != initial.get(k) for a in stable_profiles for k in keys)
+                or any(r["values"]["task_slots_used"] != expected_slots for r in resources)
+                or any(row["type"] == "rescale_start" for row in events)
+                or (not targets and arm.get("raw_main_empty_curve_evaluations", 0) < 2)):
+            issues.append("An unchanged allocation lacks live placement and evaluation evidence")
+    stats = {"offered_records_per_second": rate, "measured_offered_records_per_second": offered_rate,
+             "full_lag_samples": len(samples), "peak_observed_pending_records": max((s[2] for s in samples), default=None),
+             "median_lag_gauge_disagreement_seconds_of_input": median(lag_errors) if lag_errors else None,
+             "initial_occupied_slots": initial.get("occupied_slots"), "initial_total_slots": total_slots,
+             "initial_taskmanagers": physical,
+             "last_observed_occupied_slots": resources[-1]["values"]["task_slots_used"] if resources else None,
+             "controller_join_targets": targets, "source_demand_on_main_failure": failed_input_rates}
+    return stats, issues
+
+
 def validate(output, analysis_seconds=None):
     pair, = output.glob("pair-*")
     meta = analyze.read(pair / "pair.json")
     controllers = analyze.read(output / "controllers.json")
+    sustained = "offered_records_per_second" in meta
     configured_window = meta.get("observation_seconds") or 0
     seconds = configured_window if analysis_seconds is None else analysis_seconds
     if seconds < 0 or (configured_window and seconds > configured_window):
@@ -101,7 +221,12 @@ def validate(output, analysis_seconds=None):
                                        for source in analyze.SOURCE_IDS.values())]
             arm["raw_main_empty_curve_evaluations"] = len({row["snapshot"] for row in with_join_curve})
             arm["first_raw_main_empty_curve_error"] = next(iter(with_join_curve), None)
-        if mode == "main" and handling == "literal" and not applied:
+        if sustained:
+            arm["demand"], errors = demand_evidence(pair / name, arm, meta, seconds)
+            issues.extend(f"{mode}: {message}" for message in errors)
+            if applied and not arm["standard_triggers"]:
+                issues.append(f"{mode}: resize without a recorded standard autoscaler trigger")
+        elif mode == "main" and handling == "literal" and not applied:
             progress = analyze.rows(pair / name / "progress.jsonl")
             profiles = [a for row in progress if (a := analyze.allocation(row)) is not None]
             start = arm["matched_start_profile"]
@@ -113,7 +238,7 @@ def validate(output, analysis_seconds=None):
                 issues.append("No verified evidence explaining an unchanged literal main allocation")
         elif not applied or not arm["standard_triggers"]:
             issues.append(f"{mode}: no verified ordinary autoscaler resize")
-        if mode == "branch" and not any(d["applied_model"] == "online" for d in applied):
+        if not sustained and mode == "branch" and not any(d["applied_model"] == "online" for d in applied):
             issues.append("Branch never applied a qualified online estimate")
         for decision in applied:
             if arm["completed_input"] is not None and all(x is not None for x in decision["offsets"].values()):
@@ -145,7 +270,7 @@ def validate(output, analysis_seconds=None):
             history.insert(0, (initial["join_parallelism"], initial["join_managed_slot_bytes"],
                                tuple(sorted(initial["native_bytes_per_join"]))))
     different = all(decisions.values()) and decisions["main"][-1] != decisions["branch"][-1]
-    if not different:
+    if not sustained and not different:
         issues.append("The corresponding verified join allocations did not diverge")
     throughput = [arm["completed_input_per_wall_second"] for arm in (main, branch)]
     matched_records = [arm.get("input_at_cutoff") for arm in (main, branch)]

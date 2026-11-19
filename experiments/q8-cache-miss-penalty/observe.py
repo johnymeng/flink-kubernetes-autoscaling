@@ -21,7 +21,7 @@ def get(base, route):
         return json.load(response)
 
 
-def capture(base, job_id, metric_ids):
+def capture(base, job_id, metric_ids, *, physical_slots=False):
     prefix = "/jobs/" + job_id
     job = get(base, prefix)
     data = {"state": job["state"], "job_start_ms": job["start-time"],
@@ -30,12 +30,25 @@ def capture(base, job_id, metric_ids):
         return data
     routes = {"join_managed_slot_bytes": prefix + "/justin", "overview": "/overview", "checkpoints": prefix + "/checkpoints",
               "native": prefix + "/vertices/" + JOIN + "/a4s-metrics?get=cacheCostSamples,cacheCostCompaction"}
+    if physical_slots:
+        routes["physical_slots"] = "/taskmanagers"
     for vertex, role in SOURCES.items():
         for index in range(data["parallelism"][vertex]):
             routes[f"{role}/{index}"] = f"{prefix}/vertices/{vertex}/subtasks/{index}/metrics"
 
     def fetch(item):
         key, route = item
+        if key == "physical_slots":
+            summaries = get(base, route)["taskmanagers"]
+            slots = []
+            for summary in summaries:
+                manager = get(base, "/taskmanagers/" + quote(summary["id"], safe=""))
+                slots.append({"id": manager["id"], "total_slots": manager["slotsNumber"],
+                              "free_slots": manager["freeSlots"],
+                              "pool_bytes": manager["memoryConfiguration"]["managedMemory"],
+                              "job_slot_managed_mib": [slot["resource"]["managedMemory"]
+                                  for slot in manager["allocatedSlots"] if slot["jobId"] == job_id]})
+            return key, slots
         if key in ("overview", "checkpoints", "native", "join_managed_slot_bytes"):
             value = get(base, route)
             if key == "join_managed_slot_bytes":
@@ -48,7 +61,8 @@ def capture(base, job_id, metric_ids):
         generation = (job["start-time"], key)
         names = metric_ids.get(generation, [])
         if not names:
-            names = [r["id"] for r in get(base, route) if r["id"].split(".")[-1].startswith("q8")]
+            names = [r["id"] for r in get(base, route)
+                     if r["id"].split(".")[-1].startswith("q8") or r["id"].split(".")[-1] == "pendingRecords"]
             if names:
                 metric_ids[generation] = names
         if not names:
@@ -99,6 +113,8 @@ def main():
     parser.add_argument("namespace")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
+    pair = args.output.parent / "pair.json"
+    physical_slots = pair.is_file() and "expected_initial_occupied_slots" in json.loads(pair.read_text())
     followers = {}
     metrics = {}
     kube = ["kubectl", "-n", args.namespace]
@@ -110,7 +126,7 @@ def main():
                 try:
                     follow_source_logs(kube, args.deployment, args.output, followers)
                     base = (args.output / "rest-url").read_text().strip()
-                    row.update(capture(base, args.job_id, metrics))
+                    row.update(capture(base, args.job_id, metrics, physical_slots=physical_slots))
                 except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
                     row["unavailable"] = str(error)
                 row["capture_end_epoch"] = time.time()

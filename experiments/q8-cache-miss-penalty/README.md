@@ -24,7 +24,7 @@ Use a fresh output directory for each invocation. The default order is fixed/onl
 
 The plan encodes `seconds:persons_per_second_per_subtask:auctions_per_second_per_subtask`. Its default phases offer 16,000, 80,000, 3,600 and 80,000 combined input records/s. The third phase permits observation of recovery; the final burst measures drain time. Flink's standard trigger determines if and when to resize. A no-action arm is an experimental outcome.
 
-The source exposes its sealed backlog as `q8Backlog` for verification. As a legacy Flink source it does not populate the standard `pendingRecords` gauge. The autoscaler uses observed throughput and utilization in this benchmark. Its measured target rate is recorded separately from the offered schedule.
+The source exposes its sealed backlog as `q8Backlog` for verification. The historical burst benchmark uses the legacy source metrics and observed throughput and utilization. The sustained 80k scenario also exports the standard `pendingRecords` gauge, so those controllers can measure ingress demand under backpressure. Its measured target rate is recorded separately from the offered schedule.
 
 The primary result is completed sealed input records divided by time from release through job completion, including downtime. The analyzer checks per-partition savepoint and restore offsets, terminal input offsets, matching starting allocations and binaries, observed backlog and evidence of autoscaling. Five-second samples within an arm are correlated. Report the paired outcomes and their phase behavior individually.
 

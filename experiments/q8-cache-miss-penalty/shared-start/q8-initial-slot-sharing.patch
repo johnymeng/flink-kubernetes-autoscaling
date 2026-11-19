@@ -1,0 +1,37 @@
+--- a/AdaptiveScheduler.java
++++ b/AdaptiveScheduler.java
+@@ -23,0 +24,2 @@
++import org.apache.flink.configuration.ConfigOption;
++import org.apache.flink.configuration.ConfigOptions;
+@@ -246,0 +249,10 @@
++    private static final ConfigOption<Boolean> Q8_INITIAL_SLOT_SHARING =
++            ConfigOptions.key("benchmark.q8.initial-slot-sharing.enabled")
++                    .booleanType()
++                    .defaultValue(false);
++
++    private static final ConfigOption<Map<String, String>> PROFILE_OVERRIDES =
++            ConfigOptions.key("pipeline.jobvertex-resourceprofile-overrides")
++                    .mapType()
++                    .defaultValue(Collections.emptyMap());
++
+@@ -983 +995 @@
+-        if (true) {
++        if (!useInitialSlotSharing()) {
+@@ -1035,3 +1047 @@
+-        /*
+-
+-        if (!justinRescale && this.configuration.get(PipelineOptions.JUSTIN_OVERRIDES) == null) {
++        if (useInitialSlotSharing()) {
+@@ -1042,2 +1051,0 @@
+-         */
+-        declareJustinDesiredResources();
+@@ -1060,0 +1069,9 @@
++    }
++
++    // In the Q8 two-slot experiment, submit the cold job with Flink's ordinary shared slots.
++    // Savepoint replacements with per-vertex memory requests use the original Justin allocator.
++    private boolean useInitialSlotSharing() {
++        return !justinRescale
++                && configuration.get(Q8_INITIAL_SLOT_SHARING)
++                && configuration.get(PROFILE_OVERRIDES).isEmpty()
++                && jobGraph.getJobConfiguration().get(PROFILE_OVERRIDES).isEmpty();
