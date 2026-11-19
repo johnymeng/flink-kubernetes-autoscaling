@@ -1,0 +1,202 @@
+{
+  "hardcoded": {
+    "outcome": "no_resize_with_autoscaler_errors",
+    "window_s": 360.0,
+    "source_mode": "kafka",
+    "join_id": "9d4576d2190e22005d4db79ab1cd578f",
+    "sampling_period_s": 5,
+    "initial_profile": {
+      "join_parallelism": 2,
+      "join_managed_slot_bytes": 165675008,
+      "occupied_slots": 2,
+      "total_slots": 2,
+      "workers": 1,
+      "native_bytes_per_join": null
+    },
+    "initial_slots": {
+      "total": 2,
+      "occupied_by_job": 2
+    },
+    "last_observed_occupied_slots": 2,
+    "observed_occupied_slots": [
+      2
+    ],
+    "failed_in_place_requests": [],
+    "join_cost_at_scaling_reports": [],
+    "kafka_producer_generations": [
+      {
+        "generation": 0,
+        "producer_start_from_release_s": 30.46595335006714,
+        "samples": 39,
+        "measured_s": 316.7386658191681,
+        "records": 25718000,
+        "per_topic_records": {
+          "nexmark-person": 513276,
+          "nexmark-auction": 1539522,
+          "nexmark-bid": 23665202
+        },
+        "records_per_second": 81196.27559043543
+      }
+    ],
+    "observed_offered_records_per_second": 81196.27559043543,
+    "job_start_epochs_ms": [
+      1795121871097
+    ],
+    "jobmanager_pods": [
+      [
+        "41e088f9-78ac-4cd9-9e49-109902da6850",
+        0
+      ]
+    ],
+    "scaling_reports_from_release_s": [],
+    "suspended_from_release_s": [],
+    "transactions": [],
+    "observed_targets": [],
+    "qualified_online_log_lines": 0,
+    "empty_curve_error_lines": 62,
+    "autoscaler_errors": [
+      "MissRateCurve has no points"
+    ],
+    "issues": [],
+    "revision": "f8ce7fbbfae48869d8b1869748ad517801a9f726",
+    "operator_jar_sha256": "57df8474dbc4a0b89d4a3edc40b6cec7b55e22a846505e37553e20568c596933"
+  },
+  "calibrated": {
+    "outcome": "in_place_verified",
+    "window_s": 360.0,
+    "source_mode": "kafka",
+    "join_id": "9d4576d2190e22005d4db79ab1cd578f",
+    "sampling_period_s": 5,
+    "initial_profile": {
+      "join_parallelism": 2,
+      "join_managed_slot_bytes": 165675008,
+      "occupied_slots": 2,
+      "total_slots": 2,
+      "workers": 1,
+      "native_bytes_per_join": null
+    },
+    "initial_slots": {
+      "total": 2,
+      "occupied_by_job": 2
+    },
+    "last_observed_occupied_slots": 16,
+    "observed_occupied_slots": [
+      2,
+      16
+    ],
+    "failed_in_place_requests": [],
+    "join_cost_at_scaling_reports": [
+      {
+        "operator_utc": "2026-11-19T21:01:45.141535870Z",
+        "join_cost": "no_usable_curve"
+      }
+    ],
+    "kafka_producer_generations": [
+      {
+        "generation": 0,
+        "producer_start_from_release_s": 33.055097579956055,
+        "samples": 16,
+        "measured_s": 124.42444658279419,
+        "records": 10423076,
+        "per_topic_records": {
+          "nexmark-person": 207444,
+          "nexmark-auction": 622428,
+          "nexmark-bid": 9593204
+        },
+        "records_per_second": 83770.32236236875
+      },
+      {
+        "generation": 1,
+        "producer_start_from_release_s": 265.46622943878174,
+        "samples": 11,
+        "measured_s": 80.66164827346802,
+        "records": 6835069,
+        "per_topic_records": {
+          "nexmark-person": 135879,
+          "nexmark-auction": 407634,
+          "nexmark-bid": 6291556
+        },
+        "records_per_second": 84737.53197835723
+      }
+    ],
+    "observed_offered_records_per_second": 84150.73197476231,
+    "job_start_epochs_ms": [
+      1795121869831
+    ],
+    "jobmanager_pods": [
+      [
+        "a0e5a310-e54e-4083-a3d2-59ab0e934f37",
+        0
+      ]
+    ],
+    "scaling_reports_from_release_s": [
+      164.51799988746643
+    ],
+    "suspended_from_release_s": [],
+    "transactions": [
+      {
+        "decision_from_release_s": 164.51799988746643,
+        "in_place_ack_from_release_s": 166.51799988746643,
+        "requested": {
+          "parallelism": {
+            "9d4576d2190e22005d4db79ab1cd578f": 4,
+            "6cdc5bb954874d922eaee11a8e7b5dd5": 2,
+            "ee95faff133f57f344ce2765c91ef5e3": 4,
+            "c5f5b8d8e3b98bc809e7a2fc39fc1a79": 4,
+            "cbc357ccb763df2852fee8c4fc7d55f2": 2
+          },
+          "join_bytes_per_slot": 82837504,
+          "managed_bytes_by_vertex": {
+            "9d4576d2190e22005d4db79ab1cd578f": 82837504,
+            "6cdc5bb954874d922eaee11a8e7b5dd5": 33554432,
+            "ee95faff133f57f344ce2765c91ef5e3": 34603008,
+            "c5f5b8d8e3b98bc809e7a2fc39fc1a79": 34603008,
+            "cbc357ccb763df2852fee8c4fc7d55f2": 33554432
+          }
+        },
+        "first_changed_occupied_slots": 16,
+        "ack_to_first_changed_slots_s": 53.4824697971344,
+        "ack_to_running_requested_parallelism_s": 68.15827012062073,
+        "observed_from_release_s": 234.67627000808716,
+        "decision_to_observed_s": 70.15827012062073,
+        "ack_to_observed_s": 68.15827012062073,
+        "observed_profile": {
+          "join_parallelism": 4,
+          "join_managed_slot_bytes": 82837504,
+          "occupied_slots": 16,
+          "total_slots": 16,
+          "workers": 8,
+          "native_bytes_per_join": null
+        }
+      }
+    ],
+    "observed_targets": [
+      {
+        "observed_from_release_s": 169.51620388031006,
+        "parallelism": {
+          "9d4576d2190e22005d4db79ab1cd578f": 4,
+          "6cdc5bb954874d922eaee11a8e7b5dd5": 2,
+          "ee95faff133f57f344ce2765c91ef5e3": 4,
+          "c5f5b8d8e3b98bc809e7a2fc39fc1a79": 4,
+          "cbc357ccb763df2852fee8c4fc7d55f2": 2
+        },
+        "join_bytes_per_slot": 82837504,
+        "managed_bytes_by_vertex": {
+          "9d4576d2190e22005d4db79ab1cd578f": 82837504,
+          "6cdc5bb954874d922eaee11a8e7b5dd5": 33554432,
+          "ee95faff133f57f344ce2765c91ef5e3": 34603008,
+          "c5f5b8d8e3b98bc809e7a2fc39fc1a79": 34603008,
+          "cbc357ccb763df2852fee8c4fc7d55f2": 33554432
+        }
+      }
+    ],
+    "qualified_online_log_lines": 0,
+    "empty_curve_error_lines": 0,
+    "autoscaler_errors": [],
+    "issues": [
+      "Operator logs did not confirm a qualified online cache cost for the Q8 join"
+    ],
+    "revision": "a86d5b1c84e6ec961e1757b6d56f3b46eed739e8",
+    "operator_jar_sha256": "27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48"
+  }
+}
