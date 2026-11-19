@@ -600,6 +600,7 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
 
     private CompletableFuture<Acknowledge> internalSubmitJob(JobGraph jobGraph) {
         applyParallelismOverrides(jobGraph);
+        org.apache.flink.runtime.jobgraph.JobVertexResourceProfileOverrides.apply(jobGraph, configuration);
         log.info("Submitting job '{}' ({}).", jobGraph.getName(), jobGraph.getJobID());
 
         // track as an outstanding job
