@@ -3,6 +3,7 @@ package be.uclouvain.gepiciad.nexmark;
 
 import be.uclouvain.gepiciad.sources.AuctionSourceFunction;
 import be.uclouvain.gepiciad.sources.PersonSourceFunction;
+import be.uclouvain.gepiciad.sources.Q8ReplaySource;
 import org.apache.beam.sdk.nexmark.model.Auction;
 import org.apache.beam.sdk.nexmark.model.Person;
 import org.apache.flink.api.common.functions.FlatJoinFunction;
@@ -57,14 +58,24 @@ public class Query8 {
 
         env.setParallelism(params.getInt("p-window", 1));
 
-        logger.debug(String.valueOf(params.getInt("auction-srcRate")));
+        logger.debug(String.valueOf(auctionSrcRate));
+        String inputPlan = params.get("q8-input-plan");
+        boolean replay = inputPlan != null;
+        if (replay != params.has("q8-release-epoch-ms")) {
+            throw new IllegalArgumentException("Set both q8-input-plan and q8-release-epoch-ms to replay Q8");
+        }
+        long releaseMillis = params.getLong("q8-release-epoch-ms", 0);
 
-        DataStream<Person> persons = env.addSource(new PersonSourceFunction(personSrcRate))
+        DataStream<Person> persons = env.addSource(replay
+                        ? new Q8ReplaySource.Persons(inputPlan, releaseMillis)
+                        : new PersonSourceFunction(personSrcRate))
                 .name("Custom Source: Persons")
                 .setParallelism(params.getInt("p-person-source", 1))
                 .assignTimestampsAndWatermarks(new PersonTimestampAssigner());
 
-        DataStream<Auction> auctions = env.addSource(new AuctionSourceFunction(auctionSrcRate))
+        DataStream<Auction> auctions = env.addSource(replay
+                        ? new Q8ReplaySource.Auctions(inputPlan, releaseMillis)
+                        : new AuctionSourceFunction(auctionSrcRate))
                 .name("Custom Source: Auctions")
                 .setParallelism(params.getInt("p-auction-source", 1))
                 .assignTimestampsAndWatermarks(new AuctionTimestampAssigner());
