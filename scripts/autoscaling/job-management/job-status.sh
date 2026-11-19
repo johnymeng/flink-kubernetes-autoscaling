@@ -9,7 +9,11 @@ if [[ ${1:-} == --namespace ]]; then namespace_args=(-n "${2:?missing namespace}
 deployment="${1:-flink}"
 
 echo "Flink deployments"
-kubectl "${namespace_args[@]}" get flinkdeployment 2>/dev/null || true
+if ((${#namespace_args[@]})); then
+  kubectl "${namespace_args[@]}" get flinkdeployment "${deployment}" 2>/dev/null || true
+else
+  kubectl get flinkdeployment 2>/dev/null || true
+fi
 
 echo
 echo "Deployment detail: ${deployment}"
@@ -30,6 +34,10 @@ kubectl "${namespace_args[@]}" get svc "${deployment}-rest" 2>/dev/null || true
 
 echo
 echo "Recent Flink events"
-kubectl "${namespace_args[@]}" get events --sort-by=.lastTimestamp 2>/dev/null \
-  | grep -E "flink|${deployment}|jobmanager|taskmanager" \
-  | tail -20 || true
+if ((${#namespace_args[@]})); then
+  kubectl "${namespace_args[@]}" get events --field-selector "involvedObject.name=${deployment}" \
+    --sort-by=.lastTimestamp 2>/dev/null | tail -20 || true
+else
+  kubectl get events --sort-by=.lastTimestamp 2>/dev/null \
+    | grep -E "flink|${deployment}|jobmanager|taskmanager" | tail -20 || true
+fi

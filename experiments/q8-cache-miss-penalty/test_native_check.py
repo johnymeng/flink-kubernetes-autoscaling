@@ -6,13 +6,23 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from analyze import JOIN
-from native_check import event_times, kafka_evidence, targets, verified, MIB
+from native_check import event_times, fallback_failures, kafka_evidence, targets, verified, MIB
 from q8_vertices import topology
 from quick_series import capture
 from native_observe import P_KEY, RP_KEY
 
 
 class NativeTimingTest(unittest.TestCase):
+    def test_rpc_failure_has_a_timestamp_and_preserves_root_cause(self):
+        stamp = "1970-01-01T00:00:03.042Z "
+        records = fallback_failures([
+            stamp + "2026-11-19 NativeFlinkService Error while rescaling, falling back to regular upgrade",
+            stamp + "Caused by: java.io.NotSerializableException: JustinVertexResourceRequirements",
+            stamp + "Caused by: org.apache.flink.runtime.rest.util.RestClientException: outer wrapper",
+            stamp + "2026-11-19 Reconciler Suspending existing deployment"], 1, 9, [2])
+        self.assertAlmostEqual(records[0]["report_to_native_failure_s"], 1.042)
+        self.assertIn("NotSerializableException", records[0]["cause"])
+
     def test_reconciled_target_parses_flink_profile_with_commas(self):
         overrides = {P_KEY: f"{JOIN}:2", RP_KEY:
                      f"'{JOIN}:ResourceProfile{{cpuCores=1, managedMemory=32.000mb (33554432 bytes), networkMemory=0 bytes}}'"}

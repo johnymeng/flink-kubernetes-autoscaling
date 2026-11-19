@@ -15,7 +15,18 @@ def receipt(log, **fields):
     print(json.dumps(fields, allow_nan=False), file=log, flush=True)
 
 
-def read_job(base, job_id, pool):
+def read_job(base, job_id, pool, expected_name=None):
+    if expected_name:
+        # A FlinkDeployment may recreate the same named application with a different immutable ID.
+        # A REST interruption or missing job by itself is insufficient evidence of a replacement.
+        with urlopen(f"{base}/jobs/overview", timeout=3) as reply:
+            jobs = json.load(reply)["jobs"]
+        live = [j for j in jobs if j.get("name") == expected_name
+                and j["state"] not in {"FAILED", "FINISHED", "CANCELED", "SUSPENDED"}]
+        if len(live) != 1:
+            raise ValueError(f"Expected one active Q8 job named {expected_name!r}; observed {len(live)}")
+        job_id = live[0]["jid"]
+
     def fetch(path):
         with urlopen(f"{base}/jobs/{job_id}{path}", timeout=3) as reply:
             return json.load(reply)
@@ -39,11 +50,13 @@ def read_job(base, job_id, pool):
                 if task.get("start-time", -1) > 0:
                     key = f"{vertex['id']}/{task['subtask']}"
                     tasks[key] = (task.get("attempt", 0), task["start-time"])
-    return {"state": job["state"], "created": job.get("timestamps", {}).get("CREATED", 0),
+    return {"job_id": job["jid"], "state": job["state"], "created": job.get("timestamps", {}).get("CREATED", 0),
             "job_start": job.get("start-time", 0), "parallelism": sizes, "tasks": tasks, "active": active}
 
 
 def change_reason(before, after):
+    if before.get("job_id") != after.get("job_id"):
+        return "job_id"
     for field in ("created", "job_start"):
         if before[field] > 0 and after[field] > before[field]:
             return field
@@ -133,7 +146,9 @@ class Producer:
 def control(args, producer, rest_pool, offsets_pool):
     directory = args.arm
     config = json.loads((directory / "plan.json").read_text())
-    job_id = json.loads((directory / "deployment-created.json").read_text())["spec"]["flinkConfiguration"]["$internal.pipeline.job-id"]
+    deployment = json.loads((directory / "deployment-created.json").read_text())
+    job_id = deployment["spec"]["flinkConfiguration"]["$internal.pipeline.job-id"]
+    job_name = deployment.get("metadata", {}).get("name")
     release = config["release_ms"] / 1000
     end = release + args.observation_seconds
     clock = time.monotonic
@@ -146,8 +161,8 @@ def control(args, producer, rest_pool, offsets_pool):
     while time.time() < release and baseline is None:
         if ready.exists():
             try:
-                sample = read_job(base, job_id, rest_pool)
-                if sample["active"]:
+                sample = read_job(base, job_id, rest_pool, job_name)
+                if sample["active"] and sample["job_id"] == job_id:
                     baseline = sample
             except (OSError, ValueError) as error:
                 producer.event("unavailable", error=str(error))
@@ -156,7 +171,7 @@ def control(args, producer, rest_pool, offsets_pool):
     if baseline is None:
         raise RuntimeError("Could not establish the initial Q8 tasks before Kafka release")
     time.sleep(max(0, release-time.time()))
-    at_release = read_job(base, job_id, rest_pool)
+    at_release = read_job(base, job_id, rest_pool, job_name)
     if not at_release["active"] or change_reason(baseline, at_release):
         raise RuntimeError("Q8 changed its initial allocation before the producer started")
     producer.event("initial_allocation", consumer=at_release)
@@ -173,7 +188,7 @@ def control(args, producer, rest_pool, offsets_pool):
             producer.pending_sample = offsets_pool.submit(producer.capture)
             next_offsets = clock() + args.offset_interval
         try:
-            job = read_job(base, job_id, rest_pool)
+            job = read_job(base, job_id, rest_pool, job_name)
         except (OSError, ValueError) as error:
             if clock() - last_success > args.rest_timeout:
                 raise RuntimeError("Lost the Q8 consumer REST view") from error

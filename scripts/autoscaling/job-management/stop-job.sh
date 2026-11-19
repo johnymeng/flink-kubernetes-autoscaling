@@ -21,10 +21,14 @@ if [[ -n "$uid" ]]; then
   # A retry must never delete a replacement CR that reused the original name.
   [[ -n "$namespace" && "$uid" =~ ^[[:xdigit:]-]+$ ]] || { echo "UID deletion requires namespace and UID" >&2; exit 2; }
   route="/apis/flink.apache.org/v1beta1/namespaces/$namespace/flinkdeployments/$deployment"
-  if [[ -n $(kubectl "${namespace_args[@]}" get flinkdeployment "$deployment" --ignore-not-found -o name) ]]; then
+  current=$(kubectl "${namespace_args[@]}" get flinkdeployment "$deployment" --ignore-not-found -o name)
+  if [[ -n "$current" ]]; then
     printf '{"apiVersion":"v1","kind":"DeleteOptions","preconditions":{"uid":"%s"}}' "$uid" |
       kubectl delete --raw="$route" -f - >/dev/null
-    kubectl "${namespace_args[@]}" wait --for=delete "flinkdeployment/$deployment" --timeout="$timeout"
+    current=$(kubectl "${namespace_args[@]}" get flinkdeployment "$deployment" --ignore-not-found -o name)
+    if [[ -n "$current" ]]; then
+      kubectl "${namespace_args[@]}" wait --for=delete "flinkdeployment/$deployment" --timeout="$timeout"
+    fi
   fi
   exit 0
 fi

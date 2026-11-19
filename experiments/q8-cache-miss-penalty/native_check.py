@@ -252,6 +252,13 @@ def analyze_arm(folder):
     lines = scoped_log.read_text(errors="replace").splitlines() if scoped_log.exists() else []
     online = [line for line in lines if f"A4S online cache costs for vertex {join_id}" in line]
     empty_curve = [line for line in lines if "MissRateCurve has no points" in line]
+    errors = sorted({message for _, reason, message in events if reason.lower() == "autoscalererror"})
+    if outcome == "no_in_place_resize_observed" and errors:
+        outcome = "no_resize_with_autoscaler_errors"
+    fallbacks = fallback_failures(lines, release, end, decisions)
+    if fallbacks:
+        issues.append("The native request failed and the operator entered its regular upgrade path")
+        outcome = "in_place_failed_then_upgrade"
     if not lines:
         issues.append("Scoped operator logs are missing")
     if plan["arm"] == "calibrated" and not online:
@@ -261,16 +268,46 @@ def analyze_arm(folder):
             "sampling_period_s": 5, "initial_profile": baseline, "initial_slots": initial_slots,
             "last_observed_occupied_slots": filled[-1]["values"]["task_slots_used"] if filled else None,
             "observed_occupied_slots": sorted({s["values"]["task_slots_used"] for s in filled}),
+            "failed_in_place_requests": fallbacks,
             "kafka_producer_generations": generations, "observed_offered_records_per_second": live_rate, "job_start_epochs_ms": starts,
             "jobmanager_pods": sorted(pods), "scaling_reports_from_release_s": [t-release for t in decisions],
             "suspended_from_release_s": [t-release for t in suspended], "transactions": spans,
             "observed_targets": [{"observed_from_release_s": t-release, **target} for t, target in changes],
             "qualified_online_log_lines": len(online), "empty_curve_error_lines": len(empty_curve),
+            "autoscaler_errors": errors,
             "issues": issues}
 
 
 def created_time(created):
     return datetime.fromisoformat(created["metadata"]["creationTimestamp"].replace("Z", "+00:00")).timestamp()
+
+
+def fallback_failures(lines, release, end, reports):
+    failures = []
+    active = None
+    for line in lines:
+        stamp, _, message = line.partition(" ")
+        if "Error while rescaling, falling back to regular upgrade" in message:
+            try:
+                epoch = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp()
+            except ValueError:
+                active = None
+                continue
+            if epoch > end:
+                active = None
+                continue
+            decision = max((t for t in reports if t <= epoch), default=None)
+            active = {"native_failure_from_release_s": epoch - release,
+                      "report_to_native_failure_s": epoch - decision if decision is not None else None,
+                      "cause": None}
+            failures.append(active)
+        elif active and "Caused by:" in message:
+            cause = message.split("Caused by:", 1)[1].strip()
+            if not active["cause"] or "RestClientException:" not in cause:
+                active["cause"] = cause[:600]
+        elif re.match(r"\d{4}-\d\d-\d\d[ T]", message):
+            active = None
+    return failures
 
 
 def main():
@@ -279,6 +316,23 @@ def main():
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     result = {name: analyze_arm(args.pair / name) for name in ("hardcoded", "calibrated")}
+    operators = [read(args.pair / arm / "operator.json") for arm in result]
+    plans = [read(args.pair / arm / "plan.json") for arm in result]
+    pair_issues = []
+    for field in ("revision", "jar_sha256"):
+        values = [op.get(field) for op in operators]
+        if not all(values) or len(set(values)) != 2:
+            pair_issues.append(f"Distinct operator {field} values were not established")
+    if not plans[0].get("artifacts") or plans[0]["artifacts"] != plans[1].get("artifacts"):
+        pair_issues.append("The two arms do not share identical worker and workload artifacts")
+    if all(plan.get("source_mode") == "kafka" for plan in plans):
+        brokers = [plan.get("kafka_bootstrap_servers") for plan in plans]
+        if not all(brokers) or len(set(brokers)) != 2:
+            pair_issues.append("Isolated Kafka broker endpoints were not established")
+    for arm, operator in zip(result, operators):
+        result[arm]["revision"] = operator.get("revision")
+        result[arm]["operator_jar_sha256"] = operator.get("jar_sha256")
+        result[arm]["issues"].extend(pair_issues)
     output = args.output or args.pair / "native-results.json"
     output.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({arm: {"outcome": run.get("outcome"), "issues": run["issues"]} for arm, run in result.items()}))

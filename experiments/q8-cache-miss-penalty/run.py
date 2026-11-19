@@ -34,7 +34,14 @@ def digest(path):
 
 
 def save(path, value):
-    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+    # Independent observers use these files as readiness and completion signals.
+    payload = json.dumps(value, sort_keys=True, indent=2) + "\n"
+    tmp = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp.write_text(payload)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def kube(*args, document=None):

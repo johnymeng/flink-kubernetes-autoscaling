@@ -175,7 +175,12 @@ def main():
     pair_data = json.loads(pair_manifest.read_text()) if pair_manifest.exists() else {}
     offered = pair_data.get("offered_records_per_second")
     native = pair_data.get("scaling_path") == "native_operator"
-    native_results = json.loads((args.pair / "native-results.json").read_text()) if native else {}
+    native_results = {}
+    if native:
+        result_path = args.pair / "native-results.json"
+        if not result_path.is_file():
+            result_path = args.pair.parent / "quick-results.json"
+        native_results = json.loads(result_path.read_text())
     kafka = native and all(result.get("source_mode") == "kafka" for result in native_results.values())
     producer_rate = offered if kafka else None
     if kafka:
@@ -188,7 +193,11 @@ def main():
         records[case], elapsed_finish[case], ended_at_deadline[case] = read_arm(
             args.pair / case, case, args.window_seconds)
     upstream = load_ryan_plotter(args.ryan_plotter, args.output)
-    controllers = json.loads((args.pair.parent / "controllers.json").read_text())
+    if native:
+        controllers = {arm: {"mode": mode, "revision": json.loads((args.pair / arm / "operator.json").read_text())["revision"]}
+                       for arm, mode in (("hardcoded", "main"), ("calibrated", "branch"))}
+    else:
+        controllers = json.loads((args.pair.parent / "controllers.json").read_text())
     for case, rows in records.items():
         draw_ryan(case, rows, upstream, controllers, args.output, cases[case])
     with (args.output / "q8-resource-series.csv").open("w", newline="") as out:
@@ -211,8 +220,10 @@ def main():
     fig.subplots_adjust(left=0.11, bottom=0.125, right=0.975, top=0.81, wspace=0.13, hspace=0.24)
     fig.suptitle("Nexmark Q8 on the lab cluster", fontsize=19, fontweight="bold", x=0.11,
                  y=0.963, ha="left")
-    shared_release = len({rows[0]["release_epoch"] for rows in records.values()}) == 1
-    schedule = "Simultaneous release" if shared_release else "Sequential jobs"
+    release_times = [records[arm][0]["release_epoch"] for arm in cases]
+    first_end = min(records[arm][0]["release_epoch"] + elapsed_finish[arm] for arm in cases)
+    schedule = "Simultaneous release" if len(set(release_times)) == 1 else (
+        "Concurrent jobs" if max(release_times) < first_end else "Sequential jobs")
     method = "operator-managed in-place scaling" if native else "including savepoint recovery"
     subtitle = f"{schedule} · identical paced input · {method}"
     if any(ended_at_deadline.values()):
@@ -246,6 +257,11 @@ def main():
         for axis in (a, b, c):
             for left, right in spans:
                 axis.axvspan(left, right, color="#cbd5e1", alpha=.28, linewidth=0, zorder=0)
+            if native:
+                for failure in result.get("failed_in_place_requests", ()):
+                    at = failure["native_failure_from_release_s"]
+                    if 0 <= at <= elapsed_finish[case]:
+                        axis.axvline(at, color="#a44224", linestyle="--", linewidth=1)
         t = [event["elapsed_sec"] for event in rows]
         a.plot(t, [value(event, METRICS[0]) for event in rows], linewidth=1.75, marker="o",
                markersize=2.5, color="#0369a1")
@@ -281,8 +297,10 @@ def main():
     axes[2, 0].yaxis.set_major_locator(MaxNLocator(integer=True))
     axes[1, 0].legend(loc="best", frameon=True, framealpha=0.95, edgecolor="#e2e8f0")
     shading = "in-place acknowledgement to observed placement or cutoff" if native else "resize to verified restore or cutoff"
-    fig.text(0.11, 0.039,
-             f"5 s REST samples. Gaps mark missing data. Shading spans {shading}. Memory sums TaskManager managed pools.",
+    caption = f"5 s REST samples. Gaps mark missing data. Shading spans {shading}. Memory sums TaskManager managed pools."
+    if any(result.get("failed_in_place_requests") for result in native_results.values()):
+        caption += "\nDashed red lines mark failed in-place updates."
+    fig.text(0.11, 0.039, caption,
              fontsize=8.7, color="#475569")
     for format_ in ("png",):
         fig.savefig(args.output / f"q8-resource-comparison.{format_}", dpi=200, format=format_)

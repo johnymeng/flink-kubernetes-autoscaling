@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import subprocess
 import sys
@@ -73,9 +74,16 @@ def configure_manifest(manifest, args, owner, hashes):
 
 def check_artifacts(artifacts):
     entry = "org/apache/flink/runtime/scheduler/adaptive/AdaptiveScheduler.class"
-    with ZipFile(artifacts / "savepoint-profiles.jar") as archive:
+    overlay = artifacts / "savepoint-profiles.jar"
+    requirements = "org.apache.flink.runtime.jobgraph.justin.JustinVertexResourceRequirements"
+    with ZipFile(overlay) as archive:
         if b"benchmark.q8.initial-slot-sharing.enabled" not in archive.read(entry):
             raise ValueError("Two-slot startup requires the shared-start scheduler overlay")
+        if requirements.replace(".", "/") + ".class" not in archive.namelist():
+            raise ValueError("Rebuild the shared-start overlay with serializable in-place resource requirements")
+    signature = subprocess.check_output(["javap", "-classpath", str(overlay), requirements], text=True)
+    if not re.search(r"public class [^\n]+ implements [^\n]*java\.io\.Serializable\b", signature):
+        raise ValueError("In-place resource persistence requires serializable JustinVertexResourceRequirements")
     with ZipFile(artifacts / SQL_JAR) as archive:
         if "com/github/nexmark/flink/sql/SqlQueryJob.class" not in archive.namelist():
             raise ValueError("The Nexmark SQL JAR is missing its application entry point")
@@ -220,7 +228,16 @@ def watch(args, directory, name, job_id, plan):
                                   "--hook", str(args.kafka_hook), "--tps", "80000",
                                   "--observation-seconds", str(args.observation_seconds)],
                                  stdout=kafka_log, stderr=subprocess.STDOUT, start_new_session=True)
-        stack.callback(run.stop_observer, kafka)
+        def stop_kafka():
+            # Signal the coordinator first so it can stop its owned external producer.
+            # Killing its entire process group here would also kill the cleanup hook.
+            if kafka.poll() is None:
+                kafka.terminate()
+                try:
+                    kafka.wait(timeout=190)
+                except subprocess.TimeoutExpired:
+                    run.stop_observer(kafka)
+        stack.callback(stop_kafka)
         while time.time() < end:
             for child, logfile in ((observer, "observer.log"), (kafka, "kafka-control.log")):
                 if child.poll() is not None:
@@ -380,6 +397,7 @@ def main():
     if not args.kafka_hook.is_file() or not os.access(args.kafka_hook, os.X_OK):
         parser.error("Kafka hook must name an executable file")
     check_artifacts(args.artifacts)
+    signal.signal(signal.SIGTERM, signal.default_int_handler)
     run.use_namespace(args.namespace)
     run_arm(args)
 
