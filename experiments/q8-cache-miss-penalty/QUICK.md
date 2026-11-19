@@ -58,6 +58,23 @@ ARTIFACTS="$shared_artifacts" bash quick_test.sh "$RESULTS/q8-80k-two-slots" lit
 
 `quick-results.json` reports the actual starting and ending occupied slots, input processed at the comparison sample, and the target rates observed by each controller. Both controllers may choose to keep their allocations. The runner verifies live measurements in that case as well.
 
+### Six-minute lab measurement
+
+Both jobs offered 28,800,000 input records over the window and started with two occupied slots on one TaskManager. Counts are exclusive source offsets summed across the four logical partitions. The two jobs shared the same worker.
+
+| Controller | Occupied slots, start → last observed | Final join placement | Records processed | Time of count |
+|---|---:|---:|---:|---:|
+| main | 2 → 2 | 1 × 158 MiB | 6,250,667 | 355.5 s |
+| Online branch | 2 → 16 | 12 × 32 MiB | 2,787,745 | 355.5 s |
+
+The paired run took 579.8 s from setup through cleanup. Main recorded 58 evaluator failures on empty stateless-source curves while the join had a populated curve.
+The branch requested 12 join subtasks at 151.4 s and verified their placement after savepoint restore at 345.2 s. The saved offsets matched the restored source positions.
+Replaying the fixed penalty coefficients in the branch planner on the decision snapshot selected the same placement.
+
+During the first attempt with the runtime’s default ten-second stabilization window, Flink began constructing a 16-slot replacement with ten acquired slots. It failed to assign all tasks and its JobManager timed out. The checker rejected that attempt for the performance comparison. The rerun gave both JobManagers more time to acquire the proposed slots.
+
+[Comparison chart and time series](results/80k-two-slots-2026-11-19/) · [First attempt](results/80k-two-slots-2026-11-19/initial-attempt/)
+
 ## Verified lab runs on November 19, 2026
 
 Both pairs used the same Q8 runtime and matched starting allocations. Each result below uses four logical source offsets at the last complete five-second observation at or before 360 seconds, or the exact end offsets for a job that had already finished. Sampling timestamps are included so the counts can be compared at the same phase.

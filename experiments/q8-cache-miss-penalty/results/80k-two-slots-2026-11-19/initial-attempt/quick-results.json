@@ -1,0 +1,586 @@
+{
+  "arms": {
+    "branch": {
+      "applied": [],
+      "arm": "calibrated",
+      "cold_start_evidence": {
+        "native_sample_epoch": 1795117949.0125926,
+        "zero_offsets_epoch": 1795117949.0125926
+      },
+      "complete_backlog_samples": 31,
+      "completed_input": null,
+      "completed_input_per_wall_second": null,
+      "controller_origins": {
+        "ScalingExecutor": "27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48",
+        "ScalingMetricEvaluator": "27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48",
+        "a4s.A4S": "27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48"
+      },
+      "demand": {
+        "controller_join_targets": [
+          {
+            "elapsed_seconds": 73.52300000190735,
+            "join_target_records_per_second": 53961.577,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 78.23000001907349,
+            "join_target_records_per_second": 55557.249,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 83.28800010681152,
+            "join_target_records_per_second": 57012.705,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 88.23799991607666,
+            "join_target_records_per_second": 57645.604,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 93.22099995613098,
+            "join_target_records_per_second": 57282.849,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 98.27600002288818,
+            "join_target_records_per_second": 57672.024,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 103.40400004386902,
+            "join_target_records_per_second": 59652.276,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 108.26799988746643,
+            "join_target_records_per_second": 59600.201,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 113.21799993515015,
+            "join_target_records_per_second": 61707.437,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 118.29900002479553,
+            "join_target_records_per_second": 62006.236,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 123.19400000572205,
+            "join_target_records_per_second": 61984.811,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 128.2279999256134,
+            "join_target_records_per_second": 63483.476,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 133.2699999809265,
+            "join_target_records_per_second": 63714.003,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 138.20700001716614,
+            "join_target_records_per_second": 63914.411,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 143.24300003051758,
+            "join_target_records_per_second": 64974.739,
+            "online_fit_qualified": true
+          },
+          {
+            "elapsed_seconds": 148.17700004577637,
+            "join_target_records_per_second": 79965.905,
+            "online_fit_qualified": true
+          }
+        ],
+        "full_lag_samples": 31,
+        "initial_occupied_slots": 2,
+        "initial_taskmanagers": [
+          {
+            "free_slots": 0,
+            "id": "r8pen-195024-calibrated-taskmanager-1-1",
+            "job_slot_managed_mib": [
+              158,
+              158
+            ],
+            "pool_bytes": 331350016,
+            "total_slots": 2
+          }
+        ],
+        "initial_total_slots": 2,
+        "last_observed_occupied_slots": 2,
+        "measured_offered_records_per_second": 79511.53014191662,
+        "median_lag_gauge_disagreement_seconds_of_input": 4.6875e-05,
+        "offered_records_per_second": 80000,
+        "peak_observed_pending_records": 9241521,
+        "source_demand_on_main_failure": []
+      },
+      "finish_clock": "FINISHED poll upper bound",
+      "finished": false,
+      "input_at_cutoff": null,
+      "input_end_offsets": {
+        "Auctions/0": 11520000,
+        "Auctions/1": 11520000,
+        "Persons/0": 2880000,
+        "Persons/1": 2880000
+      },
+      "input_plan": "360:8000:32000",
+      "issues": [
+        "Unverified resize 1213f84821774f"
+      ],
+      "job_start_epochs_ms": [
+        1795117910430,
+        1795118183119
+      ],
+      "longest_backlog_sample_gap_seconds": 5.000173330307007,
+      "matched_start_profile": {
+        "join_managed_slot_bytes": 165675008,
+        "join_parallelism": 1,
+        "native_bytes_per_join": [
+          138062506
+        ],
+        "occupied_slots": 2,
+        "total_slots": 2,
+        "workers": 1
+      },
+      "path": "calibrated",
+      "pre_release_zero_offsets_observed": true,
+      "provenance": {
+        "artifacts": {
+          "Query8.jar": "7c6bad4dd3606b21903715bd8167cfaf85a8974b8466b7a85a222e08e3fa6d3f",
+          "abi3-mrc-telemetry.jar": "868d93fe641c58f3205e20d5f76e99e10950a426ab1891bcc300f2e2a6248d4c",
+          "rocksdbjni.jar": "b1368b4f01710658f059a24a12d83013fd4fadedb9bba7b3956f4afeca658c51",
+          "savepoint-profiles.jar": "4a3568ae862c65ec8fc1fd981e16e2078fcec8adf09e29dd979a73266121d6f5"
+        },
+        "controller_classpath_sha256": "0e2bde305bf843aa23576f27fd8273fbe2b70492de154f8a17687eca47288982",
+        "deployed_spec_sha256": "16748dcbbaf1ee29338df11fcaaa0c85b10eaac56637925de49636e4894b4300",
+        "normalized_manifest_sha256": "c74a7f1a1fa485c44e033f4c9a565e6681996fa8ab7a0aea4ae17ae02031e67b",
+        "policy_sha256": "982f565013f4a095b7ae80a55d58008914324457c2ce5bccef32312c1ff66b9e"
+      },
+      "qualified_online_at_triggers": 1,
+      "release_ms": 1795117978490,
+      "revision": "ffc90a2ff7e9372501ed5382504205e2161db24e",
+      "sampled_backlog_peak": 9241529,
+      "standard_triggers": 1,
+      "trigger_comparisons": [
+        {
+          "active_proposed": true,
+          "arm": "calibrated",
+          "current_p": 1,
+          "epoch": 1795118126.667,
+          "fitted_baseline_s": 4.6425000317013766e-05,
+          "fixed": {
+            "parallelism": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "12",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+            },
+            "profiles": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+            },
+            "proposed": true
+          },
+          "fixed_baseline_s": 5e-06,
+          "fixed_slope_s": 0.004995,
+          "job_id": "208b59c10d354ad5b281f68aa10f1189",
+          "job_start_epoch_ms": 1795117910430,
+          "mrc_points": 41093,
+          "online_baseline_s": 4.6425000317013766e-05,
+          "online_fit_qualified": true,
+          "online_slope_s": 2.2390252864943e-05,
+          "slope_only": {
+            "parallelism": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "12",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+            },
+            "profiles": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+            },
+            "proposed": true
+          },
+          "snapshot": "2026-11-19T19:55:26.368867254Z",
+          "target_records_s": 79965.905,
+          "trigger_parallelism": {
+            "11ffd1a2f5905feab358b0af9a75fe4e": 12
+          },
+          "type": "decision"
+        }
+      ],
+      "unexpected_job_start_epochs_ms": [
+        1795118183119
+      ],
+      "unexpected_restores": [],
+      "wall_seconds_from_release": null
+    },
+    "main": {
+      "applied": [],
+      "arm": "hardcoded",
+      "cold_start_evidence": {
+        "native_sample_epoch": 1795117949.0114906,
+        "zero_offsets_epoch": 1795117949.0114906
+      },
+      "complete_backlog_samples": 73,
+      "completed_input": null,
+      "completed_input_per_wall_second": null,
+      "controller_origins": {
+        "ScalingExecutor": "57df8474dbc4a0b89d4a3edc40b6cec7b55e22a846505e37553e20568c596933",
+        "ScalingMetricEvaluator": "57df8474dbc4a0b89d4a3edc40b6cec7b55e22a846505e37553e20568c596933",
+        "a4s.A4S": "57df8474dbc4a0b89d4a3edc40b6cec7b55e22a846505e37553e20568c596933"
+      },
+      "demand": {
+        "controller_join_targets": [],
+        "full_lag_samples": 72,
+        "initial_occupied_slots": 2,
+        "initial_taskmanagers": [
+          {
+            "free_slots": 0,
+            "id": "r8pen-195024-hardcoded-taskmanager-1-1",
+            "job_slot_managed_mib": [
+              158,
+              158
+            ],
+            "pool_bytes": 331350016,
+            "total_slots": 2
+          }
+        ],
+        "initial_total_slots": 2,
+        "last_observed_occupied_slots": 2,
+        "measured_offered_records_per_second": 79967.48680733515,
+        "median_lag_gauge_disagreement_seconds_of_input": 0.0,
+        "offered_records_per_second": 80000,
+        "peak_observed_pending_records": 22198910,
+        "source_demand_on_main_failure": [
+          {
+            "elapsed_seconds": 73.23900008201599,
+            "source_demand_records_per_second": 55528.392263667614
+          },
+          {
+            "elapsed_seconds": 78.16599988937378,
+            "source_demand_records_per_second": 56063.55554747577
+          },
+          {
+            "elapsed_seconds": 83.17199993133545,
+            "source_demand_records_per_second": 57489.63622452528
+          },
+          {
+            "elapsed_seconds": 88.17700004577637,
+            "source_demand_records_per_second": 58115.627213265005
+          },
+          {
+            "elapsed_seconds": 93.17700004577637,
+            "source_demand_records_per_second": 59443.31480222373
+          },
+          {
+            "elapsed_seconds": 98.20199990272522,
+            "source_demand_records_per_second": 60233.61150636464
+          },
+          {
+            "elapsed_seconds": 103.35800004005432,
+            "source_demand_records_per_second": 60977.05080655311
+          },
+          {
+            "elapsed_seconds": 108.23300004005432,
+            "source_demand_records_per_second": 61648.92910450426
+          },
+          {
+            "elapsed_seconds": 113.25200009346008,
+            "source_demand_records_per_second": 61934.429281680335
+          },
+          {
+            "elapsed_seconds": 118.26500010490417,
+            "source_demand_records_per_second": 62870.46715017065
+          },
+          {
+            "elapsed_seconds": 123.18300008773804,
+            "source_demand_records_per_second": 63421.55850857954
+          },
+          {
+            "elapsed_seconds": 128.1619999408722,
+            "source_demand_records_per_second": 63627.57314802085
+          },
+          {
+            "elapsed_seconds": 133.2039999961853,
+            "source_demand_records_per_second": 64427.12398497151
+          },
+          {
+            "elapsed_seconds": 138.2149999141693,
+            "source_demand_records_per_second": 64885.46708935955
+          },
+          {
+            "elapsed_seconds": 143.2369999885559,
+            "source_demand_records_per_second": 65146.34731633737
+          },
+          {
+            "elapsed_seconds": 148.14100003242493,
+            "source_demand_records_per_second": 80906.15090135131
+          },
+          {
+            "elapsed_seconds": 153.24799990653992,
+            "source_demand_records_per_second": 80279.05780850486
+          },
+          {
+            "elapsed_seconds": 158.0420000553131,
+            "source_demand_records_per_second": 80388.87857275493
+          },
+          {
+            "elapsed_seconds": 163.1800000667572,
+            "source_demand_records_per_second": 80006.97043279531
+          },
+          {
+            "elapsed_seconds": 168.25200009346008,
+            "source_demand_records_per_second": 80005.18356680803
+          },
+          {
+            "elapsed_seconds": 173.2039999961853,
+            "source_demand_records_per_second": 79633.45867349127
+          },
+          {
+            "elapsed_seconds": 178.23600006103516,
+            "source_demand_records_per_second": 80031.89175484714
+          },
+          {
+            "elapsed_seconds": 183.20600008964539,
+            "source_demand_records_per_second": 80715.09377365767
+          },
+          {
+            "elapsed_seconds": 188.30099987983704,
+            "source_demand_records_per_second": 79705.81345522069
+          },
+          {
+            "elapsed_seconds": 193.22000002861023,
+            "source_demand_records_per_second": 78892.8806102334
+          },
+          {
+            "elapsed_seconds": 198.1840000152588,
+            "source_demand_records_per_second": 80714.18166238218
+          },
+          {
+            "elapsed_seconds": 203.19799995422363,
+            "source_demand_records_per_second": 79731.69163964633
+          },
+          {
+            "elapsed_seconds": 208.14199995994568,
+            "source_demand_records_per_second": 80068.79017283245
+          },
+          {
+            "elapsed_seconds": 213.18300008773804,
+            "source_demand_records_per_second": 80430.12227174037
+          },
+          {
+            "elapsed_seconds": 218.19199991226196,
+            "source_demand_records_per_second": 79790.08713040994
+          },
+          {
+            "elapsed_seconds": 223.1619999408722,
+            "source_demand_records_per_second": 79027.05482387224
+          },
+          {
+            "elapsed_seconds": 228.5090000629425,
+            "source_demand_records_per_second": 80413.16956670079
+          },
+          {
+            "elapsed_seconds": 233.19400000572205,
+            "source_demand_records_per_second": 79923.16263124063
+          },
+          {
+            "elapsed_seconds": 238.25300002098083,
+            "source_demand_records_per_second": 79269.56819935415
+          },
+          {
+            "elapsed_seconds": 243.19700002670288,
+            "source_demand_records_per_second": 79995.94612615016
+          },
+          {
+            "elapsed_seconds": 248.17300009727478,
+            "source_demand_records_per_second": 79963.50469225386
+          },
+          {
+            "elapsed_seconds": 253.24300003051758,
+            "source_demand_records_per_second": 79451.12212682675
+          },
+          {
+            "elapsed_seconds": 258.15199995040894,
+            "source_demand_records_per_second": 80291.72975289245
+          },
+          {
+            "elapsed_seconds": 263.2869999408722,
+            "source_demand_records_per_second": 81108.36059251218
+          },
+          {
+            "elapsed_seconds": 268.1449999809265,
+            "source_demand_records_per_second": 79310.38916509514
+          },
+          {
+            "elapsed_seconds": 273.20700001716614,
+            "source_demand_records_per_second": 80000.53334755593
+          },
+          {
+            "elapsed_seconds": 278.19400000572205,
+            "source_demand_records_per_second": 79930.52123359093
+          },
+          {
+            "elapsed_seconds": 283.2060000896454,
+            "source_demand_records_per_second": 79367.4136921341
+          },
+          {
+            "elapsed_seconds": 288.27500009536743,
+            "source_demand_records_per_second": 80215.97223214158
+          },
+          {
+            "elapsed_seconds": 293.210000038147,
+            "source_demand_records_per_second": 80966.87663367185
+          },
+          {
+            "elapsed_seconds": 298.27300000190735,
+            "source_demand_records_per_second": 79411.56545577197
+          },
+          {
+            "elapsed_seconds": 303.2130000591278,
+            "source_demand_records_per_second": 80002.69177201629
+          },
+          {
+            "elapsed_seconds": 308.21799993515015,
+            "source_demand_records_per_second": 80726.6468605382
+          },
+          {
+            "elapsed_seconds": 313.2349998950958,
+            "source_demand_records_per_second": 79482.459147526
+          },
+          {
+            "elapsed_seconds": 318.2460000514984,
+            "source_demand_records_per_second": 80005.94200828453
+          },
+          {
+            "elapsed_seconds": 323.33899998664856,
+            "source_demand_records_per_second": 80550.84055818206
+          },
+          {
+            "elapsed_seconds": 328.28399991989136,
+            "source_demand_records_per_second": 79509.0703919552
+          },
+          {
+            "elapsed_seconds": 333.27300000190735,
+            "source_demand_records_per_second": 80000.82841757959
+          },
+          {
+            "elapsed_seconds": 338.2339999675751,
+            "source_demand_records_per_second": 80689.48623827004
+          },
+          {
+            "elapsed_seconds": 343.1640000343323,
+            "source_demand_records_per_second": 79521.8900427088
+          },
+          {
+            "elapsed_seconds": 348.2339999675751,
+            "source_demand_records_per_second": 80002.97096170601
+          },
+          {
+            "elapsed_seconds": 353.19400000572205,
+            "source_demand_records_per_second": 80628.13718628137
+          },
+          {
+            "elapsed_seconds": 358.20300006866455,
+            "source_demand_records_per_second": 79481.6666428602
+          }
+        ]
+      },
+      "finish_clock": "FINISHED poll upper bound",
+      "finished": false,
+      "first_raw_main_empty_curve_error": {
+        "arm": "hardcoded",
+        "curve_points_by_vertex": {
+          "11ffd1a2f5905feab358b0af9a75fe4e": 41117,
+          "6cdc5bb954874d922eaee11a8e7b5dd5": 0,
+          "cbc357ccb763df2852fee8c4fc7d55f2": 0
+        },
+        "empty_curve_mode": "literal",
+        "epoch": 1795118051.729,
+        "exception": "java.lang.IllegalStateException: MissRateCurve has no points",
+        "job_id": "a51362a9817e43bab971f86348a3d6a9",
+        "job_start_epoch_ms": 1795117907900,
+        "snapshot": "2026-11-19T19:54:11.369215519Z",
+        "source_demand_records_s": 55528.392263667614,
+        "stack": "[org.apache.flink.a4s.core.MissRateCurve.leastMemoryBytesForMissRate(MissRateCurve.java:91), org.apache.flink.autoscaler.a4s.MemoryParallelismCurve.fromMissRateCurve(MemoryParallelismCurve.java:185), org.apache.flink.autoscaler.ScalingMetricEvaluator.evaluate(ScalingMetricEvaluator.java:98), org.apache.flink.autoscaler.RyanQ8Policy$PolicyTrace.evaluate(RyanQ8Policy.java:202), org.apache.flink.autoscaler.JobAutoScalerImpl.runScalingLogic(JobAutoScalerImpl.java:231), org.apache.flink.autoscaler.JobAutoScalerImpl.scale(JobAutoScalerImpl.java:103), org.apache.flink.autoscaler.RyanQ8Policy.main(RyanQ8Policy.java:93)]",
+        "type": "literal_main_empty_curve"
+      },
+      "input_at_cutoff": {
+        "finished_before_cutoff": false,
+        "next_sample_records": 6296568,
+        "next_sample_seconds": 360.5309841632843,
+        "records": 6202675,
+        "sample_seconds": 355.53085446357727
+      },
+      "input_end_offsets": {
+        "Auctions/0": 11520000,
+        "Auctions/1": 11520000,
+        "Persons/0": 2880000,
+        "Persons/1": 2880000
+      },
+      "input_plan": "360:8000:32000",
+      "issues": [],
+      "job_start_epochs_ms": [
+        1795117907900
+      ],
+      "longest_backlog_sample_gap_seconds": 5.000192403793335,
+      "matched_start_profile": {
+        "join_managed_slot_bytes": 165675008,
+        "join_parallelism": 1,
+        "native_bytes_per_join": [
+          138062506
+        ],
+        "occupied_slots": 2,
+        "total_slots": 2,
+        "workers": 1
+      },
+      "path": "hardcoded",
+      "pre_release_zero_offsets_observed": true,
+      "provenance": {
+        "artifacts": {
+          "Query8.jar": "7c6bad4dd3606b21903715bd8167cfaf85a8974b8466b7a85a222e08e3fa6d3f",
+          "abi3-mrc-telemetry.jar": "868d93fe641c58f3205e20d5f76e99e10950a426ab1891bcc300f2e2a6248d4c",
+          "rocksdbjni.jar": "b1368b4f01710658f059a24a12d83013fd4fadedb9bba7b3956f4afeca658c51",
+          "savepoint-profiles.jar": "4a3568ae862c65ec8fc1fd981e16e2078fcec8adf09e29dd979a73266121d6f5"
+        },
+        "controller_classpath_sha256": "343bb500951841d73e4bc7feadc4a9322b14689501811cba2d93efcd8c5c2743",
+        "deployed_spec_sha256": "16748dcbbaf1ee29338df11fcaaa0c85b10eaac56637925de49636e4894b4300",
+        "normalized_manifest_sha256": "c74a7f1a1fa485c44e033f4c9a565e6681996fa8ab7a0aea4ae17ae02031e67b",
+        "policy_sha256": "0ee9241544bd8dfd1808aa05c1a3d4e2ecd31701aa4ede840b6005a4332bb69a"
+      },
+      "qualified_online_at_triggers": 0,
+      "raw_main_empty_curve_evaluations": 58,
+      "release_ms": 1795117978490,
+      "revision": "f8ce7fbbfae48869d8b1869748ad517801a9f726",
+      "sampled_backlog_peak": 22472976,
+      "standard_triggers": 0,
+      "trigger_comparisons": [],
+      "unexpected_job_start_epochs_ms": [],
+      "unexpected_restores": [],
+      "wall_seconds_from_release": null
+    }
+  },
+  "branch_throughput_change_percent": null,
+  "different_verified_join_profile": false,
+  "execution_order": "parallel",
+  "issues": [
+    "branch: Unverified resize 1213f84821774f",
+    "branch: unexpected job restart",
+    "branch: missing complete source offsets near the cutoff",
+    "branch: incomplete window or resize still in progress",
+    "branch: An unchanged allocation lacks live placement and evaluation evidence"
+  ],
+  "main_empty_curve_handling": "literal",
+  "observation_seconds": 360,
+  "passed": false,
+  "sampled_branch_input_change_percent_at_cutoff": null,
+  "wall_seconds_including_setup_and_cleanup": 584.3393971920013
+}

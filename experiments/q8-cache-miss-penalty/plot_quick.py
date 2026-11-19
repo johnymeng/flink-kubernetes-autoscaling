@@ -153,7 +153,8 @@ def join_profile(folder, release, end_epoch):
             if entry.get("type") == "rescale_start":
                 starts[entry["transaction"]] = entry["epoch"] - release
             elif entry.get("type") == "rescale_end" and entry["transaction"] in starts:
-                spans.append((starts[entry["transaction"]], entry["epoch"] - release))
+                spans.append((starts.pop(entry["transaction"]), entry["epoch"] - release))
+    spans.extend((start, end_epoch - release) for start in starts.values())
     return profiles, spans
 
 
@@ -225,9 +226,10 @@ def main():
         a.plot(t, [value(event, METRICS[0]) for event in rows], linewidth=1.75, marker="o",
                markersize=2.5, color="#0369a1")
         if offered is not None:
-            a.axhline(offered, color="#9a3412", linestyle="--", linewidth=1.2,
-                      label=f"Offered {offered:,} records/s")
-            a.legend(loc="upper right", framealpha=.95, fontsize=8)
+            a.axhline(offered, color="#9a3412", linestyle="--", linewidth=1.2)
+            a.annotate(f"Offered {offered:,} records/s", xy=(.98, offered),
+                       xycoords=a.get_yaxis_transform(), xytext=(0, 3), textcoords="offset points",
+                       va="bottom", ha="right", fontsize=8, color="#81330f")
         b.step(t, [value(event, METRICS[2], MIB) for event in rows], where="post", linewidth=1.7,
                color="#16734e", linestyle="--", label="Allocated")
         b.step(t, [value(event, METRICS[1], MIB) for event in rows], where="post", linewidth=1.7,
@@ -255,7 +257,7 @@ def main():
     axes[2, 0].yaxis.set_major_locator(MaxNLocator(integer=True))
     axes[1, 0].legend(loc="best", frameon=True, framealpha=0.95, edgecolor="#e2e8f0")
     fig.text(0.11, 0.039,
-             "5 s Flink REST samples. Gaps mark unavailable metrics. Shading spans resize request to verified restore. Memory sums TaskManager managed pools.",
+             "5 s REST samples. Gaps mark missing data. Shading spans resize to verified restore or cutoff. Memory sums TaskManager managed pools.",
              fontsize=8.7, color="#475569")
     for format_ in ("png",):
         fig.savefig(args.output / f"q8-resource-comparison.{format_}", dpi=200, format=format_)
