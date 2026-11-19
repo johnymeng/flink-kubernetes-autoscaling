@@ -107,9 +107,8 @@ public class ScalingMetricEvaluator {
             String calibratedCosts =
                     onlineCacheCosts ? null : calibratedCacheCosts.get(vertex.toHexString());
             Optional<OnlineCacheCost> onlineCost =
-                    onlineCacheCosts
-                            ? onlineCacheCost(metricsHistory, vertex, topology.get(vertex).getParallelism())
-                            : Optional.empty();
+                    selectedOnlineCacheCost(
+                            conf, metricsHistory, vertex, topology.get(vertex).getParallelism());
             if (onlineCost.isPresent()) {
                 var cost = onlineCost.get();
                 LOG.debug("A4S online cache costs for vertex {}: {}", vertex, cost);
@@ -166,6 +165,23 @@ public class ScalingMetricEvaluator {
                             + vertex + " at " + targetRate + " records/s");
         }
         return curve;
+    }
+
+    static Optional<OnlineCacheCost> selectedOnlineCacheCost(
+            Configuration conf,
+            SortedMap<Instant, CollectedMetrics> history,
+            JobVertexID vertex,
+            int parallelism) {
+        if (!conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)) {
+            return Optional.empty();
+        }
+        var fitted = onlineCacheCost(history, vertex, parallelism);
+        if (conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE)) {
+            double baseline = conf.get(AutoScalerOptions.A4S_HIT_LATENCY_SEC);
+            return fitted.map(
+                    cost -> new OnlineCacheCost(baseline, cost.getMissPenaltySecondsPerRecord()));
+        }
+        return fitted;
     }
 
     @VisibleForTesting
