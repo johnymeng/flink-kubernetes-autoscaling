@@ -9,6 +9,8 @@ import time
 from urllib.parse import quote
 from urllib.request import urlopen
 
+from q8_vertices import topology
+
 JOIN = "11ffd1a2f5905feab358b0af9a75fe4e"
 SOURCES = {
     "cbc357ccb763df2852fee8c4fc7d55f2": "Persons",
@@ -21,23 +23,39 @@ def get(base, route):
         return json.load(response)
 
 
-def capture(base, job_id, metric_ids, *, physical_slots=False):
+def capture(base, job_id, metric_ids, *, physical_slots=False, native_scaling=False, kafka=False):
     prefix = "/jobs/" + job_id
     job = get(base, prefix)
     data = {"state": job["state"], "job_start_ms": job["start-time"],
             "parallelism": {v["id"]: v["parallelism"] for v in job["vertices"]}}
+    join_id = JOIN
+    source_roles = SOURCES
+    if kafka:
+        sources, join_id = topology(job)
+        source_roles = {vertex["id"]: "Kafka/" + vertex["id"] for vertex in sources}
+        data.update(join_id=join_id, vertices={v["id"]: v["name"] for v in job["vertices"]},
+                    source_ids=list(source_roles))
+    if native_scaling:
+        data["running_tasks"] = {v["id"]: v["tasks"].get("RUNNING", 0) for v in job["vertices"]}
     if job["state"] != "RUNNING":
         return data
-    routes = {"join_managed_slot_bytes": prefix + "/justin", "overview": "/overview", "checkpoints": prefix + "/checkpoints",
-              "native": prefix + "/vertices/" + JOIN + "/a4s-metrics?get=cacheCostSamples,cacheCostCompaction"}
+    routes = {"overview": "/overview", "checkpoints": prefix + "/checkpoints"}
+    if join_id:
+        routes.update(join_managed_slot_bytes=prefix + "/justin",
+                      native=prefix + "/vertices/" + join_id + "/a4s-metrics?get=cacheCostSamples,cacheCostCompaction")
     if physical_slots:
         routes["physical_slots"] = "/taskmanagers"
-    for vertex, role in SOURCES.items():
+    if native_scaling and join_id:
+        routes["join_locations"] = prefix + "/vertices/" + join_id
+    for vertex, role in source_roles.items():
         for index in range(data["parallelism"][vertex]):
             routes[f"{role}/{index}"] = f"{prefix}/vertices/{vertex}/subtasks/{index}/metrics"
 
     def fetch(item):
         key, route = item
+        if key == "join_locations":
+            return key, {str(t["subtask"]): t["taskmanager-id"] for t in get(base, route)["subtasks"]
+                         if t["status"] == "RUNNING"}
         if key == "physical_slots":
             summaries = get(base, route)["taskmanagers"]
             slots = []
@@ -52,22 +70,30 @@ def capture(base, job_id, metric_ids, *, physical_slots=False):
         if key in ("overview", "checkpoints", "native", "join_managed_slot_bytes"):
             value = get(base, route)
             if key == "join_managed_slot_bytes":
-                return key, value[JOIN]["resourceProfile"]["managedMemory"]["bytes"]
+                if native_scaling:
+                    return "managed_bytes_by_vertex", {vid: info["resourceProfile"]["managedMemory"]["bytes"]
+                                                      for vid, info in value.items()}
+                return key, value[join_id]["resourceProfile"]["managedMemory"]["bytes"]
             if key == "native":
                 return key, {str(s["subtask"]): s["capacityBytes"] for s in value.get("cacheCostSamples", [])}
             if key == "checkpoints":
                 return key, value.get("latest", {})
             return key, {k: value.get(k) for k in ("slots-total", "slots-available", "taskmanagers")}
-        generation = (job["start-time"], key)
+        generation = (job["start-time"], tuple(sorted(data["parallelism"].items())), key)
         names = metric_ids.get(generation, [])
         if not names:
             names = [r["id"] for r in get(base, route)
-                     if r["id"].split(".")[-1].startswith("q8") or r["id"].split(".")[-1] == "pendingRecords"]
+                     if r["id"].split(".")[-1].startswith("q8") or r["id"].endswith("pendingRecords")
+                     or (kafka and ("currentOffsets." in r["id"] or "committedOffsets." in r["id"]
+                                    or r["id"].endswith((".currentOffset", ".committedOffset", ".records-lag-max"))))]
             if names:
                 metric_ids[generation] = names
         if not names:
             return key, {}
         rows = get(base, route + "?get=" + quote(",".join(names), safe=".,"))
+        if kafka:
+            # Retain full names. Per-topic and per-partition counters may share suffixes.
+            return key, {r["id"]: r["value"] for r in rows}
         return key, {r["id"].split(".")[-1]: int(r["value"]) for r in rows}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
@@ -78,6 +104,8 @@ def capture(base, job_id, metric_ids, *, physical_slots=False):
                 data[name] = value
             except (OSError, ValueError, KeyError) as error:
                 data.setdefault("unavailable", {})[key] = str(error)
+    if native_scaling:
+        data["join_managed_slot_bytes"] = data.get("managed_bytes_by_vertex", {}).get(join_id)
     return data
 
 
@@ -111,10 +139,12 @@ def main():
     parser.add_argument("deployment")
     parser.add_argument("job_id")
     parser.add_argument("namespace")
+    parser.add_argument("--native-scaling", action="store_true")
     args = parser.parse_args()
     signal.signal(signal.SIGTERM, signal.default_int_handler)
     pair = args.output.parent / "pair.json"
     physical_slots = pair.is_file() and "expected_initial_occupied_slots" in json.loads(pair.read_text())
+    kafka = json.loads((args.output / "plan.json").read_text()).get("source_mode") == "kafka"
     followers = {}
     metrics = {}
     kube = ["kubectl", "-n", args.namespace]
@@ -124,9 +154,12 @@ def main():
                 start = time.monotonic()
                 row = {"epoch": time.time()}
                 try:
-                    follow_source_logs(kube, args.deployment, args.output, followers)
+                    if not kafka:
+                        follow_source_logs(kube, args.deployment, args.output, followers)
                     base = (args.output / "rest-url").read_text().strip()
-                    row.update(capture(base, args.job_id, metrics, physical_slots=physical_slots))
+                    row.update(capture(base, args.job_id, metrics,
+                                       physical_slots=physical_slots or args.native_scaling,
+                                       native_scaling=args.native_scaling, kafka=kafka))
                 except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
                     row["unavailable"] = str(error)
                 row["capture_end_epoch"] = time.time()

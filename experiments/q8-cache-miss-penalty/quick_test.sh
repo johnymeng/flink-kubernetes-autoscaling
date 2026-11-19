@@ -1,37 +1,42 @@
 #!/usr/bin/env bash
-# Run the short matched Q8 pair, validate its decisions, then render the resource charts.
+# Run both native operators, check their observed actions and draw the Q8 charts.
 set -euo pipefail
-if [[ $# -lt 1 || $# -gt 3 ]]; then
-    echo "Usage: $0 NEW_RESULTS_DIRECTORY [literal|omit-empty] [burst|two-slot-80k]" >&2
-    exit 2
-fi
+if [[ $# != 1 ]]; then echo "Usage: $0 NEW_RESULTS_DIRECTORY" >&2; exit 2; fi
 results=$(realpath -m "$1")
-mode=${2:-literal}
-scenario=${3:-burst}
-case "$mode" in
-    literal) driver=main-literal-driver.jar; label='main · unmodified evaluator' ;;
-    omit-empty) driver=main-driver.jar; label='main · empty curves omitted' ;;
-    *) echo "Expected literal or omit-empty" >&2; exit 2 ;;
-esac
-: "${ARTIFACTS:?Set ARTIFACTS to the common Q8 workload artifacts}"
-: "${DIST_LIB:?Set DIST_LIB to the pinned Flink distribution lib directory}"
-: "${BUILD:?Set BUILD to the directory containing policy.jar and main/}"
-: "${KUBECONFIG:?Set KUBECONFIG to the lab kubeconfig}"
+mkdir -- "$results"
 here=$(cd "$(dirname "$0")" && pwd)
-shared="$ARTIFACTS/abi3-mrc-telemetry.jar:$DIST_LIB/*"
-main_revision=f8ce7fbbfae48869d8b1869748ad517801a9f726
-branch_revision=${BRANCH_REVISION:-$(git -C "$here" rev-parse HEAD)}
-plot_args=()
-if [[ -n "${RYAN_PLOTTER:-}" ]]; then
-    plot_args+=(--ryan-plotter "$RYAN_PLOTTER")
-fi
-python3 "$here/quick_pair.py" --output "$results" --scenario "$scenario" --worker "${Q8_WORKER:-c167}" --artifacts "$ARTIFACTS" \
-    --main-classpath "$BUILD/main/main-autoscaler.jar:$shared" --main-policy "$BUILD/main/$driver" \
-    --main-revision "$main_revision" --main-empty-curves "$mode" \
-    --branch-classpath "$ARTIFACTS/branch-autoscaler.jar:$shared" --branch-policy "$BUILD/policy.jar" \
-    --branch-revision "$branch_revision"
+: "${ARTIFACTS:?Set ARTIFACTS to the common Q8 runtime JAR directory}"
+run_arm() {
+    local arm=$1 env_prefix=$2 key optname
+    local -a options=()
+    for key in NAMESPACE OPERATOR_NAMESPACE OPERATOR_DEPLOYMENT OPERATOR_JAR OPERATOR_JAR_SHA256 REVISION BOOTSTRAP_SERVERS KAFKA_HOOK; do
+        optname="${env_prefix}_$key"
+        : "${!optname:?Missing required per-arm variable}"
+        key="${key,,}"; options+=("--${key//_/-}" "${!optname}")
+    done
+    for key in OPERATOR_CONTAINER LABEL; do
+        optname="${env_prefix}_$key"
+        if [[ -n ${!optname:-} ]]; then key="${key,,}"; options+=("--${key//_/-}" "${!optname}"); fi
+    done
+    optname="${env_prefix}_KUBECONFIG"
+    KUBECONFIG="${!optname:-${KUBECONFIG:?Set the kubeconfig for each arm}}" \
+        python3 "$here/quick_pair.py" --arm "$arm" --output "$results" --worker "${Q8_WORKER:-c167}" \
+        --artifacts "$ARTIFACTS" --observation-seconds "${OBSERVATION_SECONDS:-360}" "${options[@]}"
+}
+case "${Q8_ORDER:-parallel}" in
+    parallel)
+        run_arm hardcoded MAIN & a=$!
+        run_arm calibrated BRANCH & b=$!
+        status=0; wait "$a" || status=$?; wait "$b" || status=$?
+        if ((status)); then exit "$status"; fi ;;
+    AB) run_arm hardcoded MAIN; run_arm calibrated BRANCH ;;
+    BA) run_arm calibrated BRANCH; run_arm hardcoded MAIN ;;
+    *) echo 'Q8_ORDER must be parallel, AB or BA' >&2; exit 2 ;;
+esac
+pair="$results/pair-1-AB"
 status=0
-python3 "$here/quick_check.py" "$results" || status=$?
-MPLBACKEND=Agg python3 "$here/plot_quick.py" "$results/pair-1-AB" --output "$results/plots" \
-    --main-label "$label" "${plot_args[@]}"
+python3 "$here/native_check.py" "$pair" --output "$results/quick-results.json" || status=$?
+plot_args=()
+if [[ -n "${RYAN_PLOTTER:-}" ]]; then plot_args+=(--ryan-plotter "$RYAN_PLOTTER"); fi
+MPLBACKEND=Agg python3 "$here/plot_quick.py" "$pair" --output "$results/plots" "${plot_args[@]}"
 exit "$status"

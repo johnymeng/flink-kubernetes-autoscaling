@@ -90,7 +90,7 @@ def budgets(comparison):
 
 
 def allocation(row):
-    p = row.get("parallelism", {}).get(JOIN)
+    p = row.get("parallelism", {}).get(row.get("join_id", JOIN))
     caps = row.get("native") or {}
     overview = row.get("overview") or {}
     if not p or not all(caps.get(str(i), 0) > 0 for i in range(p)):

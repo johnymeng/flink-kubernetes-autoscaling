@@ -172,7 +172,15 @@ def main():
     args.output.mkdir(exist_ok=True, parents=True)
     cases = {"hardcoded": args.main_label, "calibrated": "a4s-cache-miss-penalty · online costs"}
     pair_manifest = args.pair / "pair.json"
-    offered = json.loads(pair_manifest.read_text()).get("offered_records_per_second") if pair_manifest.exists() else None
+    pair_data = json.loads(pair_manifest.read_text()) if pair_manifest.exists() else {}
+    offered = pair_data.get("offered_records_per_second")
+    native = pair_data.get("scaling_path") == "native_operator"
+    native_results = json.loads((args.pair / "native-results.json").read_text()) if native else {}
+    kafka = native and all(result.get("source_mode") == "kafka" for result in native_results.values())
+    producer_rate = offered if kafka else None
+    if kafka:
+        # The producer also writes bids; the Q8 source throughput counts only persons and auctions.
+        offered = None
     records = {}
     elapsed_finish = {}
     ended_at_deadline = {}
@@ -204,18 +212,34 @@ def main():
     fig.suptitle("Nexmark Q8 on the lab cluster", fontsize=19, fontweight="bold", x=0.11,
                  y=0.963, ha="left")
     shared_release = len({rows[0]["release_epoch"] for rows in records.values()}) == 1
-    subtitle = ("Simultaneous release" if shared_release else "Sequential jobs") + " · identical paced input · elapsed time includes savepoint recovery"
+    schedule = "Simultaneous release" if shared_release else "Sequential jobs"
+    method = "operator-managed in-place scaling" if native else "including savepoint recovery"
+    subtitle = f"{schedule} · identical paced input · {method}"
     if any(ended_at_deadline.values()):
         horizon = max(elapsed_finish[c] for c in cases if ended_at_deadline[c])
-        subtitle = ("Simultaneous release" if shared_release else "Sequential jobs") + f" · first {horizon:g} s from input release, including savepoint recovery"
+        subtitle = f"{schedule} · first {horizon:g} s from input release · {method}"
+    if producer_rate:
+        subtitle += f" · producer target {producer_rate:,.0f} mixed events/s"
     fig.text(0.11, 0.908, subtitle, fontsize=10.5, color="#475569")
     labels = ("Source throughput\n(records/s)", "Managed memory\n(MiB)", "Task slots\nused")
+    if kafka:
+        labels = ("Person + auction source\n(records/s)", labels[1], labels[2])
     for axis, label in zip(axes[:, 0], labels):
         axis.set_ylabel(label)
     for col, (case, rows) in enumerate(records.items()):
         a, b, c = axes[:, col]
-        profiles, spans = join_profile(args.pair / case, rows[0]["release_epoch"],
-                                       rows[0]["release_epoch"] + elapsed_finish[case])
+        if native:
+            result = native_results[case]
+            applied = [step["observed_profile"] for step in result["transactions"] if step.get("observed_profile")]
+            profiles = [(p["join_parallelism"], p["join_managed_slot_bytes"] / MIB)
+                        for p in [result.get("initial_profile"), *applied] if p and p.get("join_managed_slot_bytes")]
+            spans = [(step["in_place_ack_from_release_s"],
+                      min(step["observed_from_release_s"] if step["observed_from_release_s"] is not None
+                          else elapsed_finish[case], elapsed_finish[case])) for step in result["transactions"]
+                     if step["in_place_ack_from_release_s"] < elapsed_finish[case]]
+        else:
+            profiles, spans = join_profile(args.pair / case, rows[0]["release_epoch"],
+                                           rows[0]["release_epoch"] + elapsed_finish[case])
         profile_text = "  →  ".join(f"{k} × {m:g}" for k, m in profiles)
         title = cases[case] + ("\nJoin: " + profile_text + " MiB/slot" if profile_text else "")
         a.set_title(title, loc="left", fontsize=10, fontweight="bold", pad=6)
@@ -243,7 +267,7 @@ def main():
             axis.tick_params(length=3)
         if elapsed_finish[case] is not None:
             c.axvline(elapsed_finish[case], color="#64748b", linestyle=":", linewidth=1)
-        c.set_xlabel("Seconds since input release")
+        c.set_xlabel("Seconds since scheduled producer start" if kafka else "Seconds since input release")
 
     for panel, keys, divisor in ((0, (METRICS[0],), 1), (1, METRICS[1:3], MIB),
                                  (2, (METRICS[3],), 1)):
@@ -256,8 +280,9 @@ def main():
     axes[0, 0].yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
     axes[2, 0].yaxis.set_major_locator(MaxNLocator(integer=True))
     axes[1, 0].legend(loc="best", frameon=True, framealpha=0.95, edgecolor="#e2e8f0")
+    shading = "in-place acknowledgement to observed placement or cutoff" if native else "resize to verified restore or cutoff"
     fig.text(0.11, 0.039,
-             "5 s REST samples. Gaps mark missing data. Shading spans resize to verified restore or cutoff. Memory sums TaskManager managed pools.",
+             f"5 s REST samples. Gaps mark missing data. Shading spans {shading}. Memory sums TaskManager managed pools.",
              fontsize=8.7, color="#475569")
     for format_ in ("png",):
         fig.savefig(args.output / f"q8-resource-comparison.{format_}", dpi=200, format=format_)

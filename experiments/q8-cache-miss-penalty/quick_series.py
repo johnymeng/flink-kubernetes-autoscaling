@@ -14,6 +14,8 @@ import time
 from urllib.parse import quote, urlparse
 from urllib.request import urlopen
 
+from q8_vertices import topology
+
 USED = "Status.Flink.Memory.Managed.Used"
 TOTAL = "Status.Flink.Memory.Managed.Total"
 COLS = ("source_records_per_second", "managed_memory_used_bytes",
@@ -37,10 +39,9 @@ def measure(metrics, names):
     return sum(values)
 
 
-def capture(pool, get, job_path):
+def capture(pool, get, job_path, *, kafka=False):
     job, overview, managers = pool.map(get, (job_path, "/overview", "/taskmanagers"))
-    vertices = (job or {}).get("vertices", [])
-    sources = [v for v in vertices if v["name"].startswith("Source:")]
+    sources, _ = topology(job)
     tm = (managers or {}).get("taskmanagers", [])
     paths = [f"{job_path}/vertices/{v['id']}/metrics" for v in sources]
     tm_paths = [f"/taskmanagers/{quote(w['id'], safe='')}/metrics?get={USED},{TOTAL}" for w in tm]
@@ -52,13 +53,26 @@ def capture(pool, get, job_path):
         counts = [f"{n}.numRecordsOut" for n in range(v["parallelism"])]
         actual = sorted(m["id"] for m in catalog or []
                         if re.fullmatch(r"\d+\.numRecordsOut(?:PerSecond)?", m.get("id", "")))
+        if kafka:
+            # Match 1730 Q8's Source operator meters on the person and auction vertices.
+            # A chained Calc can emit a different count at the task boundary.
+            operator_ids = [m["id"] for m in catalog or [] if re.fullmatch(
+                r"\d+\.Source.+\.numRecordsOut(?:PerSecond)?", m.get("id", ""), re.IGNORECASE)]
+            rates = sorted(name for name in operator_ids if name.endswith("PerSecond"))
+            counts = sorted(name for name in operator_ids if name.endswith("numRecordsOut"))
+            actual = sorted(operator_ids)
+        complete_rates = (len(rates) == v["parallelism"] and
+                          {int(name.split(".", 1)[0]) for name in rates} == set(range(v["parallelism"])))
         offsets = sorted(m["id"] for m in catalog or []
                          if m.get("id", "").endswith((".currentOffset", ".committedOffset")))
-        requested = sorted(rates + counts + offsets)
+        # At 24 Kafka partitions the offset catalog alone exceeds Flink's HTTP
+        # request-line limit. The chart only needs the source meters; kafka_control
+        # samples partition offsets separately.
+        requested = sorted(rates + counts + ([] if kafka else offsets))
         source_details.append({"vertex_id": v["id"], "name": v["name"],
                                "metric_ids": actual + offsets, "rates": rates, "counts": counts,
                                "query": path + "?get=" + quote(",".join(requested), safe=",")
-                               if sorted(rates) == sorted(m for m in actual if m.endswith("PerSecond"))
+                               if complete_rates and sorted(rates) == sorted(m for m in actual if m.endswith("PerSecond"))
                                else None})
     queries = [entry["query"] for entry in source_details if entry["query"]]
     source_metrics = iter(pool.map(get, queries))
@@ -66,7 +80,8 @@ def capture(pool, get, job_path):
         values = next(source_metrics) if detail["query"] else None
         detail["values"] = values
         detail["rate_total"] = measure(values, detail.pop("rates"))
-        detail["record_total"] = measure(values, detail.pop("counts"))
+        counts = detail.pop("counts")
+        detail["record_total"] = measure(values, counts) if counts else None
 
     result = dict.fromkeys(COLS)
     rates = [entry["rate_total"] for entry in source_details]
@@ -152,7 +167,7 @@ def main():
                     except (OSError, ValueError, HTTPException) as error:
                         errors[path] = str(error)
                         return None
-                snapshot = capture(pool, get, "/jobs/" + job_id)
+                snapshot = capture(pool, get, "/jobs/" + job_id, kafka=plan.get("source_mode") == "kafka")
                 if snapshot["job_state"] != "RUNNING":
                     snapshot["values"] = dict.fromkeys(COLS)
                 row.update(snapshot)

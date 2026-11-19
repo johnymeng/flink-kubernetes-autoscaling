@@ -1,12 +1,16 @@
 # Paired Q8 autoscaling benchmark
 
-For a short comparison of the actual main and online controllers with Q8 resource charts, see [the quick benchmark](QUICK.md).
+For paired runs of main and the online branch, use [the built-in A4S benchmark](QUICK.md). The operator installed for each revision owns autoscaling and in-place updates. The default runner submits the official Kafka-backed `q8_unique` SQL job, targets 80,000 mixed Nexmark events/s from each external producer, and starts each consumer with two physically occupied slots.
+
+## Historical external-policy experiment
+
+The remainder of this note documents the earlier savepoint-redeployment harness and its archived results.
 
 This experiment compares the original A4S cost model with the production online model on a sealed, checkpointed Nexmark Q8 workload. The fixed arm uses 5 µs per hit and 5 ms per miss. When coverage qualifies, the online arm uses its fitted baseline **and** its fitted incremental miss cost per input record. The fixed-intercept variant is a diagnostic evaluated at the same decision and never applied to the job.
 
 The private controller collects the same native telemetry for both arms. Its standard Flink autoscaler computes the parallelism trigger. The selected policy applies its placement through an owned FlinkDeployment savepoint upgrade. Before applying it, the harness runs the alternate policy and the fixed-intercept diagnostic through the same placement code with an independent in-memory state store. Each receives the same metric history, miss-rate curve, standard scaler proposal and still-running slot allocation. The shared Kubernetes operator continues to reconcile the jobs. Its own scaling loop is disabled to prevent competing writes.
 
-## Run on the lab
+### Reproduce the historical experiment
 
 The lab needs its existing Flink operator, the `a4s-bench-ryan-q8` namespace, the runtime image pinned in `deployment.json`, and a worker with the mounted lab SSD. Set `KUBECONFIG` to the lab kubeconfig. Prepare the JARs using [the build notes](BUILD.md). Set `DIST_LIB` to the pinned Flink distribution's lib directory and execute from this experiment directory.
 
@@ -15,7 +19,7 @@ cp_path="$AUTOSCALER_JAR:$ARTIFACTS/abi3-mrc-telemetry.jar:$DIST_LIB/*"
 mkdir -p "$BUILD/classes"
 javac -proc:none -cp "$cp_path" -d "$BUILD/classes" RyanQ8Policy.java
 jar cf "$BUILD/policy.jar" -C "$BUILD/classes" .
-python3 run.py --output "$RESULTS" --worker c167 --artifacts "$ARTIFACTS" \
+python3 run.py --legacy-external --output "$RESULTS" --worker c167 --artifacts "$ARTIFACTS" \
   --classpath "$cp_path" --policy "$BUILD/policy.jar"
 python3 analyze.py "$RESULTS"/pair-* --output "$RESULTS/summary.json"
 ```

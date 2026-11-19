@@ -12,10 +12,17 @@ import time
 from uuid import uuid4
 
 HERE = Path(__file__).resolve().parent
-NS = "a4s-bench-ryan-q8"
+DEFAULT_NS = "a4s-bench-ryan-q8"
+NS = DEFAULT_NS
 NAMES = ("Query8.jar", "rocksdbjni.jar", "abi3-mrc-telemetry.jar", "savepoint-profiles.jar")
 PLAN = "95:1800:6200,32:8000:32000,165:400:1400,12:8000:32000"
 KUBE = ["kubectl", "-n", NS, "--request-timeout=30s"]
+
+
+def use_namespace(namespace):
+    global NS, KUBE
+    NS = namespace
+    KUBE = ["kubectl", "-n", NS, "--request-timeout=30s"]
 
 
 def digest(path):
@@ -54,7 +61,7 @@ def remove(created):
 
 
 def render(template, replacements):
-    raw = (HERE / template).read_text()
+    raw = (HERE / template).read_text().replace(DEFAULT_NS, NS)
     for key, value in replacements.items():
         raw = raw.replace(key, str(value))
     return json.loads(raw)
@@ -74,13 +81,13 @@ def stage_objects(owner, worker, artifacts, hashes, output, created):
         time.sleep(2)
     else:
         raise RuntimeError("Artifact init container did not become available")
-    with subprocess.Popen(["tar", "-chf", "-", "-C", str(artifacts), *NAMES], stdout=subprocess.PIPE) as pack:
+    with subprocess.Popen(["tar", "-chf", "-", "-C", str(artifacts), *hashes], stdout=subprocess.PIPE) as pack:
         subprocess.run(["kubectl", "-n", NS, "--request-timeout=180s", "exec", "-i", pod, "-c", "stage",
                         "--", "tar", "-xf", "-", "-C", "/artifacts"], stdin=pack.stdout, check=True)
         pack.stdout.close()
         if pack.wait():
             raise RuntimeError("Artifact stream failed")
-    checks = "".join(f"{hashes[name]}  {name}\n" for name in NAMES)
+    checks = "".join(f"{hashes[name]}  {name}\n" for name in hashes)
     subprocess.run([*KUBE, "exec", "-i", pod, "-c", "stage", "--", "sh", "-ec",
                     "cd /artifacts && sha256sum -c - && chmod 0444 *.jar && touch .ready"],
                    input=checks, text=True, check=True)
@@ -270,4 +277,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--legacy-external" in sys.argv:
+        sys.argv.remove("--legacy-external")
+        main()
+    else:
+        import quick_pair
+        quick_pair.main()

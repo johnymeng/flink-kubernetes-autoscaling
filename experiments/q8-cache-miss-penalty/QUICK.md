@@ -1,62 +1,49 @@
-# Short Q8 comparison of main and the online cache-cost branch
+# Q8 comparison with the built-in A4S autoscaler
 
-The default test measures six minutes of input from a common release, then cleans up the jobs. With prebuilt artifacts the target is under ten minutes including setup. It runs the two real autoscaler controllers against identical bounded Q8 inputs. It compares the fixed controller built from main at `f8ce7fbb` with the online controller from the cache-miss-penalty branch. Both jobs use the same Flink runtime, native RocksDB library, checkpoint-resumable Q8 workload, and savepoint actuator. The measured treatment includes the complete controller changes, including cache sizing and the retention rule.
+Run two Kubernetes operators compiled from the pinned main and online revisions. Each operator must exclusively watch the workload assigned to it. Separate Kubernetes contexts or disjoint watched namespaces support concurrent runs. Each operator makes its own decision and submits the in-place update to the running Flink job. The harness submits the initial FlinkDeployment and observes it through Kubernetes and Flink REST.
 
-The test starts each join with one subtask and 158 MiB of managed memory. The four source partitions offer a total of 3,930,000 records, including a 95-second warmup at 16,000 records/s and a 26-second burst at 80,000 records/s. It sets the same 32 MiB managed-memory base in both controllers so a small cache proposal is usable after restore. The standard autoscaler determines when and how to resize. By default the jobs start together on the same worker, sharing CPU and SSD bandwidth. This makes the pair quick to run and limits what one timing difference can establish.
+The external Nexmark producer targets 80,000 generated events/s for 360 seconds, including bids. Q8 consumes the topics required by the `q8_unique` SQL query. Each arm uses its own initially empty broker and topics. The runner submits the same Kafka-backed `com.github.nexmark.flink.sql.SqlQueryJob` used by experiment 1730. It uses experiment 1724’s shared `submit-job.sh`, `job-status.sh`, and `stop-job.sh` scripts for the consumer. A separate producer follows Q20’s stop, reset topics, and replay sequence on a detected consumer restart.
 
-## Prepare the pinned controllers once
+Both consumers start with two physically occupied slots on one TaskManager. The runner verifies this through Flink REST before input release. The branch enables fitted online costs and main uses its original fixed costs. Identical runtime artifacts, Q8 SQL, initial geometry, stabilization and metric windows apply to both arms. The default concurrent runs share the worker’s CPU and SSD.
 
-Use [the build instructions](BUILD.md) for the common worker artifacts and the online autoscaler. On the Linux lab host, set `REPO`, `DIST_LIB`, `BUILD_DEPS`, `ARTIFACTS`, `BUILD`, and `KUBECONFIG` to the paths for that build. The local Git repository must contain the pinned main commit. Use the same branch revision that built the online autoscaler when setting `BRANCH_REVISION`. Compile the two measurement drivers from the experiment directory.
+## Run the comparison
 
-```bash
-export BRANCH_REVISION=$(git -C "$REPO" rev-parse HEAD)
-bash quick-main/build-main-policy.sh "$REPO" "$DIST_LIB" "$BUILD_DEPS" \
-  "$ARTIFACTS/abi3-mrc-telemetry.jar" "$BUILD/main"
-mkdir -p "$BUILD/q8-branch-driver"
-javac -proc:none -cp "$ARTIFACTS/branch-autoscaler.jar:$ARTIFACTS/abi3-mrc-telemetry.jar:$DIST_LIB/*" \
-  -d "$BUILD/q8-branch-driver" RyanQ8Policy.java
-jar cf "$BUILD/policy.jar" -C "$BUILD/q8-branch-driver" .
-```
-
-## Run a pair
-
-Give each invocation a fresh output directory. The wrapper runs both jobs, checks the live allocations and input offsets, and plots the four Q8 metrics. Python 3 with Matplotlib is required for rendering. The plotter loads Ryan's original Q8 plotting code at the pinned revision and verifies its SHA-256. On an offline host, set `RYAN_PLOTTER` to a local copy of that file. [Original Q8 plotter](https://github.com/RyanL123/memory-aware-scaling/blob/7d32b6abb0423453c4fbf3f44206abf5c2a81d9e/scripts/experiments/plot_run.py)
+Use the common workload artifacts from [BUILD.md](BUILD.md). Place `rocksdbjni.jar`, `abi3-mrc-telemetry.jar` and the two-slot `savepoint-profiles.jar` in `ARTIFACTS`. Copy `nexmark-flink-0.3-SNAPSHOT.jar`, `flink-sql-connector-kafka-3.3.0.jar`, and `kafka-clients-3.4.0.jar` from the Q8/Q20 benchmark image to the same directory. The application JAR must contain the `q8_unique` SQL resource and the `SqlQueryJob` entry point. The shared-start configuration applies ordinary slot sharing to the initial job and passes native Justin rescaling to the runtime’s per-vertex allocator. Build each operator from its stated revision and keep the matching autoscaler JAR SHA-256 from that build. [Prepare a native operator](native-operator/README.md). The runner verifies the JAR inside the ready operator container before submission and again during cleanup. Enable DEBUG logging on `org.apache.flink.autoscaler.ScalingMetricEvaluator` to capture which costs the branch actually used.
 
 ```bash
-bash quick_test.sh "$RESULTS/q8-main-vs-online"
-```
-
-**Default comparison.** The main driver always calls main's evaluator with the original live metric history. When the evaluator throws, the driver archives the exception and rethrows it. An unchanged main allocation can qualify only with repeated recorded evaluator failures, live resource measurements, comparable source offsets, and a verified online resize. Both arms must have matching inputs, starting allocations, and runtime artifacts.
-
-**Placement diagnostic.** To compare the two placement policies after both can evaluate the join, run a separate pair. Its main driver first records the raw evaluator's empty-curve failure. It then represents zero-point curves as missing, which main already knows how to skip. It preserves the populated join curve. Main's placement code and fixed cost model still make the proposal.
-
-```bash
-bash quick_test.sh "$RESULTS/q8-placement" omit-empty
-```
-
-The summary is in `quick-results.json`. The `plots/` directory contains a matched overview, each arm's original Q8 chart, and the time series in CSV format. The charts show the Flink source output rate, summed TaskManager managed memory used and total, and occupied task slots at five-second intervals. Managed memory is the Flink managed pool. Each arm's verified join reservation and native cache are recorded separately. Gaps mark unavailable samples during recovery. At six minutes the checker compares the last complete sample of all four logical partition offsets from each job, and records timestamps and the next sample when available. A window ending while Flink is running is recorded explicitly. Release-to-finish throughput is reported separately when both jobs drain naturally. Use `quick_pair.py --observation-seconds 0` for a full drain with an appropriate `--timeout`. The timer in `pair.json` also includes setup and teardown.
-
-For sequential measurements use `quick_pair.py --order AB` and `--order BA` in fresh output directories. The result checker and same Q8 plotter also accept those runs.
-
-## Sustained 80,000 inputs/s with two starting task slots
-
-The `two-slot-80k` scenario offers 8,000 Persons and 32,000 Auctions per second from each of two source partitions per stream for the whole observation window. A six-minute run releases 28,800,000 input records per job. During backpressure, pending input accumulates and resumes from checkpointed source offsets. Both autoscalers receive Flink's standard `pendingRecords` gauge. They calculate target rate from measured ingress and lag growth. The chart shows observed source throughput and a reference at the offered rate.
-
-Both jobs start with one two-slot TaskManager. Its two CPU cores and 316 MiB managed pool provide 158 MiB per slot. Flink's standard slot-sharing allocator places the four source subtasks and one join subtask into those two slots. The common scheduler overlay enables this layout before a controller submits per-vertex resource requests. A savepoint rescale uses the A4S runtime's normal per-vertex slot allocator. Both JobManagers wait up to five minutes for a partial resource allocation to stabilize and proceed immediately when the full request arrives. The default ten-second stabilization window allowed the runtime to build a partial placement while new TaskManagers were still registering. A jump in slot count therefore includes the move to dedicated slots. Each controller chooses its join parallelism and memory. The source partition count stays fixed to preserve logical input offsets, and the join can scale to the job's 24 key groups. The checker compares the starting physical allocations with the four zero source offsets and records proposals, applied placements and measured join targets.
-
-Build the common artifacts and the two drivers above from this revision. Create a separate artifact directory for the shared-start scheduler, then launch from the experiment directory with a fresh result path.
-
-```bash
-shared_artifacts=$(mktemp -d)
-for jar in Query8.jar rocksdbjni.jar abi3-mrc-telemetry.jar branch-autoscaler.jar; do
-    cp "$ARTIFACTS/$jar" "$shared_artifacts/$jar"
-done
 bash shared-start/build-shared-start-overlay.sh "$REPO" "$DIST_LIB" "$BUILD_DEPS" \
-    "$ARTIFACTS/savepoint-profiles.jar" "$shared_artifacts/savepoint-profiles.jar"
-ARTIFACTS="$shared_artifacts" bash quick_test.sh "$RESULTS/q8-80k-two-slots" literal two-slot-80k
+  "$ORIGINAL_ARTIFACTS/savepoint-profiles.jar" "$ARTIFACTS/savepoint-profiles.jar"
+
+export MAIN_NAMESPACE MAIN_OPERATOR_NAMESPACE MAIN_OPERATOR_DEPLOYMENT MAIN_REVISION
+export MAIN_OPERATOR_JAR MAIN_OPERATOR_JAR_SHA256 MAIN_BOOTSTRAP_SERVERS MAIN_KAFKA_HOOK
+export BRANCH_NAMESPACE BRANCH_OPERATOR_NAMESPACE BRANCH_OPERATOR_DEPLOYMENT BRANCH_REVISION
+export BRANCH_OPERATOR_JAR BRANCH_OPERATOR_JAR_SHA256 BRANCH_BOOTSTRAP_SERVERS BRANCH_KAFKA_HOOK
+bash quick_test.sh "$RESULTS/q8-native-80k"
 ```
 
-`quick-results.json` reports the actual starting and ending occupied slots, input processed at the comparison sample, and the target rates observed by each controller. Both controllers may choose to keep their allocations. The runner verifies live measurements in that case as well.
+Assign these variables to the deployed identities, external brokers, per-arm producer hook executables and build receipts before launching. A producer hook may reset only its own benchmark broker. The submitted job uses `--query q8_unique --source kafka --bootstrap-servers <arm-broker>` and a distinct job name. `*_OPERATOR_JAR` is the absolute in-container path used by its operator JVM. The default container is `flink-kubernetes-operator`. Set `MAIN_OPERATOR_CONTAINER` or `BRANCH_OPERATOR_CONTAINER` to select a different container. Set `MAIN_KUBECONFIG` and `BRANCH_KUBECONFIG` for separate contexts, or use one shared `KUBECONFIG`. A label-selected installation can set `MAIN_LABEL` and `BRANCH_LABEL` to its respective `key=value`. Set `RYAN_PLOTTER` to the pinned Q8 plotter when working offline.
+
+The included `kafka_host.py` hook runs the Q20 standalone `insert_kafka_unique` producer on the external Kafka host. It uses dedicated broker and producer containers for each arm. On reset it recreates that broker with empty storage, recreates the three 24-partition topics, and starts the next generation at event ID 1. Use an SSH account on the producer host that can run the same Docker commands as experiment 1724.
+
+```bash
+export Q8_RUN_ID="q8-$(date -u +%Y%m%d-%H%M%S)"
+export Q8_KAFKA_HOST=c153 Q8_KAFKA_HOST_IP=142.150.234.153
+export MAIN_KAFKA_HOOK="$PWD/kafka_host.py" BRANCH_KAFKA_HOOK="$PWD/kafka_host.py"
+export MAIN_BOOTSTRAP_SERVERS="$Q8_KAFKA_HOST_IP:29082" BRANCH_BOOTSTRAP_SERVERS="$Q8_KAFKA_HOST_IP:29182"
+Q8_ARM=hardcoded "$MAIN_KAFKA_HOOK" provision
+Q8_ARM=calibrated "$BRANCH_KAFKA_HOOK" provision
+# Run quick_test.sh with the operator and artifact variables above. After the run:
+Q8_ARM=hardcoded "$MAIN_KAFKA_HOOK" cleanup
+Q8_ARM=calibrated "$BRANCH_KAFKA_HOOK" cleanup
+```
+
+The wrapper starts both arms in parallel. Set `Q8_ORDER=AB` or `BA` to run sequentially. When a single operator installation is switched between revisions, run `quick_pair.py` once per revision with the same output root and `--arm hardcoded` or `--arm calibrated`. The per-arm command accepts an optional explicit epoch-millisecond `--release-ms` for synchronized inputs. The default schedules the release 125 seconds after artifact staging, or eight seconds after both slots are confirmed if startup takes longer. Each arm has a distinct job ID, namespace-scoped resources and fresh state directories.
+
+`native_check.py` reads observed operator events and Flink allocation and task samples. An operator acknowledgement, a changed slot count and resumed processing are separate measurements. Preserve the observation duration for arms without a verified resize. `plot_quick.py` generates the original Q8 throughput, managed-memory and occupied-slot charts from the per-arm resource samples.
+
+## Historical savepoint-redeployment measurements
+
+The following measurements used an external policy driver and an explicit savepoint redeployment. They describe the earlier experiment.
 
 ### Six-minute lab measurement
 
