@@ -1,0 +1,197 @@
+"""Run a paired Q8 experiment on the lab cluster from explicitly supplied pinned JARs."""
+import argparse
+from datetime import datetime, timezone
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+from uuid import uuid4
+
+HERE = Path(__file__).resolve().parent
+NS = "a4s-bench-ryan-q8"
+NAMES = ("Query8.jar", "rocksdbjni.jar", "abi3-mrc-telemetry.jar", "savepoint-profiles.jar")
+PLAN = "95:1800:6200,32:8000:32000,165:400:1400,12:8000:32000"
+KUBE = ["kubectl", "-n", NS, "--request-timeout=30s"]
+
+
+def digest(path):
+    h = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def save(path, value):
+    path.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+
+
+def kube(*args, document=None):
+    return subprocess.check_output([*KUBE, *args], input=json.dumps(document) if document is not None else None,
+                                   text=True)
+
+
+def create(manifest):
+    return json.loads(kube("create", "-f", "-", "-o", "json", document=manifest))
+
+
+def remove(created):
+    meta = created["metadata"]
+    kind = created["kind"].lower()
+    plural = {"flinkdeployment": "flinkdeployments", "service": "services", "pod": "pods",
+              "role": "roles", "rolebinding": "rolebindings", "serviceaccount": "serviceaccounts"}[kind]
+    api = created["apiVersion"]
+    base = "/api/v1" if api == "v1" else "/apis/" + api
+    route = f'{base}/namespaces/{NS}/{plural}/{meta["name"]}'
+    if meta["namespace"] != NS:
+        raise ValueError("Namespace mismatch at cleanup")
+    kube("delete", "--raw", route, "-f", "-", document={"apiVersion": "v1", "kind": "DeleteOptions",
+         "preconditions": {"uid": meta["uid"]}})
+
+
+def render(template, replacements):
+    raw = (HERE / template).read_text()
+    for key, value in replacements.items():
+        raw = raw.replace(key, str(value))
+    return json.loads(raw)
+
+
+def stage_objects(owner, worker, artifacts, hashes, output, created):
+    for obj in render("infra.json", {"OWNER": owner, "WORKER": worker})["items"]:
+        receipt = create(obj)
+        created.append(receipt)
+        save(output / "infra-created.json", created)
+    pod = owner + "-artifacts"
+    for _ in range(90):
+        status = json.loads(kube("get", "pod", pod, "-o", "json"))["status"]
+        if any(x["name"] == "stage" and "running" in x.get("state", {})
+               for x in status.get("initContainerStatuses", [])):
+            break
+        time.sleep(2)
+    else:
+        raise RuntimeError("Artifact init container did not become available")
+    with subprocess.Popen(["tar", "-chf", "-", "-C", str(artifacts), *NAMES], stdout=subprocess.PIPE) as pack:
+        subprocess.run(["kubectl", "-n", NS, "--request-timeout=180s", "exec", "-i", pod, "-c", "stage",
+                        "--", "tar", "-xf", "-", "-C", "/artifacts"], stdin=pack.stdout, check=True)
+        pack.stdout.close()
+        if pack.wait():
+            raise RuntimeError("Artifact stream failed")
+    checks = "".join(f"{hashes[name]}  {name}\n" for name in NAMES)
+    subprocess.run([*KUBE, "exec", "-i", pod, "-c", "stage", "--", "sh", "-ec",
+                    "cd /artifacts && sha256sum -c - && chmod 0444 *.jar && touch .ready"],
+                   input=checks, text=True, check=True)
+    kube("wait", "--for=condition=Ready", "pod/" + pod, "--timeout=90s")
+    kube("wait", "--for=jsonpath={.status.phase}=Succeeded", "pod/" + owner + "-ssd-prep", "--timeout=60s")
+    (output / "ssd.log").write_text(kube("logs", owner + "-ssd-prep", "-c", "prepare"))
+
+
+def classpath_hashes(classpath):
+    result = {}
+    for item in classpath.split(os.pathsep):
+        path = Path(item)
+        paths = sorted(path.parent.glob("*.jar")) if path.name == "*" else [path]
+        if not paths:
+            raise ValueError(f"Empty classpath entry {path}")
+        for jar in paths:
+            result[str(jar.resolve())] = digest(jar)
+    return result
+
+
+def verify_classpath(directory, classpath, policy):
+    effective = classpath + os.pathsep + str(policy.resolve())
+    text = subprocess.check_output(["java", "-cp", effective, str(HERE / "ClasspathProof.java")], text=True)
+    origins = {}
+    for row in text.splitlines():
+        name, path = row.split("\t")
+        origins[name] = {"path": path, "sha256": digest(Path(path))}
+    save(directory / "loaded-classes.json", {"ordered_argument": effective, "origins": origins})
+
+
+def arm_run(args, owner, arm, hashes, cp_hash, template_hash, pair):
+    directory = pair / arm
+    directory.mkdir()
+    job_id = uuid4().hex
+    name = f"{owner}-{arm}"
+    release = int(time.time() * 1000) + args.release_lead_seconds * 1000
+    mode = str(arm == "calibrated").lower()
+    replacements = {"WORKER": args.worker, "OWNER": owner, "ARM": arm, "JOBID": job_id, "MODE": mode,
+                    "PLAN": args.plan, "RELEASE": release, **{"HASH_" + k: v for k, v in hashes.items()}}
+    manifest = render("deployment.json", replacements)
+    save(directory / "manifest.json", manifest)
+    save(directory / "plan.json", {"plan": args.plan, "release_ms": release, "arm": arm, "artifacts": hashes,
+         "policy_sha256": digest(args.policy), "controller_classpath_sha256": cp_hash,
+         "normalized_manifest_sha256": template_hash})
+    resource = create(manifest)
+    save(directory / "deployment-created.json", resource)
+    follower = None
+    try:
+        follower = subprocess.Popen([sys.executable, str(HERE / "observe.py"), str(directory),
+                                    name, job_id, NS])
+        command = [sys.executable, str(HERE / "actuate.py"), "--namespace", NS, "--deployment", name,
+                   "--owner", owner, "--job-id", job_id, "--arm", arm, "--manifest", str(directory / "manifest.json"),
+                   "--policy-jar", str(args.policy), "--classpath", args.classpath, "--out", str(directory),
+                   "--kubeconfig", os.environ["KUBECONFIG"], "--duration", str(args.timeout)]
+        with (directory / "controller.log").open("w", buffering=1) as log:
+            subprocess.run(command, stdout=log, stderr=log, check=True)
+        follower.wait(25)
+    finally:
+        if follower is not None and follower.poll() is None:
+            follower.send_signal(signal.SIGINT)
+            follower.wait(25)
+        live = json.loads(kube("get", "flinkdeployment", name, "-o", "json"))
+        save(directory / "deployment-before-cleanup.json", live)
+        (directory / "events.json").write_text(kube("get", "events", "--field-selector", f"involvedObject.name={name}", "-o", "json"))
+        remove(resource)
+        for _ in range(120):
+            if (not kube("get", "flinkdeployment", name, "--ignore-not-found", "-o", "name").strip()
+                    and not kube("get", "pods", "-l", "app=" + name, "-o", "name").strip()):
+                break
+            time.sleep(3)
+        else:
+            raise RuntimeError(f"Timed out waiting for owned workload {name} to clear")
+    print(f"{datetime.now(timezone.utc).isoformat()} {name} finished", flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--artifacts", type=Path, required=True)
+    parser.add_argument("--classpath", required=True)
+    parser.add_argument("--worker", choices=("c167", "c182"), default="c167")
+    parser.add_argument("--policy", type=Path, required=True)
+    parser.add_argument("--plan", default=PLAN)
+    parser.add_argument("--release-lead-seconds", type=int, default=100)
+    parser.add_argument("--timeout", type=int, default=1800)
+    parser.add_argument("--order", choices=("AB", "BA", "ABBA"), default="ABBA")
+    args = parser.parse_args()
+    args.output = args.output.resolve()
+    args.output.mkdir()
+    hashes = {name: digest(args.artifacts / name) for name in NAMES}
+    cp = classpath_hashes(args.classpath)
+    save(args.output / "classpath.json", cp)
+    verify_classpath(args.output, args.classpath, args.policy)
+    cp_hash = hashlib.sha256(json.dumps(cp, sort_keys=True).encode()).hexdigest()
+    template_hash = hashlib.sha256(json.dumps(render("deployment.json", {
+        "WORKER": args.worker, "PLAN": args.plan, **{"HASH_" + k: v for k, v in hashes.items()}}), sort_keys=True).encode()).hexdigest()
+    pairs = ("AB", "BA") if args.order == "ABBA" else (args.order,)
+    for i, order in enumerate(pairs, 1):
+        owner = "r8pen-" + datetime.now(timezone.utc).strftime("%H%M%S")
+        pair = args.output / f"pair-{i}-{order}"
+        pair.mkdir()
+        created = []
+        try:
+            stage_objects(owner, args.worker, args.artifacts, hashes, pair, created)
+            for letter in order:
+                arm_run(args, owner, {"A": "hardcoded", "B": "calibrated"}[letter], hashes, cp_hash, template_hash, pair)
+        finally:
+            for resource in reversed(created):
+                remove(resource)
+            save(pair / "cleanup.json", [{"name": x["metadata"]["name"], "uid": x["metadata"]["uid"]} for x in created])
+
+
+if __name__ == "__main__":
+    main()

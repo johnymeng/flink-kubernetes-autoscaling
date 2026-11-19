@@ -1,0 +1,408 @@
+{
+  "apiVersion": "flink.apache.org/v1beta1",
+  "kind": "FlinkDeployment",
+  "metadata": {
+    "name": "OWNER-ARM",
+    "namespace": "a4s-bench-ryan-q8",
+    "labels": {
+      "ece496-run": "OWNER"
+    },
+    "annotations": {
+      "ece496.org/benchmark-owner": "OWNER"
+    }
+  },
+  "spec": {
+    "image": "142.150.234.165:5000/flink-runtime@sha256:74c59e01c8dc53c331d07704da6832367cce889ccc68dba40a20665e04831fc2",
+    "imagePullPolicy": "IfNotPresent",
+    "flinkVersion": "v1_18",
+    "flinkConfiguration": {
+      "job.autoscaler.enabled": "false",
+      "job.autoscaler.justin.enabled": "false",
+      "job.autoscaler.a4s.enabled": "false",
+      "job.autoscaler.stabilization.interval": "110 s",
+      "job.autoscaler.cache-hit-rate.min.threshold": "0.8",
+      "job.autoscaler.state-latency.threshold": "1000000.0",
+      "job.autoscaler.metrics.window": "75 s",
+      "pipeline.max-parallelism": "24",
+      "taskmanager.numberOfTaskSlots": "4",
+      "execution.checkpointing.interval": "20 s",
+      "jobmanager.scheduler": "adaptive",
+      "job.autoscaler.scale-down.interval": "1 h",
+      "job.autoscaler.target.utilization": "0.60",
+      "job.autoscaler.target.utilization.boundary": "0.15",
+      "web.submit.enable": "true",
+      "web.cancel.enable": "true",
+      "state.backend": "rocksdb",
+      "taskmanager.memory.managed.fraction": "0.4",
+      "taskmanager.cpu.cores": "4",
+      "state.backend.rocksdb.metrics.block-cache-usage": "true",
+      "state.backend.rocksdb.metrics.block-cache-hit": "true",
+      "state.backend.rocksdb.metrics.block-cache-miss": "true",
+      "state.backend.rocksdb.metrics.bytes-read": "true",
+      "state.backend.rocksdb.metrics.bytes-written": "true",
+      "state.backend.rocksdb.metrics.column-family-as-variable": "true",
+      "state.backend.rocksdb.metrics.compaction-pending": "true",
+      "state.backend.rocksdb.metrics.compaction-read-bytes": "true",
+      "state.backend.rocksdb.metrics.compaction-write-bytes": "true",
+      "state.backend.rocksdb.metrics.cur-size-active-mem-table": "true",
+      "state.backend.rocksdb.metrics.cur-size-all-mem-tables": "true",
+      "state.backend.rocksdb.metrics.estimate-live-data-size": "true",
+      "state.backend.rocksdb.metrics.estimate-num-keys": "true",
+      "state.backend.rocksdb.metrics.estimate-pending-compaction-bytes": "true",
+      "state.backend.rocksdb.metrics.estimate-table-readers-mem": "true",
+      "state.backend.rocksdb.metrics.live-sst-files-size": "true",
+      "state.backend.rocksdb.metrics.size-all-mem-tables": "true",
+      "state.backend.rocksdb.metrics.total-sst-files-size": "true",
+      "state.backend.rocksdb.metrics.stack-distance-histogram": "true",
+      "state.backend.rocksdb.a4s.quick-mrc.ghost-cache-multiplier": "1",
+      "state.backend.rocksdb.a4s.quick-mrc.sampling-rate": "0.02",
+      "state.backend.rocksdb.memory.lru-cache-num-shard-bits": "0",
+      "state.backend.latency-track.keyed-state-enabled": "true",
+      "state.backend.rocksdb.use-direct-writes": "true",
+      "state.backend.rocksdb.use-direct-reads": "true",
+      "job.autoscaler.scaling.enabled": "false",
+      "job.autoscaler.a4s.online-cache-costs.enabled": "MODE",
+      "$internal.pipeline.job-id": "JOBID",
+      "kubernetes.operator.job.upgrade.inplace-scaling.enabled": "false",
+      "kubernetes.operator.job.upgrade.last-state-fallback.enabled": "false",
+      "kubernetes.operator.job.drain-on-savepoint-deletion": "false",
+      "pipeline.jobvertex-resourceprofile-overrides-on-submit.enabled": "true",
+      "state.backend.rocksdb.a4s.quick-mrc.enabled": "true",
+      "state.backend.rocksdb.metrics.a4s-block-latency": "true",
+      "state.backend.rocksdb.localdir": "/data/rocksdb",
+      "high-availability": "org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory",
+      "high-availability.storageDir": "file:///mnt/experiments/autoscaling-experiments/flink-state/runs/OWNER-ARM-ssd-v2/ha",
+      "state.checkpoints.dir": "file:///mnt/experiments/autoscaling-experiments/flink-state/runs/OWNER-ARM-ssd-v2/checkpoints",
+      "state.savepoints.dir": "file:///mnt/experiments/autoscaling-experiments/flink-state/runs/OWNER-ARM-ssd-v2/savepoints",
+      "metrics.fetcher.update-interval": "1000",
+      "job.autoscaler.a4s.online-cache-costs.use-fixed-baseline": "false",
+      "job.autoscaler.vertex.exclude.ids": "6cdc5bb954874d922eaee11a8e7b5dd5;cbc357ccb763df2852fee8c4fc7d55f2",
+      "job.autoscaler.vertex.max-parallelism": "3",
+      "job.autoscaler.a4s.hit-latency-sec": "0.000005",
+      "job.autoscaler.a4s.miss-latency-sec": "0.005"
+    },
+    "serviceAccount": "OWNER-flink",
+    "jobManager": {
+      "resource": {
+        "memory": "2048m",
+        "cpu": 1
+      },
+      "podTemplate": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+          "name": "pod-template",
+          "labels": {
+            "ece496-run": "OWNER"
+          }
+        },
+        "spec": {
+          "nodeSelector": {
+            "kubernetes.io/hostname": "c167"
+          },
+          "securityContext": {
+            "fsGroup": 999
+          },
+          "initContainers": [
+            {
+              "name": "copy-flink-libs",
+              "image": "142.150.234.165:5000/flink-runtime@sha256:74c59e01c8dc53c331d07704da6832367cce889ccc68dba40a20665e04831fc2",
+              "command": [
+                "/bin/sh",
+                "-ec",
+                "cp -a /opt/flink/lib/. /stage/lib/"
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": "100m",
+                  "memory": "96Mi"
+                },
+                "limits": {
+                  "cpu": "1",
+                  "memory": "256Mi"
+                }
+              },
+              "securityContext": {
+                "runAsUser": 0,
+                "allowPrivilegeEscalation": false
+              },
+              "volumeMounts": [
+                {
+                  "name": "experiment-lib",
+                  "mountPath": "/stage/lib"
+                }
+              ]
+            },
+            {
+              "name": "stage-ryan-q8-artifacts",
+              "image": "docker.io/library/python:3.12-alpine",
+              "command": [
+                "/bin/sh",
+                "-ec",
+                "wget -q -O /workload/Query8.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/Query8.jar\necho 'HASH_Query8.jar  /workload/Query8.jar' | sha256sum -c -\nwget -q -O /stage/lib/00-a4s-rocksdbjni.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/rocksdbjni.jar\necho 'HASH_rocksdbjni.jar  /stage/lib/00-a4s-rocksdbjni.jar' | sha256sum -c -\nwget -q -O /stage/lib/00-a4s-abi3-telemetry.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/abi3-mrc-telemetry.jar\necho 'HASH_abi3-mrc-telemetry.jar  /stage/lib/00-a4s-abi3-telemetry.jar' | sha256sum -c -\nwget -q -O /stage/lib/000-q8-savepoint-profiles.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/savepoint-profiles.jar\necho 'HASH_savepoint-profiles.jar  /stage/lib/000-q8-savepoint-profiles.jar' | sha256sum -c -"
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": "100m",
+                  "memory": "96Mi"
+                },
+                "limits": {
+                  "cpu": "1",
+                  "memory": "256Mi"
+                }
+              },
+              "securityContext": {
+                "runAsUser": 0,
+                "allowPrivilegeEscalation": false
+              },
+              "volumeMounts": [
+                {
+                  "name": "experiment-lib",
+                  "mountPath": "/stage/lib"
+                },
+                {
+                  "name": "query-jar",
+                  "mountPath": "/workload"
+                }
+              ]
+            }
+          ],
+          "containers": [
+            {
+              "name": "flink-main-container",
+              "env": [
+                {
+                  "name": "FLINK_A4S_COUNT_CACHE_LOOKUPS",
+                  "value": "1"
+                },
+                {
+                  "name": "FLINK_A4S_SAMPLE_BLOCK_LATENCY",
+                  "value": "1"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "name": "experiment-lib",
+                  "mountPath": "/opt/flink/lib"
+                },
+                {
+                  "name": "query-jar",
+                  "mountPath": "/workload",
+                  "readOnly": true
+                },
+                {
+                  "name": "checkpoint-storage",
+                  "mountPath": "/mnt/experiments/autoscaling-experiments/flink-state"
+                },
+                {
+                  "name": "rocksdb",
+                  "mountPath": "/data/rocksdb"
+                }
+              ]
+            }
+          ],
+          "volumes": [
+            {
+              "name": "experiment-lib",
+              "emptyDir": {
+                "sizeLimit": "1Gi"
+              }
+            },
+            {
+              "name": "query-jar",
+              "emptyDir": {
+                "sizeLimit": "300Mi"
+              }
+            },
+            {
+              "name": "rocksdb",
+              "emptyDir": {
+                "sizeLimit": "8Gi"
+              }
+            },
+            {
+              "name": "checkpoint-storage",
+              "hostPath": {
+                "path": "/mnt/experiments/autoscaling-experiments/flink-state",
+                "type": "Directory"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "taskManager": {
+      "resource": {
+        "memory": "2048m",
+        "cpu": 4
+      },
+      "podTemplate": {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {
+          "name": "pod-template",
+          "labels": {
+            "ece496-run": "OWNER"
+          }
+        },
+        "spec": {
+          "nodeSelector": {
+            "kubernetes.io/hostname": "WORKER"
+          },
+          "securityContext": {
+            "fsGroup": 999
+          },
+          "initContainers": [
+            {
+              "name": "copy-flink-libs",
+              "image": "142.150.234.165:5000/flink-runtime@sha256:74c59e01c8dc53c331d07704da6832367cce889ccc68dba40a20665e04831fc2",
+              "command": [
+                "/bin/sh",
+                "-ec",
+                "cp -a /opt/flink/lib/. /stage/lib/"
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": "100m",
+                  "memory": "96Mi"
+                },
+                "limits": {
+                  "cpu": "1",
+                  "memory": "256Mi"
+                }
+              },
+              "securityContext": {
+                "runAsUser": 0,
+                "allowPrivilegeEscalation": false
+              },
+              "volumeMounts": [
+                {
+                  "name": "experiment-lib",
+                  "mountPath": "/stage/lib"
+                }
+              ]
+            },
+            {
+              "name": "stage-ryan-q8-artifacts",
+              "image": "docker.io/library/python:3.12-alpine",
+              "command": [
+                "/bin/sh",
+                "-ec",
+                "wget -q -O /workload/Query8.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/Query8.jar\necho 'HASH_Query8.jar  /workload/Query8.jar' | sha256sum -c -\nwget -q -O /stage/lib/00-a4s-rocksdbjni.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/rocksdbjni.jar\necho 'HASH_rocksdbjni.jar  /stage/lib/00-a4s-rocksdbjni.jar' | sha256sum -c -\nwget -q -O /stage/lib/00-a4s-abi3-telemetry.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/abi3-mrc-telemetry.jar\necho 'HASH_abi3-mrc-telemetry.jar  /stage/lib/00-a4s-abi3-telemetry.jar' | sha256sum -c -\nwget -q -O /stage/lib/000-q8-savepoint-profiles.jar http://OWNER-artifacts.a4s-bench-ryan-q8.svc.cluster.local:8000/savepoint-profiles.jar\necho 'HASH_savepoint-profiles.jar  /stage/lib/000-q8-savepoint-profiles.jar' | sha256sum -c -"
+              ],
+              "resources": {
+                "requests": {
+                  "cpu": "100m",
+                  "memory": "96Mi"
+                },
+                "limits": {
+                  "cpu": "1",
+                  "memory": "256Mi"
+                }
+              },
+              "securityContext": {
+                "runAsUser": 0,
+                "allowPrivilegeEscalation": false
+              },
+              "volumeMounts": [
+                {
+                  "name": "experiment-lib",
+                  "mountPath": "/stage/lib"
+                },
+                {
+                  "name": "query-jar",
+                  "mountPath": "/workload"
+                }
+              ]
+            }
+          ],
+          "containers": [
+            {
+              "name": "flink-main-container",
+              "env": [
+                {
+                  "name": "FLINK_A4S_COUNT_CACHE_LOOKUPS",
+                  "value": "1"
+                },
+                {
+                  "name": "FLINK_A4S_SAMPLE_BLOCK_LATENCY",
+                  "value": "1"
+                }
+              ],
+              "volumeMounts": [
+                {
+                  "name": "experiment-lib",
+                  "mountPath": "/opt/flink/lib"
+                },
+                {
+                  "name": "query-jar",
+                  "mountPath": "/workload",
+                  "readOnly": true
+                },
+                {
+                  "name": "checkpoint-storage",
+                  "mountPath": "/mnt/experiments/autoscaling-experiments/flink-state"
+                },
+                {
+                  "name": "rocksdb",
+                  "mountPath": "/data/rocksdb"
+                }
+              ]
+            }
+          ],
+          "volumes": [
+            {
+              "name": "experiment-lib",
+              "emptyDir": {
+                "sizeLimit": "1Gi"
+              }
+            },
+            {
+              "name": "query-jar",
+              "emptyDir": {
+                "sizeLimit": "300Mi"
+              }
+            },
+            {
+              "name": "rocksdb",
+              "hostPath": {
+                "path": "/data/flink/rocksdb/OWNER-ARM-ssd-v2",
+                "type": "Directory"
+              }
+            },
+            {
+              "name": "checkpoint-storage",
+              "hostPath": {
+                "path": "/mnt/experiments/autoscaling-experiments/flink-state",
+                "type": "Directory"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "job": {
+      "jarURI": "local:///workload/Query8.jar",
+      "parallelism": 1,
+      "upgradeMode": "savepoint",
+      "args": [
+        "--auction-srcRate",
+        "32000",
+        "--person-srcRate",
+        "8000",
+        "--p-auction-source",
+        "2",
+        "--p-person-source",
+        "2",
+        "--p-window",
+        "1",
+        "--q8-input-plan",
+        "PLAN",
+        "--q8-release-epoch-ms",
+        "RELEASE"
+      ],
+      "entryClass": "be.uclouvain.gepiciad.nexmark.Query8",
+      "state": "running"
+    }
+  }
+}

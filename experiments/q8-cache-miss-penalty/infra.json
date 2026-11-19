@@ -1,0 +1,384 @@
+{
+  "apiVersion": "v1",
+  "kind": "List",
+  "items": [
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "OWNER-artifacts",
+        "namespace": "a4s-bench-ryan-q8",
+        "labels": {
+          "ece496-benchmark-owner": "OWNER",
+          "app": "OWNER-artifacts"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "enableServiceLinks": false,
+        "nodeSelector": {
+          "kubernetes.io/hostname": "c167"
+        },
+        "restartPolicy": "Never",
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 65532,
+          "runAsGroup": 65532,
+          "fsGroup": 65532,
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "volumes": [
+          {
+            "name": "artifacts",
+            "emptyDir": {
+              "sizeLimit": "512Mi"
+            }
+          }
+        ],
+        "initContainers": [
+          {
+            "image": "docker.io/library/python@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89",
+            "imagePullPolicy": "IfNotPresent",
+            "env": [
+              {
+                "name": "PYTHONDONTWRITEBYTECODE",
+                "value": "1"
+              }
+            ],
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "name": "stage",
+            "command": [
+              "python3",
+              "-u",
+              "-c",
+              "from pathlib import Path\nimport time\nwhile not Path(\"/artifacts/.ready\").is_file():\n    time.sleep(1)\nPath(\"/artifacts/.ready\").unlink()"
+            ],
+            "volumeMounts": [
+              {
+                "name": "artifacts",
+                "mountPath": "/artifacts"
+              }
+            ],
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "32Mi",
+                "ephemeral-storage": "256Mi"
+              },
+              "limits": {
+                "cpu": "500m",
+                "memory": "128Mi",
+                "ephemeral-storage": "512Mi"
+              }
+            }
+          }
+        ],
+        "containers": [
+          {
+            "image": "docker.io/library/python@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89",
+            "imagePullPolicy": "IfNotPresent",
+            "env": [
+              {
+                "name": "PYTHONDONTWRITEBYTECODE",
+                "value": "1"
+              }
+            ],
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "name": "http",
+            "command": [
+              "python3",
+              "-u",
+              "-m",
+              "http.server",
+              "8000",
+              "--bind",
+              "0.0.0.0",
+              "--directory",
+              "/artifacts"
+            ],
+            "ports": [
+              {
+                "name": "artifacts",
+                "containerPort": 8000
+              }
+            ],
+            "volumeMounts": [
+              {
+                "name": "artifacts",
+                "mountPath": "/artifacts",
+                "readOnly": true
+              }
+            ],
+            "readinessProbe": {
+              "periodSeconds": 4,
+              "timeoutSeconds": 2,
+              "tcpSocket": {
+                "port": "artifacts"
+              }
+            },
+            "resources": {
+              "requests": {
+                "cpu": "25m",
+                "memory": "32Mi",
+                "ephemeral-storage": "256Mi"
+              },
+              "limits": {
+                "cpu": "500m",
+                "memory": "128Mi",
+                "ephemeral-storage": "512Mi"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Service",
+      "metadata": {
+        "name": "OWNER-artifacts",
+        "namespace": "a4s-bench-ryan-q8",
+        "labels": {
+          "ece496-benchmark-owner": "OWNER"
+        }
+      },
+      "spec": {
+        "type": "ClusterIP",
+        "selector": {
+          "ece496-benchmark-owner": "OWNER",
+          "app": "OWNER-artifacts"
+        },
+        "ports": [
+          {
+            "name": "artifacts",
+            "port": 8000,
+            "targetPort": "artifacts"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "Pod",
+      "metadata": {
+        "name": "OWNER-ssd-prep",
+        "namespace": "a4s-bench-ryan-q8",
+        "labels": {
+          "ece496-benchmark-owner": "OWNER"
+        }
+      },
+      "spec": {
+        "restartPolicy": "Never",
+        "automountServiceAccountToken": false,
+        "enableServiceLinks": false,
+        "nodeSelector": {
+          "kubernetes.io/hostname": "WORKER"
+        },
+        "activeDeadlineSeconds": 120,
+        "securityContext": {
+          "runAsNonRoot": true,
+          "runAsUser": 9999,
+          "runAsGroup": 9999,
+          "supplementalGroups": [
+            999
+          ],
+          "seccompProfile": {
+            "type": "RuntimeDefault"
+          }
+        },
+        "containers": [
+          {
+            "name": "prepare",
+            "image": "docker.io/library/python@sha256:c5ba3deef00c7758561a0f03c26f44f10589263d40e732b8748e0d1f38f6dd89",
+            "imagePullPolicy": "IfNotPresent",
+            "command": [
+              "/bin/sh",
+              "-ec",
+              "set -eu\nprefix=OWNER\npartition=$(awk '$5==\"/ssd\" {print $3}' /proc/self/mountinfo)\ntest \"$partition\" = 8:16\nblock=$(readlink -f \"/sys/dev/block/$partition\")\ntest \"$(cat \"$block/queue/rotational\")\" = 0\ntest \"$(id -u):$(id -g)\" = 9999:9999\ntest \"$(stat -c '%u:%g:%a' /ssd)\" = 9999:9999:755\nfor arm in hardcoded calibrated; do\n    folder=\"/ssd/$prefix-$arm-ssd-v2\"\n    test ! -e \"$folder\"\n    test ! -L \"$folder\"\ndone\numask 077\nfor arm in hardcoded calibrated; do\n    folder=\"/ssd/$prefix-$arm-ssd-v2\"\n    mkdir -m 0700 \"$folder\"\n    test \"$(stat -c '%u:%g:%a' \"$folder\")\" = 9999:9999:700\n    stat -c 'path=%n uid=%u gid=%g mode=%a' \"$folder\"\ndone\ndf -Pk /ssd\nprintf 'SSD=%s rotational=0\\n' \"$partition\"\n"
+            ],
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "readOnlyRootFilesystem": true,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              }
+            },
+            "resources": {
+              "requests": {
+                "cpu": "10m",
+                "memory": "16Mi"
+              },
+              "limits": {
+                "cpu": "100m",
+                "memory": "64Mi"
+              }
+            },
+            "volumeMounts": [
+              {
+                "name": "rocksdb-path",
+                "mountPath": "/ssd",
+                "readOnly": false
+              }
+            ]
+          }
+        ],
+        "volumes": [
+          {
+            "name": "rocksdb-path",
+            "hostPath": {
+              "path": "/data/flink/rocksdb",
+              "type": "Directory"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "v1",
+      "kind": "ServiceAccount",
+      "metadata": {
+        "name": "OWNER-flink",
+        "namespace": "a4s-bench-ryan-q8",
+        "labels": {
+          "ece496-benchmark-owner": "OWNER"
+        }
+      }
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "Role",
+      "metadata": {
+        "name": "OWNER-flink",
+        "namespace": "a4s-bench-ryan-q8",
+        "labels": {
+          "ece496-benchmark-owner": "OWNER"
+        }
+      },
+      "rules": [
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "pods"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "configmaps"
+          ],
+          "verbs": [
+            "get",
+            "list",
+            "watch",
+            "create",
+            "update",
+            "patch",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments"
+          ],
+          "resourceNames": [
+            "OWNER-hardcoded",
+            "OWNER-calibrated"
+          ],
+          "verbs": [
+            "get",
+            "delete"
+          ]
+        },
+        {
+          "apiGroups": [
+            "apps"
+          ],
+          "resources": [
+            "deployments/finalizers"
+          ],
+          "resourceNames": [
+            "OWNER-hardcoded",
+            "OWNER-calibrated"
+          ],
+          "verbs": [
+            "update"
+          ]
+        },
+        {
+          "apiGroups": [
+            ""
+          ],
+          "resources": [
+            "services"
+          ],
+          "resourceNames": [
+            "OWNER-hardcoded",
+            "OWNER-hardcoded-rest",
+            "OWNER-calibrated",
+            "OWNER-calibrated-rest"
+          ],
+          "verbs": [
+            "get"
+          ]
+        }
+      ]
+    },
+    {
+      "apiVersion": "rbac.authorization.k8s.io/v1",
+      "kind": "RoleBinding",
+      "metadata": {
+        "name": "OWNER-flink",
+        "namespace": "a4s-bench-ryan-q8",
+        "labels": {
+          "ece496-benchmark-owner": "OWNER"
+        }
+      },
+      "roleRef": {
+        "apiGroup": "rbac.authorization.k8s.io",
+        "kind": "Role",
+        "name": "OWNER-flink"
+      },
+      "subjects": [
+        {
+          "kind": "ServiceAccount",
+          "name": "OWNER-flink",
+          "namespace": "a4s-bench-ryan-q8"
+        }
+      ]
+    }
+  ]
+}
