@@ -10,19 +10,11 @@ map applies when the online estimator is off.
 
 ## Enable and smoke-test
 
-The active Flink source is vendored, but FRocksDB is a git submodule. Build a
-matching Java and JNI pair from the supplied patch against the existing pin; do
-not change the submodule pointer or mix two jars/libraries. From the repository
-root, using a fresh submodule workspace:
+The JNI build exports the pinned FRocksDB source and applies the branch's
+latency and lookup patches in a temporary build directory.
 
 ```sh
 git submodule update --init sources/libs/frocksdb
-test "$(git -C sources/libs/frocksdb rev-parse HEAD)" = d439c0fbf80e87340c728ab3fad1664ac9f72098
-for name in frocksdb-a4s-block-latency frocksdb-a4s-cache-lookup-v1; do
-    patch="$PWD/sources/libs/patches/$name.patch"
-    git -C sources/libs/frocksdb apply --check "$patch"
-    git -C sources/libs/frocksdb apply "$patch"
-done
 images/frocksdb/build.sh
 images/flink-runtime-a4s/build.sh
 ```
@@ -151,6 +143,14 @@ projecting to a different cache capacity, the estimate assumes a similar
 foreground share and lookup density. Different subtasks can also have
 different access patterns or read costs. A vertex falls back to the fixed
 cost when any subtask is unqualified.
+
+A QuickMRC bin includes references whose inclusive stack distance fits its
+upper capacity boundary. The merged curve reports total native cache across
+the vertex. For a candidate parallelism, A4S divides this cache across slots
+and applies Flink's RocksDB write-buffer ratio to convert it into a managed
+reservation per slot. This conversion assumes an even split of the working
+set and a dedicated RocksDB managed-memory consumer, as in the Q8 benchmark.
+The live native capacity after restore provides a check on both assumptions.
 
 The QuickMRC gauge encodes large histogram strings before Flink's
 modified-UTF metric transport. The JobManager decodes them to the original
