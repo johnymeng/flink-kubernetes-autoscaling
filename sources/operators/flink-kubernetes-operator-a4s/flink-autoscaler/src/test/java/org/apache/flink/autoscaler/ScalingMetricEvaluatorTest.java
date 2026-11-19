@@ -120,7 +120,31 @@ public class ScalingMetricEvaluatorTest {
                         .getMemoryMbForParallelism(2).orElseThrow());
         assertEquals(legacy.getVertexMetrics(), online.getVertexMetrics());
 
+        var commonBaseline =
+                new Configuration(config)
+                        .set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE, true)
+                        .set(AutoScalerOptions.A4S_HIT_LATENCY_SEC, 0.001975);
+        var fitted =
+                ScalingMetricEvaluator.selectedOnlineCacheCost(config, snapshots, vertex, 1)
+                        .orElseThrow();
+        var slopeOnly =
+                ScalingMetricEvaluator.selectedOnlineCacheCost(commonBaseline, snapshots, vertex, 1)
+                        .orElseThrow();
+        assertEquals(0.001975, slopeOnly.getZeroMissSecondsPerRecord());
+        assertEquals(
+                fitted.getMissPenaltySecondsPerRecord(), slopeOnly.getMissPenaltySecondsPerRecord());
+        assertEquals(
+                100.0,
+                evaluator.evaluate(commonBaseline, history, Duration.ZERO)
+                        .getMemoryParallelismCurves()
+                        .get(vertex)
+                        .getMemoryMbForParallelism(2)
+                        .orElseThrow());
+
         latest.setAttempt("restarted");
+        assertTrue(
+                ScalingMetricEvaluator.selectedOnlineCacheCost(commonBaseline, snapshots, vertex, 1)
+                        .isEmpty());
         var fallback = evaluator.evaluate(config, history, Duration.ZERO);
         assertEquals(200.0,
                 fallback.getMemoryParallelismCurves().get(vertex)
