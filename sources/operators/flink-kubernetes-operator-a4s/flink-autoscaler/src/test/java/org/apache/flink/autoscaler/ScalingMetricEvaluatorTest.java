@@ -20,6 +20,7 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.autoscaler.a4s.A4S;
+import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
@@ -81,6 +82,61 @@ public class ScalingMetricEvaluatorTest {
         config.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 550.0);
         var decision = new A4S(history.getJobTopology(), calibrated, Map.of()).makeDecision(config);
         assertEquals(3, decision.get(vertex).getParallelism());
+    }
+
+    @Test
+    void usesQualifiedOnlineHistoryAndFallsBackForANewAttempt() {
+        var vertex = new JobVertexID();
+        var history = cacheCostHistory(vertex);
+        var snapshots = history.getMetricHistory();
+        var start = snapshots.get(snapshots.firstKey());
+        var end = snapshots.remove(snapshots.lastKey());
+        snapshots.put(Instant.ofEpochSecond(60), end);
+        end.setVertexMetrics(
+                Map.of(
+                        vertex,
+                        Map.of(
+                                ScalingMetric.NUM_RECORDS_IN, 60_000.0,
+                                ScalingMetric.NUM_RECORDS_OUT, 60_000.0,
+                                ScalingMetric.LAG, 0.0,
+                                ScalingMetric.LOAD, 0.8)));
+        start.setCacheCostSamples(
+                Map.of(vertex, List.of(new CacheCostSample(
+                        0, "original", 987, 524288, 1, 200, 100, 100, 100,
+                        10, 10, 50_000, 100_000, 500, 10, 1_000, 2, 0, 0))));
+        var latest = new CacheCostSample(
+                0, "original", 987, 524288, 1, 10_200, 5_100, 5_100, 5_100,
+                110, 110, 150_000, 2_200_000, 5_500, 610, 61_000, 2, 0, 0);
+        end.setCacheCostSamples(Map.of(vertex, List.of(latest)));
+
+        var legacy = evaluator.evaluate(new Configuration(), history, Duration.ZERO);
+        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var online = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(200.0,
+                legacy.getMemoryParallelismCurves().get(vertex)
+                        .getMemoryMbForParallelism(2).orElseThrow());
+        assertEquals(50.0,
+                online.getMemoryParallelismCurves().get(vertex)
+                        .getMemoryMbForParallelism(2).orElseThrow());
+        assertEquals(legacy.getVertexMetrics(), online.getVertexMetrics());
+
+        latest.setAttempt("restarted");
+        var fallback = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(200.0,
+                fallback.getMemoryParallelismCurves().get(vertex)
+                        .getMemoryMbForParallelism(2).orElseThrow());
+    }
+
+    @Test
+    void leavesVerticesWithoutUsableMissRateCurvesOutOfCachePlacement() {
+        var vertex = new JobVertexID();
+        var history = cacheCostHistory(vertex);
+        var snapshots = history.getMetricHistory();
+        snapshots.get(snapshots.lastKey())
+                .setMissRateCurves(Map.of(vertex, new MissRateCurve(List.of())));
+        var evaluated = evaluator.evaluate(new Configuration(), history, Duration.ZERO);
+        assertTrue(evaluated.getMemoryParallelismCurves().isEmpty());
+        assertTrue(evaluated.getVertexMetrics().containsKey(vertex));
     }
 
     @Test

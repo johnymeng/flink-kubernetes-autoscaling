@@ -129,21 +129,49 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
         }
     }
 
-    protected MissRateCurve queryVertexMissRateCurve(Context ctx, JobID jobId, JobVertexID jobVertexID) {
+    @Override
+    protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4SMetrics(
+            Context ctx, Collection<JobVertexID> jobVertexIds) {
+        return jobVertexIds.stream()
+                .map(vertex -> {
+                    var response = queryVertexA4SMetrics(ctx, ctx.getJobID(), vertex, true);
+                    if (response == null) {
+                        response = queryVertexA4SMetrics(ctx, ctx.getJobID(), vertex, false);
+                    }
+                    return response == null ? null : Map.entry(vertex, response);
+                })
+                .filter(entry -> entry != null)
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+    }
+
+    protected MissRateCurve queryVertexMissRateCurve(
+            Context ctx, JobID jobId, JobVertexID jobVertexID) {
+        var response = queryVertexA4SMetrics(ctx, jobId, jobVertexID, false);
+        return response == null ? null : response.getScaledMrc();
+    }
+
+    private A4SAggregatedMetricsResponseBody queryVertexA4SMetrics(
+            Context ctx, JobID jobId, JobVertexID jobVertexID, boolean collectCacheCosts) {
         var parameters = new AggregatedSubtaskMetricsParameters();
         var pathIt = parameters.getPathParameters().iterator();
         ((JobIDPathParameter) pathIt.next()).resolve(jobId);
         ((JobVertexIdPathParameter) pathIt.next()).resolve(jobVertexID);
 
+        if (collectCacheCosts) {
+            var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
+            filter.resolve(
+                    List.of(
+                            A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COST_SAMPLES,
+                            A4SAggregatedMetricsResponseBody.CACHE_COST_COMPACTION_SELECTOR));
+        }
+
         try (var restClient = ctx.getRestClusterClient()) {
-            A4SAggregatedMetricsResponseBody responseBody =
-                    restClient
-                            .sendRequest(
-                                    A4SAggregatedVertexMetricsHeaders.getInstance(),
-                                    parameters,
-                                    EmptyRequestBody.getInstance())
-                            .get();
-            return responseBody.getScaledMrc();
+            return restClient
+                    .sendRequest(
+                            A4SAggregatedVertexMetricsHeaders.getInstance(),
+                            parameters,
+                            EmptyRequestBody.getInstance())
+                    .get();
         } catch (Exception e) {
             LOG.debug(
                     "Unable to fetch A4S miss-rate curve for job {}, vertex {}, continuing without MRC",

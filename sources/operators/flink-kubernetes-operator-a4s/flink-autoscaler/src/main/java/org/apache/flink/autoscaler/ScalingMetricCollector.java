@@ -29,6 +29,8 @@ import org.apache.flink.autoscaler.metrics.MetricNotFoundException;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetrics;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.a4s.CacheCostSample;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
@@ -133,8 +135,22 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
 
         // Aggregated job vertex metrics collected from Flink based on the filtered metric names
         var collectedVertexMetrics = queryAllAggregatedMetrics(ctx, filteredVertexMetricNames);        
-        var collectedMissRateCurves =
-                queryAllMissRateCurves(ctx, filteredVertexMetricNames.keySet());
+        Map<JobVertexID, MissRateCurve> collectedMissRateCurves;
+        Map<JobVertexID, List<CacheCostSample>> cacheCostSamples = null;
+        if (conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)) {
+            collectedMissRateCurves = new HashMap<>();
+            cacheCostSamples = new HashMap<>();
+            for (var entry : queryAllA4SMetrics(ctx, filteredVertexMetricNames.keySet()).entrySet()) {
+                var response = entry.getValue();
+                collectedMissRateCurves.put(entry.getKey(), response.getScaledMrc());
+                if (!response.getCacheCostSamples().isEmpty()) {
+                    cacheCostSamples.put(entry.getKey(), response.getCacheCostSamples());
+                }
+            }
+        } else {
+            collectedMissRateCurves =
+                    queryAllMissRateCurves(ctx, filteredVertexMetricNames.keySet());
+        }
 
         var collectedJmMetrics = queryJmMetrics(ctx);
         var collectedTmMetrics = queryTmMetrics(ctx);
@@ -149,6 +165,8 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                         collectedMissRateCurves,
                         topology,
                         conf);
+
+        scalingMetrics.setCacheCostSamples(cacheCostSamples);
 
         // Add scaling metrics to history if they were computed successfully
         metricHistory.put(now, scalingMetrics);
@@ -525,6 +543,15 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
     protected Map<JobVertexID, MissRateCurve> queryAllMissRateCurves(
             Context ctx, Collection<JobVertexID> jobVertexIds) {
         return Collections.emptyMap();
+    }
+
+    protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4SMetrics(
+            Context ctx, Collection<JobVertexID> jobVertexIds) {
+        return queryAllMissRateCurves(ctx, jobVertexIds).entrySet().stream()
+                .collect(
+                        Collectors.toMap(
+                                Map.Entry::getKey,
+                                entry -> new A4SAggregatedMetricsResponseBody(entry.getValue())));
     }
 
     public JobDetailsInfo getJobDetailsInfo(

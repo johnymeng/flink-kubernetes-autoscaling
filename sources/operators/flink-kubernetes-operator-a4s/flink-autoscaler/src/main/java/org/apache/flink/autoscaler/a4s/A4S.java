@@ -40,6 +40,8 @@ import java.util.stream.Collectors;
  */
 public class A4S {
 
+    public static final int MAX_MANAGED_MEMORY_MB = 600;
+
     private static final Logger LOG = LoggerFactory.getLogger(A4S.class);
 
     private final EvaluatedMetrics evaluatedMetrics;
@@ -103,7 +105,7 @@ public class A4S {
                         parallelismForVertex.computeIfPresent(
                                 vertex, (id, requested) -> Math.max(requested, curve.getMinParallelism())));
 
-        double maxManagedMemoryMB = 600 - conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
+        double maxManagedMemoryMB = MAX_MANAGED_MEMORY_MB - conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
         int maxAttempts = conf.get(AutoScalerOptions.A4S_MAX_ATTEMPTS);
 
         for (int attempt = 0; attempt < maxAttempts; attempt++) {

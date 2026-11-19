@@ -18,12 +18,14 @@
 package org.apache.flink.autoscaler.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.List;
 import java.util.Map;
 
 /** Collected scaling metrics. */
@@ -34,6 +36,14 @@ public class CollectedMetrics {
     private Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics;
     private Map<ScalingMetric, Double> globalMetrics;
     private Map<JobVertexID, MissRateCurve> missRateCurves;
+    private Map<JobVertexID, List<CacheCostSample>> cacheCostSamples;
+
+    public CollectedMetrics(
+            Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics,
+            Map<ScalingMetric, Double> globalMetrics,
+            Map<JobVertexID, MissRateCurve> missRateCurves) {
+        this(vertexMetrics, globalMetrics, missRateCurves, null);
+    }
 
     public CollectedMetrics(
             Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics,

@@ -59,10 +59,16 @@ public class MemoryParallelismCurve {
         /** Memory in MB. */
         @Getter
         private final double memoryMB;
+        private final boolean supportedCacheSize;
 
         public Point(int parallelism, double memoryMB) {
+            this(parallelism, memoryMB, true);
+        }
+
+        private Point(int parallelism, double memoryMB, boolean supportedCacheSize) {
             this.parallelism = parallelism;
             this.memoryMB = memoryMB;
+            this.supportedCacheSize = supportedCacheSize;
         }
 
         @Override
@@ -100,6 +106,12 @@ public class MemoryParallelismCurve {
             .findFirst();
     }
 
+    /** A target below 100% that a point on the measured miss-rate curve can meet. */
+    public boolean hasSupportedCacheSize(int parallelism) {
+        return points.stream()
+                .anyMatch(point -> point.parallelism == parallelism && point.supportedCacheSize);
+    }
+
     @Override
     public String toString() {
         return String.format("MPC[target=%.2f, minParallelism=%d, maxParallelism=%d, points=%s]", targetThroughput, minParallelism, maxParallelism, points);
@@ -119,6 +131,11 @@ public class MemoryParallelismCurve {
 
         public Builder addPoint(int parallelism, double memoryMB) {
             points.add(new Point(parallelism, memoryMB));
+            return this;
+        }
+
+        private Builder addPoint(int parallelism, double memoryMB, boolean supportedCacheSize) {
+            points.add(new Point(parallelism, memoryMB, supportedCacheSize));
             return this;
         }
 
@@ -213,6 +230,11 @@ public class MemoryParallelismCurve {
             MissRateCurve mrc,
             boolean calibrated) {
         Builder builder = builder().targetThroughput(targetThroughputPerSec);
+        double minimumMissRate =
+                mrc.getPoints().stream()
+                        .mapToDouble(MissRateCurve.Point::getMissRate)
+                        .min()
+                        .orElse(Double.POSITIVE_INFINITY);
         for (int parallelism = minParallelism; parallelism <= maxParallelism; parallelism++) {
             // This is the maximum acceptable miss rate. We need a cache size
             // that achieves this miss rate or lower
@@ -238,7 +260,9 @@ public class MemoryParallelismCurve {
             }
 
             double memoryMB = mrc.leastMemoryBytesForMissRate(maximumMissRate) / (1024.0 * 1024.0);
-            builder.addPoint(parallelism, memoryMB);
+            // A plateau fallback or an unconstrained budget supplies no evidence for downsizing.
+            builder.addPoint(
+                    parallelism, memoryMB, maximumMissRate < 1 && maximumMissRate >= minimumMissRate);
         }
         return builder.build();
     }
