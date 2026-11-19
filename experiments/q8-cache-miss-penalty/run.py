@@ -190,6 +190,13 @@ def main():
         finally:
             for resource in reversed(created):
                 remove(resource)
+            kinds = "pods,services,serviceaccounts,roles,rolebindings"
+            for _ in range(45):
+                if not kube("get", kinds, "-l", "ece496-benchmark-owner=" + owner, "-o", "name").strip():
+                    break
+                time.sleep(2)
+            else:
+                raise RuntimeError(f"Owned infrastructure still present for {owner}")
             save(pair / "cleanup.json", [{"name": x["metadata"]["name"], "uid": x["metadata"]["uid"]} for x in created])
 
 

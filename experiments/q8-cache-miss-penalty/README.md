@@ -22,4 +22,27 @@ Use a fresh output directory for each invocation. The default order is fixed/onl
 
 The plan encodes `seconds:persons_per_second_per_subtask:auctions_per_second_per_subtask`. Its default phases offer 16,000, 80,000, 3,600 and 80,000 combined input records/s. The third phase permits observation of recovery; the final burst measures drain time. Flink's standard trigger determines if and when to resize. A no-action arm is an experimental outcome.
 
+The source exposes its sealed backlog as `q8Backlog` for verification. As a legacy Flink source it does not populate the standard `pendingRecords` gauge. The autoscaler uses observed throughput and utilization in this benchmark. Its measured target rate is recorded separately from the offered schedule.
+
 The primary result is completed sealed input records divided by time from release through job completion, including downtime. The analyzer checks per-partition savepoint and restore offsets, terminal input offsets, matching starting allocations and binaries, observed backlog and evidence of autoscaling. Five-second samples within an arm are correlated. Report the paired outcomes and their phase behavior individually.
+
+## Q8 results from November 19, 2026
+
+Each run completed all 5,634,000 scheduled input records. Flink's ordinary autoscaler triggered one join resize per run. All four source partitions resumed from their saved offsets and subsequently reached their scheduled end offsets.
+
+| Execution order | Applied model | Zero-miss baseline (µs/record) | Miss coefficient (µs/record) | Completion (s) | Completed inputs/s | Request to verified restore (s) | Peak sampled backlog (records) |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Pair 1, run 1 | Fixed | 5.00 | 4,995.00 | 446.717 | 12,612.0 | 126.5 | 2,613,559 |
+| Pair 1, run 2 | Online | 43.75 | 12.27 | 451.943 | 12,466.2 | 120.3 | 2,335,074 |
+| Pair 2, run 1 | Online | 44.00 | 10.41 | 458.347 | 12,292.0 | 119.0 | 2,277,264 |
+| Pair 2, run 2 | Fixed | 5.00 | 4,995.00 | 461.950 | 12,196.1 | 118.2 | 2,357,822 |
+
+Both models use the QuickMRC miss fraction as input. Multiplying that fraction by the miss coefficient and adding the zero-miss baseline gives estimated busy time per input record. In the fixed model the coefficient is 4,995 µs, the difference between 5 ms and 5 µs. Each online arm applied both of its fitted coefficients.
+
+At the first trigger, the fixed model allowed a 2.44% miss fraction. The lowest fraction on the measured curve was 77.75%. The online model allowed 100%. All four decisions had this pattern. Neither model identified a measured cache size that justified changing the total managed-memory budget. Both planners split the existing budget across two join subtasks at 79 MiB of managed memory per slot. Each live RocksDB cache reported 69,031,253 bytes after restore.
+
+Online throughput relative to fixed was -1.16% for the first pair and +0.79% for the reversed pair. These two pairs ran on a shared lab cluster and exercised identical placements. They measure end-to-end performance for this workload. The performance effect of choosing different allocations remains unmeasured. Backlog peaks are sampled. Request-to-verified times include controller observation delays. Both source-offline boundary events were available only for the first online run, so the table uses request-to-verified timing consistently.
+
+The per-arm results include decision coefficients, alternative proposals evaluated on each arm’s exact snapshot, confirmed allocations, checkpoint offsets, and artifact hashes. [Machine-readable results](results/2026-11-19.json)
+
+The accompanying raw evidence archive, `q8-autoscaling-evidence.tar.gz`, has SHA-256 `0d6e74b6e0cdb346c1d9652693a24f0cb03653d3ee4a0791d889db4332cb9c3f`. Its internal manifest covers the decision snapshots, live deployment receipts, source offsets, and build verification.
