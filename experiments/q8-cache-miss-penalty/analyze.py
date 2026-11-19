@@ -34,7 +34,7 @@ def read_offsets(folder):
             key = f"{role}/{index}"
             values[action, int(checkpoint), key].add((int(offset), int(end), int(p)))
             if action == "restore":
-                restores[int(checkpoint), key].add((path.name, line[:match.start()].strip()))
+                restores[int(checkpoint), key].add(line)
     return values, restores
 
 
@@ -146,6 +146,12 @@ def analyze(folder):
         for key, (size, p) in expected.items():
             saved = offset_log["snapshot", checkpoint, key]
             resumed = offset_log["restore", checkpoint, key]
+            # The post-restore gauge is emitted by the restored source attempt itself.
+            # It can corroborate a saved partition offset if the old log follower closed.
+            resumed = resumed | {(r[key]["q8RestoredOffset"], r[key]["q8InputEnd"], p) for r in progress
+                                 if r.get("job_start_ms") == end.get("restored_job_start_epoch_ms")
+                                 and r.get(key, {}).get("q8RestoredCheckpointId") == checkpoint
+                                 and "q8RestoredOffset" in r[key] and "q8InputEnd" in r[key]}
             matched = len(saved) == 1 and saved == resumed
             source_evidence[key] = next(iter(saved))[0] if matched and next(iter(saved))[1:] == (size, p) else None
         if checkpoint is None or any(value is None for value in source_evidence.values()):

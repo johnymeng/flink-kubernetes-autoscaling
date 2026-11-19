@@ -76,12 +76,12 @@ def follow_source_logs(kube, deployment, output, followers):
         active = next((c for c in containers if c["name"] == "flink-main-container"), {})
         if "running" not in active.get("state", {}):
             continue
-        key = (name, active["restartCount"])
+        key = (name, pod["metadata"]["uid"], active["restartCount"])
         if key in followers:
             continue
         log = subprocess.Popen([*kube, "logs", "-f", name, "-c", "flink-main-container"],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        with (output / f"{name}-{key[1]}.offsets").open("ab") as outfile:
+        with (output / f"{name}-{key[1]}-{key[2]}.offsets").open("ab") as outfile:
             match = subprocess.Popen(["grep", "--line-buffered", "Q8_INPUT_OFFSET"], stdin=log.stdout,
                                      stdout=outfile)
         log.stdout.close()
