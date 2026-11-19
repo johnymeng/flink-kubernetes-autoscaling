@@ -2,6 +2,7 @@
 
 import argparse
 from datetime import datetime, timezone
+from http.client import HTTPException
 import json
 from pathlib import Path
 import re
@@ -13,6 +14,8 @@ from urllib.error import URLError
 from urllib.parse import quote
 from urllib.request import urlopen
 from uuid import uuid4
+
+from observe import capture
 
 
 OWNER = "ece496.org/benchmark-owner"
@@ -251,12 +254,16 @@ class Guard:
         self.phase("ready")
         if self.args.policy_jar:
             with self.proposals.open("w") as out, (self.out / "policy.log").open("w") as err:
+                jvm_options = ["-Dlog4j.configurationFile=" + str(self.args.log_config)]
+                if self.args.main_empty_curves is not None:
+                    jvm_options.append("-Da4s.quick.main-empty-curves=" + self.args.main_empty_curves)
                 self.jvm = subprocess.Popen(
-                    ["java", "-Dlog4j.configurationFile=" + str(self.args.log_config),
-                     "-cp", self.args.classpath + ":" + str(self.args.policy_jar),
+                    ["java", *jvm_options, "-cp", self.args.classpath + ":" + str(self.args.policy_jar),
                      "org.apache.flink.autoscaler.RyanQ8Policy", self.args.arm, self.args.job_id,
                      str(self.args.manifest), str(self.pointer), str(self.gate)], stdout=out, stderr=err,
                 )
+        window_end = (self.args.release_ms / 1000 + self.args.observation_seconds
+                      if self.args.observation_seconds else None)
         seen_proposals = 0
         started = None
         deadline = time.monotonic() + 240
@@ -269,6 +276,29 @@ class Guard:
                 started = time.monotonic()
                 deadline = started + self.args.duration
                 write_json(self.out / "ready.json", job)
+            state = (job or {}).get("state") or resource.get("status", {}).get("jobStatus", {}).get("state")
+            if state == "FAILED":
+                raise RuntimeError("Benchmark job failed")
+            observed = time.time()
+            ended = (job or {}).get("end-time", -1)
+            on_time = window_end is None or observed <= window_end or 0 < ended <= window_end * 1000
+            if state == "FINISHED" and not self.active and on_time:
+                write_json(self.out / "finished.json", {"epoch": observed, "job": job,
+                            "status": resource.get("status", {}).get("jobStatus")})
+                return
+            if window_end is not None and observed >= window_end:
+                receipt = {"release_ms": self.args.release_ms, "observation_seconds": self.args.observation_seconds,
+                           "deadline_epoch": window_end, "observed_epoch": observed, "state": state,
+                           "job": job, "status": resource.get("status", {}).get("jobStatus"),
+                           "active_transaction": self.active["transaction"] if self.active else None}
+                if job and state == "RUNNING":
+                    try:
+                        receipt["snapshot"] = capture(self.pointer.read_text().strip(), self.args.job_id, {})
+                    except (OSError, ValueError, KeyError, HTTPException) as error:
+                        receipt["snapshot_error"] = str(error)
+                receipt["snapshot_end_epoch"] = time.time()
+                write_json(self.out / "window-ended.json", receipt)
+                return
             if self.active:
                 try:
                     self.observe_restore(resource, job)
@@ -286,13 +316,6 @@ class Guard:
                             self.submit(resource, job, proposal)
                             if self.active:
                                 break
-            flink_state = (job or {}).get("state") or resource.get("status", {}).get("jobStatus", {}).get("state")
-            if flink_state == "FINISHED" and not self.active:
-                write_json(self.out / "finished.json", {"epoch": time.time(), "job": job,
-                                                        "status": resource.get("status", {}).get("jobStatus")})
-                return
-            if flink_state == "FAILED":
-                raise RuntimeError("Benchmark job failed")
             time.sleep(2)
         raise RuntimeError("Bounded Q8 job did not finish within the observation window")
 
@@ -321,10 +344,17 @@ def main():
                         default=Path("/etc/flink-kubernetes-autoscaling/kubeconfig"))
     parser.add_argument("--classpath")
     parser.add_argument("--policy-jar", type=Path)
+    parser.add_argument("--main-empty-curves", choices=("literal", "omit-empty"))
     parser.add_argument("--log-config", type=Path, default=Path(__file__).with_name("policy-log4j2.properties"))
+    parser.add_argument("--release-ms", type=int)
+    parser.add_argument("--observation-seconds", type=int, default=0)
     parser.add_argument("--duration", type=int, default=1800)
     parser.add_argument("--restore-timeout", type=int, default=420)
     args = parser.parse_args()
+    if args.observation_seconds < 0 or (args.observation_seconds > 0 and not args.release_ms):
+        parser.error("A positive observation horizon requires the source release timestamp")
+    if args.main_empty_curves is not None and args.arm != "hardcoded":
+        parser.error("Only the main controller accepts an empty-curve mode")
     if (args.namespace != "a4s-bench-ryan-q8"
             or not re.fullmatch(r"r8pen-[0-9]{6}", args.owner)
             or args.deployment != f"{args.owner}-{args.arm}"

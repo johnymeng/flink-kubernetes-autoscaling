@@ -81,11 +81,14 @@ def follow_source_logs(kube, deployment, output, followers):
             continue
         log = subprocess.Popen([*kube, "logs", "-f", name, "-c", "flink-main-container"],
                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        with (output / f"{name}-{key[1]}-{key[2]}.offsets").open("ab") as outfile:
-            match = subprocess.Popen(["grep", "--line-buffered", "Q8_INPUT_OFFSET"], stdin=log.stdout,
-                                     stdout=outfile)
-        log.stdout.close()
-        followers[key] = (log, match)
+        followers[key] = [log]
+        try:
+            with (output / f"{name}-{key[1]}-{key[2]}.offsets").open("ab") as outfile:
+                match = subprocess.Popen(["grep", "--line-buffered", "Q8_INPUT_OFFSET"], stdin=log.stdout,
+                                         stdout=outfile)
+                followers[key].append(match)
+        finally:
+            log.stdout.close()
 
 
 def main():
@@ -110,19 +113,25 @@ def main():
                     row.update(capture(base, args.job_id, metrics))
                 except (OSError, ValueError, KeyError, subprocess.SubprocessError) as error:
                     row["unavailable"] = str(error)
+                row["capture_end_epoch"] = time.time()
                 print(json.dumps(row), file=series)
-                if (args.output / "finished.json").exists():
+                if (args.output / "finished.json").exists() or (args.output / "window-ended.json").exists():
                     break
                 time.sleep(max(0, 5 - (time.monotonic() - start)))
     except KeyboardInterrupt:
         pass
     finally:
-        for children in followers.values():
-            for process in children:
-                process.terminate()
-        for children in followers.values():
-            for process in children:
-                process.wait()
+        children = [process for group in followers.values() for process in group]
+        for process in children:
+            process.terminate()
+        deadline = time.monotonic() + 3
+        for process in children:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
+                process.kill()
+        for process in children:
+            process.wait(timeout=2)
 
 
 if __name__ == "__main__":

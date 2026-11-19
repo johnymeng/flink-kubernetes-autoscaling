@@ -1,5 +1,7 @@
 # Paired Q8 autoscaling benchmark
 
+For a short comparison of the actual main and online controllers with Q8 resource charts, see [the quick benchmark](QUICK.md).
+
 This experiment compares the original A4S cost model with the production online model on a sealed, checkpointed Nexmark Q8 workload. The fixed arm uses 5 µs per hit and 5 ms per miss. When coverage qualifies, the online arm uses its fitted baseline **and** its fitted incremental miss cost per input record. The fixed-intercept variant is a diagnostic evaluated at the same decision and never applied to the job.
 
 The private controller collects the same native telemetry for both arms. Its standard Flink autoscaler computes the parallelism trigger. The selected policy applies its placement through an owned FlinkDeployment savepoint upgrade. Before applying it, the harness runs the alternate policy and the fixed-intercept diagnostic through the same placement code with an independent in-memory state store. Each receives the same metric history, miss-rate curve, standard scaler proposal and still-running slot allocation. The shared Kubernetes operator continues to reconcile the jobs. Its own scaling loop is disabled to prevent competing writes.

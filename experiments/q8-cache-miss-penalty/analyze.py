@@ -103,7 +103,31 @@ def allocation(row):
             "total_slots": overview["slots-total"], "workers": overview["taskmanagers"]}
 
 
-def analyze(folder):
+def cold_start(progress, expected, release):
+    def at_zero(row):
+        return all(row.get(key, {}).get("q8NextOffset") == 0
+                   and row[key].get("q8RestoredCheckpointId") == -1 for key in expected)
+
+    pre = [row for row in progress if row["epoch"] <= release and row.get("state") == "RUNNING" and at_zero(row)]
+    for row in pre:
+        if allocation(row):
+            return {"zero_offsets_epoch": row["epoch"], "native_sample_epoch": row["epoch"]}
+    if not pre:
+        return None
+    # Native and source metrics can become visible in successive five-second polls.
+    # Join two samples only if the job and allocation match and all sources are still at zero.
+    before = pre[-1]
+    same_fields = ("job_start_ms", "parallelism", "join_managed_slot_bytes", "overview")
+    if not all(before.get(k) for k in same_fields):
+        return None
+    for row in progress:
+        if (0 < row["epoch"] - release <= 5 and allocation(row) and at_zero(row)
+                and all(row.get(k) == before[k] for k in same_fields)):
+            return {"zero_offsets_epoch": before["epoch"], "native_sample_epoch": row["epoch"]}
+    return None
+
+
+def analyze(folder, *, require_shadow=True, require_finish=True):
     plan = read(folder / "plan.json")
     manifest = read(folder / "deployment-created.json")
     issues = []
@@ -125,9 +149,7 @@ def analyze(folder):
     initial = next(((row, profile) for row in progress if row["epoch"] < cutoff
                     and (profile := allocation(row)) is not None and profile["join_managed_slot_bytes"] is not None),
                    (None, None))
-    cold = next((row for row in progress if row["epoch"] <= release and allocation(row) is not None
-                 and all(row.get(key, {}).get("q8NextOffset") == 0
-                         and row[key].get("q8RestoredCheckpointId") == -1 for key in expected)), None)
+    cold = cold_start(progress, expected, release)
     if not initial[1] or not cold:
         issues.append("Missing complete cold allocation and partition offsets before release")
     if initial[1] and initial[1]["join_managed_slot_bytes"] is None:
@@ -189,9 +211,10 @@ def analyze(folder):
         if not cf or not cf.get("mrc"):
             issues.append(f"Resize {transaction} lacks a retained decision-time miss-rate curve")
         other = "fixed" if plan["arm"] == "calibrated" else "online"
-        for mode in (other, "slope_only"):
-            if "proposed" not in (cf.get(mode) or {}):
-                issues.append(f"Missing {mode} counterfactual at resize {transaction}")
+        if require_shadow:
+            for mode in (other, "slope_only"):
+                if "proposed" not in (cf.get(mode) or {}):
+                    issues.append(f"Missing {mode} counterfactual at resize {transaction}")
         applied.append({"transaction": transaction, "checkpoint": checkpoint, "offsets": source_evidence,
                         "request_s": start["epoch"] - release, "verified_s": end["epoch"] - release,
                         "request_to_verified_s": end["epoch"] - start["epoch"],
@@ -228,7 +251,7 @@ def analyze(folder):
     finished = job.get("state") == "FINISHED" or status.get("state") == "FINISHED"
     end_epoch = job.get("end-time", -1) / 1000 if job.get("end-time", -1) > 0 else finish.get("epoch")
     elapsed = end_epoch - release if finished and end_epoch and end_epoch > release else None
-    if not finished or drained != set(expected):
+    if require_finish and (not finished or drained != set(expected)):
         issues.append("Terminal FINISHED and every partition end offset were not both verified")
     if finished and not elapsed:
         issues.append("Missing positive wall time from input release to job completion")
@@ -258,7 +281,7 @@ def analyze(folder):
         issues.append("Submitted manifest or deployment owner unavailable for verification")
     return {"arm": plan["arm"], "path": folder.name, "release_ms": int(flags["--q8-release-epoch-ms"]),
             "input_plan": stages, "input_end_offsets": {k: v[0] for k, v in expected.items()}, "provenance": baseline,
-            "matched_start_profile": initial[1], "pre_release_zero_offsets_observed": bool(cold),
+            "matched_start_profile": initial[1], "pre_release_zero_offsets_observed": bool(cold), "cold_start_evidence": cold,
             "finished": finished, "completed_input": completed, "wall_seconds_from_release": elapsed,
             "finish_clock": "Flink end-time" if job.get("end-time", -1) > 0 else "FINISHED poll upper bound",
             "completed_input_per_wall_second": completed / elapsed if elapsed and completed is not None else None,

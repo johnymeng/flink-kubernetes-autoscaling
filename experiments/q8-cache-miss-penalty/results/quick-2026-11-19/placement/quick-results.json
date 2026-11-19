@@ -1,0 +1,400 @@
+{
+  "arms": {
+    "branch": {
+      "applied": [
+        {
+          "active_parallelism": {
+            "11ffd1a2f5905feab358b0af9a75fe4e": "2",
+            "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+            "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+          },
+          "active_profiles": {
+            "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=79.000mb (82837504 bytes), networkMemory=39.000mb (40894464 bytes)}",
+            "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+            "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+          },
+          "applied_model": "online",
+          "budgets_at_standard_trigger": {
+            "fixed": {
+              "achievable_on_curve": false,
+              "raw_miss_budget": 0.021372458626422057,
+              "unconstrained": false
+            },
+            "lowest_curve_miss_fraction": 0.8309743128884894,
+            "online": {
+              "achievable_on_curve": true,
+              "raw_miss_budget": 2.692309916047217,
+              "unconstrained": true
+            },
+            "slope_only": {
+              "achievable_on_curve": true,
+              "raw_miss_budget": 3.9512749038207042,
+              "unconstrained": true
+            },
+            "trigger_join_parallelism": 2
+          },
+          "checkpoint": 10,
+          "counterfactual": {
+            "active_proposed": true,
+            "arm": "calibrated",
+            "current_p": 1,
+            "epoch": 1795116215.883,
+            "fitted_baseline_s": 3.9014679553424006e-05,
+            "fixed": {
+              "parallelism": {
+                "11ffd1a2f5905feab358b0af9a75fe4e": "2",
+                "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+                "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+              },
+              "profiles": {
+                "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=79.000mb (82837504 bytes), networkMemory=39.000mb (40894464 bytes)}",
+                "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+                "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+              },
+              "proposed": true
+            },
+            "fixed_baseline_s": 5e-06,
+            "fixed_slope_s": 0.004995,
+            "job_id": "d38e23ea5c144a4ab321078b56294c75",
+            "job_start_epoch_ms": 1795115978195,
+            "mrc_points": 59123,
+            "online_baseline_s": 3.9014679553424006e-05,
+            "online_fit_qualified": true,
+            "online_slope_s": 2.7017971018860397e-05,
+            "slope_only": {
+              "parallelism": {
+                "11ffd1a2f5905feab358b0af9a75fe4e": "2",
+                "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+                "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+              },
+              "profiles": {
+                "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=79.000mb (82837504 bytes), networkMemory=39.000mb (40894464 bytes)}",
+                "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+                "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+              },
+              "proposed": true
+            },
+            "snapshot": "2026-11-19T19:23:35.499730892Z",
+            "target_records_s": 17896.222,
+            "trigger_parallelism": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": 2
+            },
+            "type": "decision"
+          },
+          "managed_bytes_per_slot": 82837504,
+          "native_bytes": {
+            "0": 69031253,
+            "1": 69031253
+          },
+          "observed_offline_s": 101.75247478485107,
+          "offsets": {
+            "Auctions/0": 1062698,
+            "Auctions/1": 1065665,
+            "Persons/0": 389136,
+            "Persons/1": 389131
+          },
+          "other_model_would_apply_same_profile": true,
+          "p": 2,
+          "records_remaining_at_savepoint": 1023370,
+          "request_s": 171.13346242904663,
+          "request_to_verified_s": 142.9217128753662,
+          "savepoint": "file:/mnt/experiments/autoscaling-experiments/flink-state/runs/r8pen-191811-calibrated-ssd-v2/savepoints/savepoint-d38e23-a789cfa04b0a",
+          "transaction": "2b202ef7562647",
+          "verified_s": 314.05517530441284
+        }
+      ],
+      "arm": "calibrated",
+      "cold_start_evidence": {
+        "native_sample_epoch": 1795116042.6546586,
+        "zero_offsets_epoch": 1795116042.6546586
+      },
+      "complete_backlog_samples": 68,
+      "completed_input": 3930000,
+      "completed_input_per_wall_second": 8752.783964365257,
+      "controller_origins": {
+        "ScalingExecutor": "27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48",
+        "ScalingMetricEvaluator": "27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48",
+        "a4s.A4S": "27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48"
+      },
+      "finish_clock": "Flink end-time",
+      "finished": true,
+      "input_at_cutoff": {
+        "finished_before_cutoff": false,
+        "next_sample_records": 3127123,
+        "next_sample_seconds": 360.4937889575958,
+        "records": 3052795,
+        "sample_seconds": 355.4936456680298
+      },
+      "input_end_offsets": {
+        "Auctions/0": 1551000,
+        "Auctions/1": 1551000,
+        "Persons/0": 414000,
+        "Persons/1": 414000
+      },
+      "input_plan": "95:1800:6200,26:8000:32000,100:200:700,5:3000:12000",
+      "issues": [],
+      "job_start_epochs_ms": [
+        1795115978195,
+        1795116286513
+      ],
+      "longest_backlog_sample_gap_seconds": 120.00274872779846,
+      "matched_start_profile": {
+        "join_managed_slot_bytes": 165675008,
+        "join_parallelism": 1,
+        "native_bytes_per_join": [
+          138691653
+        ],
+        "occupied_slots": 5,
+        "total_slots": 8,
+        "workers": 2
+      },
+      "path": "calibrated",
+      "pre_release_zero_offsets_observed": true,
+      "provenance": {
+        "artifacts": {
+          "Query8.jar": "0df4ad393672463ee5a549f1dddcc5f6260174c852109d210d9c917a5744de39",
+          "abi3-mrc-telemetry.jar": "868d93fe641c58f3205e20d5f76e99e10950a426ab1891bcc300f2e2a6248d4c",
+          "rocksdbjni.jar": "b1368b4f01710658f059a24a12d83013fd4fadedb9bba7b3956f4afeca658c51",
+          "savepoint-profiles.jar": "5aba5b0877557ce377ded976429e041c79658f675ec1a71fb880227ad3da3da7"
+        },
+        "controller_classpath_sha256": "0e2bde305bf843aa23576f27fd8273fbe2b70492de154f8a17687eca47288982",
+        "deployed_spec_sha256": "bcd6651eadd70b811d5fc7f6a94aa0b222d8183fcafc8997fe88e436a112f5f1",
+        "normalized_manifest_sha256": "3846be078d0c2eb59713f8d0105162b2c4c86c1179fbc643bd0f5b16534315d2",
+        "policy_sha256": "982f565013f4a095b7ae80a55d58008914324457c2ce5bccef32312c1ff66b9e"
+      },
+      "qualified_online_at_triggers": 1,
+      "release_ms": 1795116047170,
+      "revision": "ffc90a2ff7e9372501ed5382504205e2161db24e",
+      "sampled_backlog_peak": 1653853,
+      "standard_triggers": 1,
+      "trigger_comparisons": [
+        {
+          "active_proposed": true,
+          "arm": "calibrated",
+          "current_p": 1,
+          "epoch": 1795116215.883,
+          "fitted_baseline_s": 3.9014679553424006e-05,
+          "fixed": {
+            "parallelism": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "2",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+            },
+            "profiles": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=79.000mb (82837504 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+            },
+            "proposed": true
+          },
+          "fixed_baseline_s": 5e-06,
+          "fixed_slope_s": 0.004995,
+          "job_id": "d38e23ea5c144a4ab321078b56294c75",
+          "job_start_epoch_ms": 1795115978195,
+          "mrc_points": 59123,
+          "online_baseline_s": 3.9014679553424006e-05,
+          "online_fit_qualified": true,
+          "online_slope_s": 2.7017971018860397e-05,
+          "slope_only": {
+            "parallelism": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "2",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+            },
+            "profiles": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=79.000mb (82837504 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+              "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+            },
+            "proposed": true
+          },
+          "snapshot": "2026-11-19T19:23:35.499730892Z",
+          "target_records_s": 17896.222,
+          "trigger_parallelism": {
+            "11ffd1a2f5905feab358b0af9a75fe4e": 2
+          },
+          "type": "decision"
+        }
+      ],
+      "unexpected_job_start_epochs_ms": [],
+      "unexpected_restores": [],
+      "wall_seconds_from_release": 449.0
+    },
+    "main": {
+      "applied": [
+        {
+          "active_parallelism": {
+            "11ffd1a2f5905feab358b0af9a75fe4e": "2",
+            "6cdc5bb954874d922eaee11a8e7b5dd5": "2",
+            "cbc357ccb763df2852fee8c4fc7d55f2": "2"
+          },
+          "active_profiles": {
+            "11ffd1a2f5905feab358b0af9a75fe4e": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=33.000mb (34603008 bytes), networkMemory=39.000mb (40894464 bytes)}",
+            "6cdc5bb954874d922eaee11a8e7b5dd5": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}",
+            "cbc357ccb763df2852fee8c4fc7d55f2": "ResourceProfile{cpuCores=1, taskHeapMemory=134.000mb (140509184 bytes), taskOffHeapMemory=0 bytes, managedMemory=32.000mb (33554432 bytes), networkMemory=39.000mb (40894464 bytes)}"
+          },
+          "applied_model": "fixed",
+          "budgets_at_standard_trigger": {
+            "fixed": {
+              "achievable_on_curve": false,
+              "raw_miss_budget": 0.02513194326254937,
+              "unconstrained": false
+            },
+            "lowest_curve_miss_fraction": 0.9321337230544392,
+            "trigger_join_parallelism": 2
+          },
+          "checkpoint": 10,
+          "counterfactual": {
+            "active_proposed": true,
+            "arm": "hardcoded",
+            "controller_revision": "f8ce7fbbfae48869d8b1869748ad517801a9f726",
+            "current_p": 1,
+            "epoch": 1795116210.86,
+            "fixed_baseline_s": 5e-06,
+            "fixed_slope_s": 0.004995,
+            "job_id": "d8b43ea61a7c4b29a5722d90532e73b5",
+            "job_start_epoch_ms": 1795115977156,
+            "mrc_points": 56937,
+            "snapshot": "2026-11-19T19:23:30.505750986Z",
+            "target_records_s": 15321.672,
+            "trigger_parallelism": {
+              "11ffd1a2f5905feab358b0af9a75fe4e": 2
+            },
+            "type": "decision"
+          },
+          "managed_bytes_per_slot": 34603008,
+          "native_bytes": {
+            "0": 28835840,
+            "1": 28835840
+          },
+          "observed_offline_s": null,
+          "offsets": {
+            "Auctions/0": 954458,
+            "Auctions/1": 954254,
+            "Persons/0": 388273,
+            "Persons/1": 388273
+          },
+          "other_model_would_apply_same_profile": null,
+          "p": 2,
+          "request_s": 166.70025038719177,
+          "request_to_verified_s": 147.81807136535645,
+          "savepoint": "file:/mnt/experiments/autoscaling-experiments/flink-state/runs/r8pen-191811-hardcoded-ssd-v2/savepoints/savepoint-d8b43e-7c92f328b072",
+          "transaction": "7d73dcfdff3d43",
+          "verified_s": 314.5183217525482
+        }
+      ],
+      "arm": "hardcoded",
+      "cold_start_evidence": {
+        "native_sample_epoch": 1795116032.7642262,
+        "zero_offsets_epoch": 1795116032.7642262
+      },
+      "complete_backlog_samples": 82,
+      "completed_input": null,
+      "completed_input_per_wall_second": null,
+      "controller_origins": {
+        "ScalingExecutor": "57df8474dbc4a0b89d4a3edc40b6cec7b55e22a846505e37553e20568c596933",
+        "ScalingMetricEvaluator": "57df8474dbc4a0b89d4a3edc40b6cec7b55e22a846505e37553e20568c596933",
+        "a4s.A4S": "57df8474dbc4a0b89d4a3edc40b6cec7b55e22a846505e37553e20568c596933"
+      },
+      "finish_clock": "FINISHED poll upper bound",
+      "finished": false,
+      "first_raw_main_empty_curve_error": {
+        "arm": "hardcoded",
+        "curve_points_by_vertex": {
+          "11ffd1a2f5905feab358b0af9a75fe4e": 38947,
+          "6cdc5bb954874d922eaee11a8e7b5dd5": 0,
+          "cbc357ccb763df2852fee8c4fc7d55f2": 0
+        },
+        "epoch": 1795116135.829,
+        "exception": "java.lang.IllegalStateException: MissRateCurve has no points",
+        "job_id": "d8b43ea61a7c4b29a5722d90532e73b5",
+        "job_start_epoch_ms": 1795115977156,
+        "snapshot": "2026-11-19T19:22:15.496235339Z",
+        "stack": "[org.apache.flink.a4s.core.MissRateCurve.leastMemoryBytesForMissRate(MissRateCurve.java:91), org.apache.flink.autoscaler.a4s.MemoryParallelismCurve.fromMissRateCurve(MemoryParallelismCurve.java:185), org.apache.flink.autoscaler.ScalingMetricEvaluator.evaluate(ScalingMetricEvaluator.java:98), org.apache.flink.autoscaler.RyanQ8Policy$PolicyTrace.evaluate(RyanQ8Policy.java:191), org.apache.flink.autoscaler.JobAutoScalerImpl.runScalingLogic(JobAutoScalerImpl.java:231), org.apache.flink.autoscaler.JobAutoScalerImpl.scale(JobAutoScalerImpl.java:103), org.apache.flink.autoscaler.RyanQ8Policy.main(RyanQ8Policy.java:93)]",
+        "type": "literal_main_empty_curve"
+      },
+      "input_at_cutoff": {
+        "finished_before_cutoff": false,
+        "next_sample_records": 2751932,
+        "next_sample_seconds": 360.60325479507446,
+        "records": 2751932,
+        "sample_seconds": 355.60316348075867
+      },
+      "input_end_offsets": {
+        "Auctions/0": 1551000,
+        "Auctions/1": 1551000,
+        "Persons/0": 414000,
+        "Persons/1": 414000
+      },
+      "input_plan": "95:1800:6200,26:8000:32000,100:200:700,5:3000:12000",
+      "issues": [],
+      "job_start_epochs_ms": [
+        1795115977156,
+        1795116282963
+      ],
+      "longest_backlog_sample_gap_seconds": 125.00316023826599,
+      "matched_start_profile": {
+        "join_managed_slot_bytes": 165675008,
+        "join_parallelism": 1,
+        "native_bytes_per_join": [
+          138691653
+        ],
+        "occupied_slots": 5,
+        "total_slots": 8,
+        "workers": 2
+      },
+      "path": "hardcoded",
+      "pre_release_zero_offsets_observed": true,
+      "provenance": {
+        "artifacts": {
+          "Query8.jar": "0df4ad393672463ee5a549f1dddcc5f6260174c852109d210d9c917a5744de39",
+          "abi3-mrc-telemetry.jar": "868d93fe641c58f3205e20d5f76e99e10950a426ab1891bcc300f2e2a6248d4c",
+          "rocksdbjni.jar": "b1368b4f01710658f059a24a12d83013fd4fadedb9bba7b3956f4afeca658c51",
+          "savepoint-profiles.jar": "5aba5b0877557ce377ded976429e041c79658f675ec1a71fb880227ad3da3da7"
+        },
+        "controller_classpath_sha256": "343bb500951841d73e4bc7feadc4a9322b14689501811cba2d93efcd8c5c2743",
+        "deployed_spec_sha256": "bcd6651eadd70b811d5fc7f6a94aa0b222d8183fcafc8997fe88e436a112f5f1",
+        "normalized_manifest_sha256": "3846be078d0c2eb59713f8d0105162b2c4c86c1179fbc643bd0f5b16534315d2",
+        "policy_sha256": "b3defac2e9129cd81c35746a36a27aaf3c565bbfc18564de67040f901973469f"
+      },
+      "qualified_online_at_triggers": 0,
+      "raw_main_empty_curve_evaluations": 1,
+      "release_ms": 1795116047170,
+      "revision": "f8ce7fbbfae48869d8b1869748ad517801a9f726",
+      "sampled_backlog_peak": 1700298,
+      "standard_triggers": 1,
+      "trigger_comparisons": [
+        {
+          "active_proposed": true,
+          "arm": "hardcoded",
+          "controller_revision": "f8ce7fbbfae48869d8b1869748ad517801a9f726",
+          "current_p": 1,
+          "epoch": 1795116210.86,
+          "fixed_baseline_s": 5e-06,
+          "fixed_slope_s": 0.004995,
+          "job_id": "d8b43ea61a7c4b29a5722d90532e73b5",
+          "job_start_epoch_ms": 1795115977156,
+          "mrc_points": 56937,
+          "snapshot": "2026-11-19T19:23:30.505750986Z",
+          "target_records_s": 15321.672,
+          "trigger_parallelism": {
+            "11ffd1a2f5905feab358b0af9a75fe4e": 2
+          },
+          "type": "decision"
+        }
+      ],
+      "unexpected_job_start_epochs_ms": [],
+      "unexpected_restores": [],
+      "wall_seconds_from_release": null
+    }
+  },
+  "branch_throughput_change_percent": null,
+  "different_verified_join_profile": true,
+  "execution_order": "parallel",
+  "issues": [],
+  "main_empty_curve_handling": "omit-empty",
+  "observation_seconds": 360,
+  "passed": true,
+  "sampled_branch_input_change_percent_at_cutoff": 10.932791943986997,
+  "wall_seconds_including_setup_and_cleanup": 758.0370664596558
+}

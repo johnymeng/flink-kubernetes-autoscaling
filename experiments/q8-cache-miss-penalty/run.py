@@ -101,59 +101,135 @@ def classpath_hashes(classpath):
     return result
 
 
-def verify_classpath(directory, classpath, policy):
+def verify_classpath(directory, classpath, policy, *, legacy=False):
     effective = classpath + os.pathsep + str(policy.resolve())
-    text = subprocess.check_output(["java", "-cp", effective, str(HERE / "ClasspathProof.java")], text=True)
+    command = ["java", "-cp", effective, str(HERE / "ClasspathProof.java")]
+    if legacy:
+        command.append("--legacy")
+    text = subprocess.check_output(command, text=True)
     origins = {}
     for row in text.splitlines():
         name, path = row.split("\t")
         origins[name] = {"path": path, "sha256": digest(Path(path))}
-    save(directory / "loaded-classes.json", {"ordered_argument": effective, "origins": origins})
+    receipt = {"ordered_argument": effective, "origins": origins}
+    save(directory / "loaded-classes.json", receipt)
+    return receipt
 
 
-def arm_run(args, owner, arm, hashes, cp_hash, template_hash, pair):
+def stop_observer(process):
+    if process is None or process.poll() is not None:
+        return
+    # Each observer runs in its own session, including any kubectl logs/grep children.
+    for sig, grace in ((signal.SIGTERM, 5), (signal.SIGKILL, 5)):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(grace)
+            return
+        except subprocess.TimeoutExpired:
+            if sig == signal.SIGKILL:
+                raise
+
+
+def wait_for_deletion(name):
+    for _ in range(120):
+        if (not kube("get", "flinkdeployment", name, "--ignore-not-found", "-o", "name").strip()
+                and not kube("get", "pods", "-l", "app=" + name, "-o", "name").strip()):
+            return
+        time.sleep(3)
+    raise RuntimeError(f"Timed out waiting for owned workload {name} to clear")
+
+
+def cleanup_steps(steps, prior_error):
+    errors = []
+    for description, action in steps:
+        try:
+            action()
+        except BaseException as error:
+            print(f"{description}: {error}", file=sys.stderr, flush=True)
+            errors.append(error)
+    if errors and prior_error is None:
+        raise errors[0]
+
+
+def arm_run(args, owner, arm, hashes, cp_hash, template_hash, pair, *, release_ms=None,
+            config=None, extra_observer=None, main_empty_curves=None, observation_seconds=0):
     directory = pair / arm
     directory.mkdir()
     job_id = uuid4().hex
     name = f"{owner}-{arm}"
-    release = int(time.time() * 1000) + args.release_lead_seconds * 1000
+    release = release_ms
+    if release is None:
+        release = int(time.time() * 1000) + args.release_lead_seconds * 1000
     mode = str(arm == "calibrated").lower()
     replacements = {"WORKER": args.worker, "OWNER": owner, "ARM": arm, "JOBID": job_id, "MODE": mode,
                     "PLAN": args.plan, "RELEASE": release, **{"HASH_" + k: v for k, v in hashes.items()}}
     manifest = render("deployment.json", replacements)
+    if config:
+        manifest["spec"]["flinkConfiguration"].update(config)
     save(directory / "manifest.json", manifest)
     save(directory / "plan.json", {"plan": args.plan, "release_ms": release, "arm": arm, "artifacts": hashes,
          "policy_sha256": digest(args.policy), "controller_classpath_sha256": cp_hash,
          "normalized_manifest_sha256": template_hash})
     resource = create(manifest)
-    save(directory / "deployment-created.json", resource)
     follower = None
+    sampler = None
     try:
+        save(directory / "deployment-created.json", resource)
+        if extra_observer is not None:
+            sampler = subprocess.Popen([sys.executable, str(extra_observer), str(directory)], start_new_session=True)
         follower = subprocess.Popen([sys.executable, str(HERE / "observe.py"), str(directory),
-                                    name, job_id, NS])
+                                    name, job_id, NS], start_new_session=True)
         command = [sys.executable, str(HERE / "actuate.py"), "--namespace", NS, "--deployment", name,
                    "--owner", owner, "--job-id", job_id, "--arm", arm, "--manifest", str(directory / "manifest.json"),
                    "--policy-jar", str(args.policy), "--classpath", args.classpath, "--out", str(directory),
                    "--kubeconfig", os.environ["KUBECONFIG"], "--duration", str(args.timeout)]
+        if observation_seconds > 0:
+            command.extend(["--observation-seconds", str(observation_seconds), "--release-ms", str(release)])
+        if main_empty_curves is not None:
+            command.extend(["--main-empty-curves", main_empty_curves])
         with (directory / "controller.log").open("w", buffering=1) as log:
             subprocess.run(command, stdout=log, stderr=log, check=True)
         follower.wait(25)
+        if sampler is not None and sampler.wait(15):
+            raise RuntimeError(f"Resource sampler failed for {name}")
     finally:
-        if follower is not None and follower.poll() is None:
-            follower.send_signal(signal.SIGINT)
-            follower.wait(25)
-        live = json.loads(kube("get", "flinkdeployment", name, "-o", "json"))
-        save(directory / "deployment-before-cleanup.json", live)
-        (directory / "events.json").write_text(kube("get", "events", "--field-selector", f"involvedObject.name={name}", "-o", "json"))
-        remove(resource)
-        for _ in range(120):
-            if (not kube("get", "flinkdeployment", name, "--ignore-not-found", "-o", "name").strip()
-                    and not kube("get", "pods", "-l", "app=" + name, "-o", "name").strip()):
-                break
-            time.sleep(3)
-        else:
-            raise RuntimeError(f"Timed out waiting for owned workload {name} to clear")
-    print(f"{datetime.now(timezone.utc).isoformat()} {name} finished", flush=True)
+        prior_error = sys.exc_info()[1]
+        def archive_resource():
+            live = json.loads(kube("get", "flinkdeployment", name, "-o", "json"))
+            save(directory / "deployment-before-cleanup.json", live)
+
+        def archive_events():
+            events = kube("get", "events", "--field-selector", f"involvedObject.name={name}", "-o", "json")
+            (directory / "events.json").write_text(events)
+
+        cleanup_steps([
+            ("Stop resource sampler", lambda: stop_observer(sampler)),
+            ("Stop source log observer", lambda: stop_observer(follower)),
+            ("Archive deployment", archive_resource),
+            ("Archive events", archive_events),
+            ("Delete owned deployment", lambda: remove(resource)),
+            ("Confirm deployment deletion", lambda: wait_for_deletion(name)),
+        ], prior_error)
+    outcome = "observation ended" if (directory / "window-ended.json").exists() else "finished"
+    print(f"{datetime.now(timezone.utc).isoformat()} {name} {outcome}", flush=True)
+
+
+def cleanup_infra(owner, created, pair):
+    def verify():
+        kinds = "pods,services,serviceaccounts,roles,rolebindings"
+        for _ in range(45):
+            if not kube("get", kinds, "-l", "ece496-benchmark-owner=" + owner, "-o", "name").strip():
+                records = [{"name": x["metadata"]["name"], "uid": x["metadata"]["uid"]} for x in created]
+                save(pair / "cleanup.json", records)
+                return
+            time.sleep(2)
+        raise RuntimeError(f"Owned infrastructure still present for {owner}")
+
+    steps = [(f"Delete owned {r['metadata']['name']}", lambda obj=r: remove(obj)) for r in reversed(created)]
+    cleanup_steps([*steps, ("Confirm infrastructure deletion", verify)], sys.exc_info()[1])
 
 
 def main():
@@ -188,16 +264,7 @@ def main():
             for letter in order:
                 arm_run(args, owner, {"A": "hardcoded", "B": "calibrated"}[letter], hashes, cp_hash, template_hash, pair)
         finally:
-            for resource in reversed(created):
-                remove(resource)
-            kinds = "pods,services,serviceaccounts,roles,rolebindings"
-            for _ in range(45):
-                if not kube("get", kinds, "-l", "ece496-benchmark-owner=" + owner, "-o", "name").strip():
-                    break
-                time.sleep(2)
-            else:
-                raise RuntimeError(f"Owned infrastructure still present for {owner}")
-            save(pair / "cleanup.json", [{"name": x["metadata"]["name"], "uid": x["metadata"]["uid"]} for x in created])
+            cleanup_infra(owner, created, pair)
 
 
 if __name__ == "__main__":
