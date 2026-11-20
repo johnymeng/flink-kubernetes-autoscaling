@@ -42,6 +42,8 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -58,8 +60,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class A4SCacheObservationHoldTest {
-    @Test
-    void invalidRequiredCacheMetricsHoldEvenWithPersistedOverrides() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void invalidRequiredCacheMetricsHoldEvenWithPersistedOverrides(boolean online) throws Exception {
         var context = TestingAutoscalerUtils.createDefaultJobAutoScalerContext();
         context.getConfiguration().set(AutoScalerOptions.AUTOSCALER_ENABLED, true);
         var stateStore = new InMemoryAutoScalerStateStore<JobID, JobAutoScalerContext<JobID>>();
@@ -81,7 +84,7 @@ class A4SCacheObservationHoldTest {
         context.getConfiguration().set(AutoScalerOptions.A4S_ENABLED, true);
         context.getConfiguration().set(AutoScalerOptions.JUSTIN_ENABLED, true);
         stateStore.storeParallelismOverrides(context, Map.of(vertex.toString(), "2"));
-        context.getConfiguration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        context.getConfiguration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, online);
         AtomicInteger preservationCalls = new AtomicInteger();
         AtomicInteger realizationCalls = new AtomicInteger();
         var recordingRealizer = new TestingScalingRealizer<JobID, JobAutoScalerContext<JobID>>() {
