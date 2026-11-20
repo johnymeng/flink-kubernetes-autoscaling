@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.rest.messages.job.metrics;
 
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 
@@ -44,20 +45,37 @@ public class A4SAggregatedMetricsResponseBody implements ResponseBody {
     @JsonProperty(FIELD_NAME_CACHE_COST_SAMPLES)
     private final List<A4SCacheCostSample> cacheCostSamples;
 
+    @Nullable
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty(CacheObservationBatch.FIELD_NAME)
+    private final CacheObservationBatch cacheObservations;
+
     public A4SAggregatedMetricsResponseBody(MissRateCurve scaledMrc) {
         this(scaledMrc, null);
+    }
+
+    public A4SAggregatedMetricsResponseBody(
+            MissRateCurve scaledMrc, @Nullable List<A4SCacheCostSample> cacheCostSamples) {
+        this(scaledMrc, cacheCostSamples, null);
     }
 
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
             @JsonProperty(FIELD_NAME_SCALED_MRC) MissRateCurve scaledMrc,
             @JsonProperty(FIELD_NAME_CACHE_COST_SAMPLES)
-                    @Nullable List<A4SCacheCostSample> cacheCostSamples) {
+                    @Nullable List<A4SCacheCostSample> cacheCostSamples,
+            @JsonProperty(CacheObservationBatch.FIELD_NAME)
+                    @Nullable CacheObservationBatch cacheObservations) {
+        this.cacheObservations = cacheObservations;
         this.scaledMrc = scaledMrc == null ? new MissRateCurve(Collections.emptyList()) : scaledMrc;
         this.cacheCostSamples = cacheCostSamples;
     }
 
     public MissRateCurve getScaledMrc() {
         return scaledMrc;
+    }
+    @Nullable
+    public CacheObservationBatch getCacheObservations() {
+        return cacheObservations;
     }
 }

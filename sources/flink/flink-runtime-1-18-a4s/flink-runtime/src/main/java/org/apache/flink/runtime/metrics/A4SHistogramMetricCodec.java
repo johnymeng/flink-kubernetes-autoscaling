@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
-/** Lossless wire format for numeric QuickMRC histogram JSON transported through writeUTF. */
+/** Bounded, lossless wire format for cache telemetry transported through writeUTF. */
 public final class A4SHistogramMetricCodec {
     private static final Logger LOG = LoggerFactory.getLogger(A4SHistogramMetricCodec.class);
     private static final String PREFIX = "a4s-gzip-v1:";
@@ -47,16 +47,19 @@ public final class A4SHistogramMetricCodec {
     private A4SHistogramMetricCodec() {}
 
     public static String encode(String histogramJson) {
-        // The histogram schema consists exclusively of ASCII keys, numbers and JSON punctuation.
-        if (histogramJson.length() <= MAX_UTF_BYTES) {
-            return histogramJson;
-        }
         if (histogramJson.length() > MAX_JSON_BYTES) {
             return omit(histogramJson.length(), MAX_JSON_BYTES, "expanded JSON");
         }
+        if (modifiedUtfBytes(histogramJson) <= MAX_UTF_BYTES) {
+            return histogramJson;
+        }
+        byte[] jsonBytes = histogramJson.getBytes(StandardCharsets.UTF_8);
+        if (jsonBytes.length > MAX_JSON_BYTES) {
+            return omit(jsonBytes.length, MAX_JSON_BYTES, "expanded JSON");
+        }
         ByteArrayOutputStream compressed = new ByteArrayOutputStream();
         try (GZIPOutputStream gzip = new GZIPOutputStream(compressed)) {
-            gzip.write(histogramJson.getBytes(StandardCharsets.UTF_8));
+            gzip.write(jsonBytes);
         } catch (IOException error) {
             throw new UncheckedIOException("Could not encode the QuickMRC histogram metric", error);
         }
@@ -85,15 +88,15 @@ public final class A4SHistogramMetricCodec {
     public static String decode(String metric) {
         if (!metric.startsWith(PREFIX)) {
             if (metric.length() > MAX_JSON_BYTES) {
-                throw new IllegalArgumentException("QuickMRC histogram exceeds expanded byte limit");
+                throw new SizeLimitException("QuickMRC histogram exceeds expanded byte limit");
             }
             return metric;
         }
-        if (metric.equals(OMITTED)) {
-            throw new IllegalArgumentException("QuickMRC histogram was omitted by its producer");
+        if (metric.length() > MAX_UTF_BYTES || modifiedUtfBytes(metric) > MAX_UTF_BYTES) {
+            throw new SizeLimitException("QuickMRC histogram exceeds encoded byte limit");
         }
-        if (metric.length() > MAX_UTF_BYTES) {
-            throw new IllegalArgumentException("QuickMRC histogram exceeds encoded byte limit");
+        if (isOmitted(metric)) {
+            throw new IllegalArgumentException("A4S metric was omitted by its producer");
         }
         byte[] compressed = Base64.getDecoder().decode(metric.substring(PREFIX.length()));
         try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(compressed))) {
@@ -101,7 +104,7 @@ public final class A4SHistogramMetricCodec {
             byte[] buffer = new byte[8 * 1024];
             for (int count; (count = gzip.read(buffer)) != -1; ) {
                 if (count > MAX_JSON_BYTES - expanded.size()) {
-                    throw new IllegalArgumentException(
+                    throw new SizeLimitException(
                             "QuickMRC histogram exceeds expanded byte limit");
                 }
                 expanded.write(buffer, 0, count);
@@ -113,5 +116,31 @@ public final class A4SHistogramMetricCodec {
         } catch (IOException error) {
             throw new IllegalArgumentException("Invalid encoded QuickMRC histogram metric", error);
         }
+    }
+    public static final class SizeLimitException extends IllegalArgumentException {
+        private static final long serialVersionUID = 1L;
+
+        private SizeLimitException(String message) {
+            super(message);
+        }
+    }
+
+    public static boolean isOmitted(String metric) {
+        return OMITTED.equals(metric);
+    }
+
+    public static int modifiedUtfBytes(String metric) {
+        int bytes = 0;
+        for (int index = 0; index < metric.length(); index++) {
+            char value = metric.charAt(index);
+            if (value >= 1 && value <= 0x7f) {
+                bytes++;
+            } else if (value <= 0x7ff) {
+                bytes += 2;
+            } else {
+                bytes += 3;
+            }
+        }
+        return bytes;
     }
 }

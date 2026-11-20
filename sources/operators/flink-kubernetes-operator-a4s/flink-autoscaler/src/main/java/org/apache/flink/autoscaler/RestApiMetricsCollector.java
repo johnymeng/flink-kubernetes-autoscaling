@@ -18,6 +18,8 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedVertexMetricsHeaders;
@@ -133,15 +135,27 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
     protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4SMetrics(
             Context ctx, Collection<JobVertexID> jobVertexIds) {
         return jobVertexIds.stream()
-                .map(vertex -> {
-                    var response = queryVertexA4SMetrics(ctx, ctx.getJobID(), vertex, true);
-                    if (response == null) {
-                        response = queryVertexA4SMetrics(ctx, ctx.getJobID(), vertex, false);
-                    }
-                    return response == null ? null : Map.entry(vertex, response);
-                })
-                .filter(entry -> entry != null)
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+                .collect(
+                        Collectors.toMap(
+                                vertex -> vertex,
+                                vertex -> {
+                                    var response = queryVertexA4SMetrics(ctx, ctx.getJobID(), vertex, true);
+                                    if (response == null) {
+                                        return new A4SAggregatedMetricsResponseBody(
+                                                null,
+                                                null,
+                                                CacheObservationBatch.invalid(
+                                                        CacheObservation.Status.REST_UNAVAILABLE));
+                                    }
+                                    if (response.getCacheObservations() == null) {
+                                        return new A4SAggregatedMetricsResponseBody(
+                                                null,
+                                                response.getCacheCostSamples(),
+                                                CacheObservationBatch.invalid(
+                                                        CacheObservation.Status.UNSUPPORTED_VERSION));
+                                    }
+                                    return response;
+                                }));
     }
 
     protected MissRateCurve queryVertexMissRateCurve(
@@ -161,6 +175,7 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
             var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
             filter.resolve(
                     List.of(
+                            CacheObservationBatch.FIELD_NAME,
                             A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COST_SAMPLES,
                             A4SAggregatedMetricsResponseBody.CACHE_COST_COMPACTION_SELECTOR));
         }

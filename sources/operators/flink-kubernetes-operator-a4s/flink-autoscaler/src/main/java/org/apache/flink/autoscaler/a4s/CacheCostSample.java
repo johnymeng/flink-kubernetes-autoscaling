@@ -45,4 +45,17 @@ public class CacheCostSample {
     private int timingAbi;
     private long compactionHits;
     private long compactionMisses;
+    private String process;
+    private Long observedAtNanos;
+
+    public CacheCostSample(
+            int subtask, String attempt, long cacheId, long capacityBytes, long cacheEpoch,
+            long lookups, long misses, long coveredHits, long coveredMisses, long sampledHits,
+            long sampledMisses, long hitNanos, long missNanos, long recordsIn, double busyMillis,
+            long observedAtMillis, int timingAbi, long compactionHits, long compactionMisses) {
+        this(subtask, attempt, cacheId, capacityBytes, cacheEpoch, lookups, misses,
+                coveredHits, coveredMisses, sampledHits, sampledMisses, hitNanos, missNanos,
+                recordsIn, busyMillis, observedAtMillis, timingAbi, compactionHits, compactionMisses,
+                null, null);
+    }
 }

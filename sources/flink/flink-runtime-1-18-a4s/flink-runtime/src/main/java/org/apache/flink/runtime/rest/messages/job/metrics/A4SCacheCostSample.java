@@ -61,6 +61,40 @@ public final class A4SCacheCostSample {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public final Long compactionMisses;
 
+    @Nullable
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public final String process;
+
+    @Nullable
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public final Long observedAtNanos;
+
+    public A4SCacheCostSample(
+            int subtask,
+            String attempt,
+            long cacheId,
+            long capacityBytes,
+            long cacheEpoch,
+            long lookups,
+            long misses,
+            long coveredHits,
+            long coveredMisses,
+            long sampledHits,
+            long sampledMisses,
+            long hitNanos,
+            long missNanos,
+            long recordsIn,
+            double busyMillis,
+            long observedAtMillis,
+            @Nullable Integer timingAbi,
+            @Nullable Long compactionHits,
+            @Nullable Long compactionMisses) {
+        this(subtask, attempt, cacheId, capacityBytes, cacheEpoch, lookups, misses,
+                coveredHits, coveredMisses, sampledHits, sampledMisses, hitNanos, missNanos,
+                recordsIn, busyMillis, observedAtMillis, timingAbi, compactionHits, compactionMisses,
+                null, null);
+    }
+
     @JsonCreator
     public A4SCacheCostSample(
             @JsonProperty("subtask") int subtask,
@@ -81,7 +115,9 @@ public final class A4SCacheCostSample {
             @JsonProperty("observedAtMillis") long observedAtMillis,
             @JsonProperty("timingAbi") @Nullable Integer timingAbi,
             @JsonProperty("compactionHits") @Nullable Long compactionHits,
-            @JsonProperty("compactionMisses") @Nullable Long compactionMisses) {
+            @JsonProperty("compactionMisses") @Nullable Long compactionMisses,
+            @JsonProperty("process") @Nullable String process,
+            @JsonProperty("observedAtNanos") @Nullable Long observedAtNanos) {
         this.subtask = subtask;
         this.attempt = attempt;
         this.cacheId = cacheId;
@@ -101,11 +137,14 @@ public final class A4SCacheCostSample {
         this.timingAbi = timingAbi;
         this.compactionHits = compactionHits;
         this.compactionMisses = compactionMisses;
+        this.process = process;
+        this.observedAtNanos = observedAtNanos;
     }
 
     public String toMetricString() {
         boolean includesClassification = compactionHits != null && compactionMisses != null;
-        String snapshot = (includesClassification ? "2:" : "1:")
+        boolean includesProcess = includesClassification && process != null && observedAtNanos != null;
+        String snapshot = (includesProcess ? "3:" : includesClassification ? "2:" : "1:")
                 + observedAtMillis
                 + ":" + attempt
                 + ":" + cacheId
@@ -121,17 +160,29 @@ public final class A4SCacheCostSample {
                 + ":" + missNanos
                 + ":" + recordsIn
                 + ":" + busyMillis;
-        return includesClassification
-                ? snapshot + ":" + compactionHits + ":" + compactionMisses
-                : snapshot;
+        if (includesClassification) {
+            snapshot += ":" + compactionHits + ":" + compactionMisses;
+        }
+        return includesProcess ? snapshot + ":" + process + ":" + observedAtNanos : snapshot;
     }
 
     @Nullable
     public static A4SCacheCostSample fromMetricString(
             int subtask, String raw, long currentTimeMillis, boolean includeClassification) {
+        return fromMetricString(subtask, raw, currentTimeMillis, includeClassification, false);
+    }
+
+    @Nullable
+    public static A4SCacheCostSample fromMetricString(
+            int subtask, String raw, long currentTimeMillis,
+            boolean includeClassification, boolean includeProcess) {
+        if (raw.length() > 4096) {
+            return null;
+        }
         String[] fields = raw.split(":", -1);
         boolean abi2 = fields.length == 16 && "1".equals(fields[0]);
-        boolean abi3 = fields.length == 18 && "2".equals(fields[0]);
+        boolean version3 = fields.length == 20 && "3".equals(fields[0]) && !fields[18].isEmpty();
+        boolean abi3 = version3 || (fields.length == 18 && "2".equals(fields[0]));
         if ((!abi2 && !abi3) || fields[2].isEmpty()) {
             return null;
         }
@@ -166,7 +217,9 @@ public final class A4SCacheCostSample {
                             observedAtMillis,
                             includeClassification ? (abi3 ? 3 : 2) : null,
                             includeClassification ? compactionHits : null,
-                            includeClassification ? compactionMisses : null);
+                            includeClassification ? compactionMisses : null,
+                            includeProcess && version3 ? fields[18] : null,
+                            includeProcess && version3 ? Long.parseLong(fields[19]) : null);
             return sample.isValid() ? sample : null;
         } catch (NumberFormatException malformedMetric) {
             return null;

@@ -416,6 +416,15 @@ public class AutoScalerOptions {
                                     + "When enabled, the autoscaler will use memory-parallelism curves "
                                     + "to find optimal (memory, parallelism) configurations for stateful operators.");
 
+    public static final ConfigOption<List<String>> A4S_CACHE_METRICS_EXEMPT_VERTICES =
+            autoScalerConfig("a4s.cache-metrics.exempt-vertices")
+                    .stringType()
+                    .asList()
+                    .defaultValues()
+                    .withDescription(
+                            "Verified stateless or non-RocksDB vertex IDs that do not require cache observations. "
+                                    + "An absent metric alone does not establish that a vertex is stateless.");
+
     public static final ConfigOption<Integer> A4S_MAX_ATTEMPTS =
             autoScalerConfig("a4s.max-attempts")
                     .intType()
