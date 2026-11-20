@@ -66,6 +66,27 @@ public final class QuickMrcCostProjection {
         }
     }
 
+    /** True only if demand exceeds even the optimistic limit at the measured topology. */
+    public static boolean cannotMeetDemandAtCurrentParallelism(
+            OnlineCacheCost.Fit fit, double demand) {
+        if (!Double.isFinite(demand) || demand <= 0) {
+            return false;
+        }
+        var subtasks = fit.getSubtasks();
+        double inputRate = subtasks.stream()
+                .mapToDouble(task -> task.getRecords() / (double) task.getElapsedNanos())
+                .sum();
+        for (var task : subtasks) {
+            double share = task.getRecords() / (double) task.getElapsedNanos() / inputRate;
+            // The miss fraction can drop by at most one, regardless of histogram support.
+            double workFloor = task.getBusySecondsPerRecord() - task.getMissPenaltySecondsPerRecord();
+            if (workFloor > 0 && demand * share * workFloor > 1) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private static Optional<Recommendation> recommendWithinSupport(
             OnlineCacheCost.Fit fit,
             CacheObservationBatch batch,

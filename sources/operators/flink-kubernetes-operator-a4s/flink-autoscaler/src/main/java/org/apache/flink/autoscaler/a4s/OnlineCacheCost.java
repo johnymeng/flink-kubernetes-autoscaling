@@ -61,7 +61,8 @@ public class OnlineCacheCost {
         RECORD_SKEW,
         MISSING_HOLDOUT,
         PHASE_DRIFT,
-        CAPACITY_UNSUPPORTED
+        CAPACITY_UNSUPPORTED,
+        INSUFFICIENT_CURRENT_PARALLELISM
     }
 
     @Value

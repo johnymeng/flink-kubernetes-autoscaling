@@ -22,6 +22,7 @@ import org.apache.flink.a4s.core.CacheObservation.Status;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.a4s.OnlineCacheCost.Reason;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.AutoScalerEventHandler;
 import org.apache.flink.autoscaler.exceptions.NotReadyException;
@@ -30,6 +31,7 @@ import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.util.Preconditions;
 
@@ -122,7 +124,9 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                     } else {
                         applyParallelismOverrides(ctx);
                     }
-                    applyConfigOverrides(ctx);
+                    if (!strictCacheObservations || !isActiveOnline(ctx.getConfiguration())) {
+                        applyConfigOverrides(ctx);
+                    }
                 }
             } catch (Exception e) {
                 LOG.error("Error applying overrides.", e);
@@ -259,33 +263,37 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             return false;
         }
 
+        boolean activeOnline = strictCacheObservations && isActiveOnline(ctx.getConfiguration());
+        var failures = evaluatedMetrics.getCacheCostFailures();
+        boolean scaleUpForInsufficientCapacity = activeOnline
+                && !failures.isEmpty()
+                && failures.values().stream().allMatch(
+                        reason -> reason == Reason.INSUFFICIENT_CURRENT_PARALLELISM);
         if (strictCacheObservations
                 && (!checkCacheObservations(ctx, collectedMetrics)
-                        || !evaluatedMetrics.getCacheCostFailures().isEmpty())) {
+                        || (!failures.isEmpty() && !scaleUpForInsufficientCapacity))) {
             resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
             return false;
         }
 
-        if (strictCacheObservations
-                && ctx.getConfiguration().get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)
-                && !ctx.getConfiguration().get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW)) {
-            // This executor only commits parallelism changes. The fitted curve is valid at the
-            // current parallelism and requires a separate cache-only allocation path.
+        if (activeOnline && !scaleUpForInsufficientCapacity) {
             LOG.info("A4S hold job={} reason=ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE", ctx.getJobID());
             resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
             return false;
         }
 
         var delayedScaleDown = stateStore.getDelayedScaleDown(ctx);
-        var parallelismChanged =
-                scalingExecutor.scaleResource(
-                        ctx,
-                        evaluatedMetrics,
-                        scalingHistory,
-                        scalingTracking,
-                        now,
-                        jobTopology,
-                        delayedScaleDown);
+        boolean parallelismChanged;
+        if (scaleUpForInsufficientCapacity) {
+            var history = collectedMetrics.getMetricHistory();
+            parallelismChanged = scalingExecutor.scaleUpWithCurrentProfiles(
+                    ctx, evaluatedMetrics, history.get(history.lastKey()).getCacheObservations(),
+                    scalingHistory, scalingTracking, now, jobTopology, delayedScaleDown);
+        } else {
+            parallelismChanged = scalingExecutor.scaleResource(
+                    ctx, evaluatedMetrics, scalingHistory, scalingTracking, now, jobTopology,
+                    delayedScaleDown);
+        }
 
         if (delayedScaleDown.isUpdated()) {
             stateStore.storeDelayedScaleDown(ctx, delayedScaleDown);
@@ -296,7 +304,12 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         } else {
             autoscalerMetrics.incrementBalanced();
         }
-        return true;
+        return !scaleUpForInsufficientCapacity || parallelismChanged;
+    }
+
+    private static boolean isActiveOnline(Configuration conf) {
+        return conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)
+                && !conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW);
     }
 
     @VisibleForTesting

@@ -113,6 +113,18 @@ public class ScalingMetricEvaluatorTest {
         assertEquals(8_192 / (1024.0 * 1024.0), projection.getMemoryMbForParallelism(1).orElseThrow());
         assertTrue(projection.getMemoryMbForParallelism(2).isEmpty());
 
+        // At 9,091/s the measured curve is too short, but the optimistic cache bound
+        // still admits the demand. At 10,000/s, even that bound is insufficient.
+        var unsupported = evaluator.evaluate(
+                new Configuration(config).set(TARGET_UTILIZATION, .11), history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED,
+                unsupported.getCacheCostFailures().get(vertex));
+        var overloaded = evaluator.evaluate(
+                new Configuration(config).set(TARGET_UTILIZATION, .10), history, Duration.ZERO);
+        assertEquals("INSUFFICIENT_CURRENT_PARALLELISM",
+                overloaded.getCacheCostFailures().get(vertex).name());
+        assertFalse(overloaded.getMemoryParallelismCurves().containsKey(vertex));
+
         snapshots.get(snapshots.lastKey()).getCacheCostSamples().get(vertex).get(0)
                 .setAttempt("restarted");
         var invalid = evaluator.evaluate(config, history, Duration.ZERO);
