@@ -59,10 +59,16 @@ public class MemoryParallelismCurve {
         /** Memory in MB. */
         @Getter
         private final double memoryMB;
+        private final boolean supportedCacheSize;
 
         public Point(int parallelism, double memoryMB) {
+            this(parallelism, memoryMB, true);
+        }
+
+        private Point(int parallelism, double memoryMB, boolean supportedCacheSize) {
             this.parallelism = parallelism;
             this.memoryMB = memoryMB;
+            this.supportedCacheSize = supportedCacheSize;
         }
 
         @Override
@@ -100,6 +106,32 @@ public class MemoryParallelismCurve {
             .findFirst();
     }
 
+    /**
+     * Convert a curve in whole-vertex native cache MiB to per-slot managed MiB.
+     * The merged MRC scales the capacity axis by the number of source partitions.
+     * At a candidate parallelism, A4S assumes an even split of that working set.
+     * Flink's RocksDBMemoryControllerUtils allocates (3 - writeBufferRatio) / 3
+     * of the RocksDB managed budget as native cache capacity.
+     */
+    MemoryParallelismCurve forManagedMemoryPerSlot(double writeBufferRatio) {
+        if (!(writeBufferRatio > 0 && writeBufferRatio < 1)) {
+            throw new IllegalArgumentException("Invalid RocksDB write-buffer ratio: " + writeBufferRatio);
+        }
+        Builder slots = builder().targetThroughput(targetThroughput);
+        for (Point point : points) {
+            double nativeMiBPerSlot = point.memoryMB / point.parallelism;
+            double managedMiBPerSlot = nativeMiBPerSlot * 3.0 / (3.0 - writeBufferRatio);
+            slots.addPoint(point.parallelism, managedMiBPerSlot, point.supportedCacheSize);
+        }
+        return slots.build();
+    }
+
+    /** A target below 100% that a point on the measured miss-rate curve can meet. */
+    public boolean hasSupportedCacheSize(int parallelism) {
+        return points.stream()
+                .anyMatch(point -> point.parallelism == parallelism && point.supportedCacheSize);
+    }
+
     @Override
     public String toString() {
         return String.format("MPC[target=%.2f, minParallelism=%d, maxParallelism=%d, points=%s]", targetThroughput, minParallelism, maxParallelism, points);
@@ -119,6 +151,11 @@ public class MemoryParallelismCurve {
 
         public Builder addPoint(int parallelism, double memoryMB) {
             points.add(new Point(parallelism, memoryMB));
+            return this;
+        }
+
+        private Builder addPoint(int parallelism, double memoryMB, boolean supportedCacheSize) {
+            points.add(new Point(parallelism, memoryMB, supportedCacheSize));
             return this;
         }
 
@@ -159,21 +196,81 @@ public class MemoryParallelismCurve {
             int minParallelism,
             int maxParallelism,
             MissRateCurve mrc) {
-        Builder builder = builder().targetThroughput(targetThroughputPerSec);
         double latencyDiff = missLatencySec - hitLatencySec;
 
         if (latencyDiff <= 0) {
             throw new IllegalArgumentException("missLatencySec (" + missLatencySec + ") should be greater than hitLatencySec (" + hitLatencySec + ")");
         }
 
+        return buildFromMissRateCurve(
+                targetThroughputPerSec,
+                hitLatencySec,
+                latencyDiff,
+                minParallelism,
+                maxParallelism,
+                mrc,
+                false);
+    }
+
+    /** Invert the measured per-record cost, omitting parallelisms below the zero-miss budget. */
+    public static MemoryParallelismCurve fromCalibratedMissRateCurve(
+            double targetThroughputPerSec,
+            double zeroMissSecPerRecord,
+            double missPenaltySecPerRecord,
+            int minParallelism,
+            int maxParallelism,
+            MissRateCurve mrc) {
+        if (!Double.isFinite(zeroMissSecPerRecord)
+                || zeroMissSecPerRecord <= 0
+                || !Double.isFinite(missPenaltySecPerRecord)
+                || missPenaltySecPerRecord <= 0) {
+            throw new IllegalArgumentException("Calibrated cache costs must be positive and finite");
+        }
+        if (!Double.isFinite(targetThroughputPerSec)
+                || targetThroughputPerSec < 0
+                || mrc.getPoints().isEmpty()) {
+            return builder().targetThroughput(targetThroughputPerSec).build();
+        }
+        return buildFromMissRateCurve(
+                targetThroughputPerSec,
+                zeroMissSecPerRecord,
+                missPenaltySecPerRecord,
+                minParallelism,
+                maxParallelism,
+                mrc,
+                true);
+    }
+
+    private static MemoryParallelismCurve buildFromMissRateCurve(
+            double targetThroughputPerSec,
+            double zeroMissSecPerRecord,
+            double missPenaltySecPerRecord,
+            int minParallelism,
+            int maxParallelism,
+            MissRateCurve mrc,
+            boolean calibrated) {
+        Builder builder = builder().targetThroughput(targetThroughputPerSec);
+        double minimumMissRate =
+                mrc.getPoints().stream()
+                        .mapToDouble(MissRateCurve.Point::getMissRate)
+                        .min()
+                        .orElse(Double.POSITIVE_INFINITY);
         for (int parallelism = minParallelism; parallelism <= maxParallelism; parallelism++) {
             // This is the maximum acceptable miss rate. We need a cache size
             // that achieves this miss rate or lower
-            double maximumMissRate = ((parallelism / targetThroughputPerSec) - hitLatencySec) / latencyDiff;
+            double maximumMissRate =
+                    ((parallelism / targetThroughputPerSec) - zeroMissSecPerRecord)
+                            / missPenaltySecPerRecord;
 
-            // It's impossible to achieve the desired throughput with the given parallelism and hit latency
-            if (maximumMissRate <= 0) {
-                throw new IllegalStateException(String.format("Maximum miss-rate <= 0. parallelism=%d targetThroughput=%f hitLatencySec=%f missLatencySec=%f", parallelism, targetThroughputPerSec, hitLatencySec, missLatencySec));
+            if (calibrated && maximumMissRate < 0) {
+                continue;
+            }
+            if (!calibrated && maximumMissRate <= 0) {
+                throw new IllegalStateException(
+                        String.format(
+                                "Maximum miss-rate <= 0. parallelism=%d targetThroughput=%f hitLatencySec=%f missLatencySec=%f",
+                                parallelism, targetThroughputPerSec, zeroMissSecPerRecord,
+                                zeroMissSecPerRecord + missPenaltySecPerRecord));
             }
 
             // Perhaps any level miss rate is acceptable, so we clamp to 1.0
@@ -183,7 +280,9 @@ public class MemoryParallelismCurve {
             }
 
             double memoryMB = mrc.leastMemoryBytesForMissRate(maximumMissRate) / (1024.0 * 1024.0);
-            builder.addPoint(parallelism, memoryMB);
+            // A plateau fallback or an unconstrained budget supplies no evidence for downsizing.
+            builder.addPoint(
+                    parallelism, memoryMB, maximumMissRate < 1 && maximumMissRate >= minimumMissRate);
         }
         return builder.build();
     }

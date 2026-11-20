@@ -215,4 +215,60 @@ public class MemoryParallelismCurveTest {
                 .anyMatch(p -> p.getParallelism() == 2 && p.getMemoryMB() == 100.0);
         assertThat(hasParallelism2).isTrue();
     }
+
+    @Test
+    void testRyanQ8FirstPlacementFlagsBothFourKiBChoicesAsUnsupported() {
+        // At the original Q8 decision, the leading bins were flat and even the
+        // largest observed cache missed far more often than the fixed costs allowed.
+        MissRateCurve mrc =
+                new MissRateCurve(
+                        List.of(
+                                new MissRateCurve.Point(4_096L, 1.0),
+                                new MissRateCurve.Point(8_192L, 1.0),
+                                new MissRateCurve.Point(171_175_936L, 0.5766)));
+
+        MemoryParallelismCurve fixed =
+                MemoryParallelismCurve.fromMissRateCurve(25_582.33, 5e-3, 5e-6, 3, 3, mrc);
+        MemoryParallelismCurve online =
+                MemoryParallelismCurve.fromCalibratedMissRateCurve(
+                        25_420.42, 36.10573687775547e-6, 10.517286531559289e-6, 3, 3, mrc);
+
+        assertThat(fixed.getMemoryMbForParallelism(3)).contains(0.00390625);
+        assertThat(online.getMemoryMbForParallelism(3)).contains(0.00390625);
+        assertThat(fixed.hasSupportedCacheSize(3)).isFalse();
+        assertThat(online.hasSupportedCacheSize(3)).isFalse();
+    }
+
+    @Test
+    void testMeasuredCachePointSupportsAnInRangeMissBudget() {
+        MissRateCurve mrc =
+                new MissRateCurve(
+                        List.of(
+                                new MissRateCurve.Point(4_096L, 1.0),
+                                new MissRateCurve.Point(64L << 20, 0.25)));
+
+        MemoryParallelismCurve fixed =
+                MemoryParallelismCurve.fromMissRateCurve(4, 0.3125, 0.0625, 1, 2, mrc);
+
+        assertThat(fixed.getMemoryMbForParallelism(1)).contains(64.0);
+        assertThat(fixed.hasSupportedCacheSize(1)).isTrue();
+        assertThat(fixed.hasSupportedCacheSize(3)).isFalse();
+    }
+
+    @Test
+    void testCacheSupportIncludesZeroMissesAndExcludesSaturatedBudgets() {
+        MissRateCurve mrc =
+                new MissRateCurve(
+                        List.of(
+                                new MissRateCurve.Point(4_096L, 1.0),
+                                new MissRateCurve.Point(64L << 20, 0.0)));
+
+        MemoryParallelismCurve online =
+                MemoryParallelismCurve.fromCalibratedMissRateCurve(4, 0.25, 0.25, 1, 3, mrc);
+
+        assertThat(online.getMemoryMbForParallelism(1)).contains(64.0);
+        assertThat(online.hasSupportedCacheSize(1)).isTrue();
+        assertThat(online.hasSupportedCacheSize(2)).isFalse();
+        assertThat(online.hasSupportedCacheSize(3)).isFalse();
+    }
 }

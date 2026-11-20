@@ -51,6 +51,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Map;
 
 import static org.apache.flink.util.Preconditions.checkNotNull;
 
@@ -87,6 +88,8 @@ public final class RocksDBResourceContainer implements AutoCloseable {
      * want exceptions to be reported.
      */
     @Nullable private final OpaqueMemoryResource<RocksDBSharedResources> sharedResources;
+    @Nullable private final A4SCacheTelemetry cacheTelemetry;
+    private final long cacheOwner;
 
     private final boolean enableStatistics;
 
@@ -134,6 +137,13 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
         this.enableStatistics = enableStatistics;
         this.handlesToClose = new ArrayList<>();
+        this.cacheTelemetry = A4SCacheTelemetry.find(getBlockCache());
+        this.cacheOwner = cacheTelemetry == null ? 0 : cacheTelemetry.attach();
+    }
+
+    static boolean hasExclusiveCacheOwner(Cache cache) {
+        A4SCacheTelemetry telemetry = A4SCacheTelemetry.find(cache);
+        return telemetry != null && telemetry.hasExclusiveOwner();
     }
 
     /** Gets the RocksDB {@link DBOptions} to be used for RocksDB instances. */
@@ -284,6 +294,9 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
+        if (cacheTelemetry != null) {
+            cacheTelemetry.detach(cacheOwner);
+        }
         handlesToClose.forEach(IOUtils::closeQuietly);
         handlesToClose.clear();
 

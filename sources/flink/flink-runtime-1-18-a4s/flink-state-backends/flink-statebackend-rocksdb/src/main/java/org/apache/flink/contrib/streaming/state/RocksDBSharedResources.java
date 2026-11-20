@@ -67,7 +67,11 @@ final class RocksDBSharedResources implements AutoCloseable {
     @Override
     public void close() {
         LOG.debug("Closing RocksDBSharedResources");
-        writeBufferManager.close();
-        cache.close();
+        A4SCacheTelemetry.release(cache);
+        try {
+            writeBufferManager.close();
+        } finally {
+            cache.close();
+        }
     }
 }

@@ -1,0 +1,95 @@
+{
+  "expectedAttempts": {
+    "0": "a",
+    "1": "b"
+  },
+  "nowMillis": 500000,
+  "status": "VALID",
+  "observations": [
+    {
+      "version": 1,
+      "job": "job",
+      "vertex": "vertex",
+      "subtask": 0,
+      "attempt": "a",
+      "status": "VALID",
+      "window": {
+        "process": "process",
+        "cacheId": 1,
+        "epoch": 0,
+        "sequence": 2,
+        "owners": [
+          1
+        ],
+        "population": "quickmrc-resident-lookup-v1",
+        "chargePolicy": "fixed-4096-byte-item",
+        "cachePolicy": "single-shard-rocksdb-lru",
+        "samplingRate": 0.1,
+        "capacityBytes": 8192,
+        "startNanos": 100,
+        "endNanos": 10000000100,
+        "observedAtMillis": 500000,
+        "references": 100,
+        "misses": 25
+      },
+      "histogram": {
+        "bucketCounts": [
+          1,
+          1,
+          2
+        ],
+        "completeMisses": 0,
+        "numPartitions": 1,
+        "bucketSizeScaling": 1,
+        "cacheItemSizeBytes": 4096
+      }
+    },
+    {
+      "version": 1,
+      "job": "job",
+      "vertex": "vertex",
+      "subtask": 1,
+      "attempt": "b",
+      "status": "VALID",
+      "window": {
+        "process": "process",
+        "cacheId": 2,
+        "epoch": 0,
+        "sequence": 2,
+        "owners": [
+          1
+        ],
+        "population": "quickmrc-resident-lookup-v1",
+        "chargePolicy": "fixed-4096-byte-item",
+        "cachePolicy": "single-shard-rocksdb-lru",
+        "samplingRate": 0.1,
+        "capacityBytes": 8192,
+        "startNanos": 100,
+        "endNanos": 10000000100,
+        "observedAtMillis": 500000,
+        "references": 120,
+        "misses": 30
+      },
+      "histogram": {
+        "bucketCounts": [
+          3,
+          0
+        ],
+        "completeMisses": 1,
+        "numPartitions": 1,
+        "bucketSizeScaling": 1,
+        "cacheItemSizeBytes": 4096
+      }
+    }
+  ],
+  "curve": [
+    {
+      "cacheSizeBytes": 8192,
+      "missRate": 0.4772727272727273
+    },
+    {
+      "cacheSizeBytes": 16384,
+      "missRate": 0.36363636363636365
+    }
+  ]
+}

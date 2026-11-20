@@ -40,6 +40,8 @@ import java.util.stream.Collectors;
  */
 public class A4S {
 
+    public static final int MAX_MANAGED_MEMORY_MB = 600;
+
     private static final Logger LOG = LoggerFactory.getLogger(A4S.class);
 
     private final EvaluatedMetrics evaluatedMetrics;
@@ -81,7 +83,17 @@ public class A4S {
      * Make a scaling decision using the A4S algorithm.
      */
     public Map<JobVertexID, Decision> makeDecision(Configuration conf) {
-        Map<JobVertexID, MemoryParallelismCurve> mpcs = this.evaluatedMetrics.getMemoryParallelismCurves();
+        if (!conf.getBoolean("state.backend.rocksdb.memory.managed", true)
+                || conf.getString("state.backend.rocksdb.memory.fixed-per-slot", null) != null) {
+            // Changing a slot reservation cannot resize an independently sized native cache.
+            // The executor retains the live reservation when a cache has no placement decision.
+            LOG.info("A4S: Retaining cache budgets because RocksDB cache size is independent of managed slot memory");
+            return Map.of();
+        }
+        double writeBufferRatio = conf.getDouble("state.backend.rocksdb.memory.write-buffer-ratio", 0.5);
+        Map<JobVertexID, MemoryParallelismCurve> mpcs = new HashMap<>();
+        evaluatedMetrics.getMemoryParallelismCurves().forEach((vertex, curve) ->
+                mpcs.put(vertex, curve.forManagedMemoryPerSlot(writeBufferRatio)));
         Map<JobVertexID, Integer> parallelismForVertex = operators.
             stream().collect(Collectors.toMap(
                 operator -> operator,
@@ -95,9 +107,15 @@ public class A4S {
                             getCurrent();
                     })
         ));
-        
-        
-        double maxManagedMemoryMB = 600 - conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
+
+        // Calibrated curves may start above the requested parallelism when the all-hit
+        // processing time alone exceeds the budget. Placement and retries start at the same point.
+        mpcs.forEach(
+                (vertex, curve) ->
+                        parallelismForVertex.computeIfPresent(
+                                vertex, (id, requested) -> Math.max(requested, curve.getMinParallelism())));
+
+        double maxManagedMemoryMB = MAX_MANAGED_MEMORY_MB - conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
         int maxAttempts = conf.get(AutoScalerOptions.A4S_MAX_ATTEMPTS);
 
         for (int attempt = 0; attempt < maxAttempts; attempt++) {

@@ -17,7 +17,11 @@
 
 package org.apache.flink.autoscaler;
 
+import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.autoscaler.a4s.A4S;
+import org.apache.flink.autoscaler.a4s.OnlineCacheCost;
+import org.apache.flink.autoscaler.a4s.QuickMrcOnlineCacheCostTest;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
@@ -35,6 +39,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -46,12 +51,163 @@ import static org.apache.flink.autoscaler.config.AutoScalerOptions.TARGET_UTILIZ
 import static org.apache.flink.autoscaler.topology.ShipStrategy.REBALANCE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Scaling evaluator test. */
 public class ScalingMetricEvaluatorTest {
 
     private ScalingMetricEvaluator evaluator = new ScalingMetricEvaluator();
+
+    @Test
+    void usesCalibratedCostsForTheConfiguredVertex() {
+        var vertex = new JobVertexID();
+        var history = cacheCostHistory(vertex);
+        var baseline = evaluator.evaluate(new Configuration(), history, Duration.ZERO);
+        var config =
+                Configuration.fromMap(
+                        Map.of(
+                                "job.autoscaler.a4s.calibrated-cache-costs",
+                                vertex.toHexString() + ":0.0015/0.001"));
+        var calibrated = evaluator.evaluate(config, history, Duration.ZERO);
+
+        var legacyCurve = baseline.getMemoryParallelismCurves().get(vertex);
+        var calibratedCurve = calibrated.getMemoryParallelismCurves().get(vertex);
+        assertEquals(200.0, legacyCurve.getMemoryMbForParallelism(2).orElseThrow());
+        assertTrue(calibratedCurve.getMemoryMbForParallelism(1).isEmpty());
+        assertEquals(100.0, calibratedCurve.getMemoryMbForParallelism(2).orElseThrow());
+        assertEquals(baseline.getVertexMetrics(), calibrated.getVertexMetrics());
+
+        // The first feasible parallelism needs 100 MiB. With 50 MiB available, retry
+        // starts there and finds parallelism 3, instead of looking up the omitted point at 1.
+        config.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 550.0);
+        var decision = new A4S(history.getJobTopology(), calibrated, Map.of()).makeDecision(config);
+        assertEquals(3, decision.get(vertex).getParallelism());
+    }
+
+    @Test
+    void usesAQualifiedQuickMrcFitOnlyAtTheMeasuredParallelism() {
+        var vertex = new JobVertexID();
+        var history = cacheCostHistory(vertex);
+        var snapshots = history.getMetricHistory();
+        var curve = snapshots.get(snapshots.lastKey()).getMissRateCurves().get(vertex);
+        snapshots.clear();
+        for (int i = 0; i < 3; i++) {
+            var metrics = new CollectedMetrics(
+                    Map.of(vertex, Map.of(
+                            ScalingMetric.NUM_RECORDS_IN, 60_000.0 * i,
+                            ScalingMetric.NUM_RECORDS_OUT, 60_000.0 * i,
+                            ScalingMetric.LAG, 0.0,
+                            ScalingMetric.LOAD, 0.8)),
+                    Map.of(), Map.of(vertex, curve));
+            metrics.setCacheObservations(Map.of(vertex, QuickMrcOnlineCacheCostTest.batch(i, 0)));
+            metrics.setCacheCostSamples(Map.of(
+                    vertex, List.of(QuickMrcOnlineCacheCostTest.sample(i, 0, 0, 0))));
+            snapshots.put(Instant.ofEpochSecond(60L * i), metrics);
+        }
+
+        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var online = evaluator.evaluate(config, history, Duration.ZERO);
+        assertTrue(online.getCacheCostFailures().isEmpty());
+        var projection = online.getMemoryParallelismCurves().get(vertex);
+        assertEquals(8_192 / (1024.0 * 1024.0), projection.getMemoryMbForParallelism(1).orElseThrow());
+        assertTrue(projection.getMemoryMbForParallelism(2).isEmpty());
+
+        // At 9,091/s the measured curve is too short, but the optimistic cache bound
+        // still admits the demand. At 10,000/s, even that bound is insufficient.
+        var unsupported = evaluator.evaluate(
+                new Configuration(config).set(TARGET_UTILIZATION, .11), history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED,
+                unsupported.getCacheCostFailures().get(vertex));
+        var overloaded = evaluator.evaluate(
+                new Configuration(config).set(TARGET_UTILIZATION, .10), history, Duration.ZERO);
+        assertEquals("INSUFFICIENT_CURRENT_PARALLELISM",
+                overloaded.getCacheCostFailures().get(vertex).name());
+        assertFalse(overloaded.getMemoryParallelismCurves().containsKey(vertex));
+
+        snapshots.get(snapshots.lastKey()).getCacheCostSamples().get(vertex).get(0)
+                .setAttempt("restarted");
+        var invalid = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.UNBOUND_TIMING, invalid.getCacheCostFailures().get(vertex));
+        assertFalse(invalid.getMemoryParallelismCurves().containsKey(vertex));
+
+        var shadow = evaluator.evaluate(
+                new Configuration(config).set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW, true),
+                history, Duration.ZERO);
+        assertTrue(shadow.getCacheCostFailures().isEmpty());
+        assertTrue(shadow.getMemoryParallelismCurves().get(vertex).getMemoryMbForParallelism(24).isPresent());
+    }
+
+    @Test
+    void leavesVerticesWithoutUsableMissRateCurvesOutOfCachePlacement() {
+        var vertex = new JobVertexID();
+        var history = cacheCostHistory(vertex);
+        var snapshots = history.getMetricHistory();
+        snapshots.get(snapshots.lastKey())
+                .setMissRateCurves(Map.of(vertex, new MissRateCurve(List.of())));
+        var evaluated = evaluator.evaluate(new Configuration(), history, Duration.ZERO);
+        assertTrue(evaluated.getMemoryParallelismCurves().isEmpty());
+        assertTrue(evaluated.getVertexMetrics().containsKey(vertex));
+    }
+
+    @Test
+    void abortsEvaluationWhenEveryCalibratedParallelismIsInfeasible() {
+        var vertex = new JobVertexID();
+        var config =
+                Configuration.fromMap(
+                        Map.of(
+                                "job.autoscaler.a4s.calibrated-cache-costs",
+                                vertex.toHexString() + ":1.0/0.001",
+                                AutoScalerOptions.VERTEX_MAX_PARALLELISM.key(),
+                                "2"));
+
+        var history = cacheCostHistory(vertex);
+        assertThrows(
+                IllegalStateException.class,
+                () -> evaluator.evaluate(config, history, Duration.ZERO));
+    }
+
+    @Test
+    void rejectsInvalidCalibratedCosts() {
+        var vertex = new JobVertexID();
+        var history = cacheCostHistory(vertex);
+        for (String invalid : List.of("0.0001/0", "NaN/0.001", "0.0001/Infinity", "0.0001")) {
+            var config =
+                    Configuration.fromMap(
+                            Map.of(
+                                    "job.autoscaler.a4s.calibrated-cache-costs",
+                                    vertex.toHexString() + ":" + invalid));
+            assertThrows(
+                    IllegalArgumentException.class,
+                    () -> evaluator.evaluate(config, history, Duration.ZERO));
+        }
+    }
+
+    private static CollectedMetricHistory cacheCostHistory(JobVertexID vertex) {
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 24, null));
+        var mrc =
+                new MissRateCurve(
+                        List.of(
+                                new MissRateCurve.Point(50L << 20, 1.0),
+                                new MissRateCurve.Point(100L << 20, 0.5),
+                                new MissRateCurve.Point(200L << 20, 0.0)));
+        var metrics = new TreeMap<Instant, CollectedMetrics>();
+        for (int second = 0; second <= 1; second++) {
+            metrics.put(
+                    Instant.ofEpochSecond(second),
+                    new CollectedMetrics(
+                            Map.of(
+                                    vertex,
+                                    Map.of(
+                                            ScalingMetric.NUM_RECORDS_IN, 1000.0 * second,
+                                            ScalingMetric.NUM_RECORDS_OUT, 1000.0 * second,
+                                            ScalingMetric.LAG, 0.0,
+                                            ScalingMetric.LOAD, 0.8)),
+                            Map.of(),
+                            Map.of(vertex, mrc)));
+        }
+        return new CollectedMetricHistory(topology, metrics, Instant.ofEpochSecond(1));
+    }
 
     @Test
     public void testLagBasedSourceScaling() {

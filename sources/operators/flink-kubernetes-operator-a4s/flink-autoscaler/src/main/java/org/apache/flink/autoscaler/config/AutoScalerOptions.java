@@ -25,6 +25,7 @@ import org.apache.flink.configuration.MemorySize;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 
 /** Config options related to the autoscaler module. */
 public class AutoScalerOptions {
@@ -415,6 +416,15 @@ public class AutoScalerOptions {
                                     + "When enabled, the autoscaler will use memory-parallelism curves "
                                     + "to find optimal (memory, parallelism) configurations for stateful operators.");
 
+    public static final ConfigOption<List<String>> A4S_CACHE_METRICS_EXEMPT_VERTICES =
+            autoScalerConfig("a4s.cache-metrics.exempt-vertices")
+                    .stringType()
+                    .asList()
+                    .defaultValues()
+                    .withDescription(
+                            "Verified stateless or non-RocksDB vertex IDs that do not require cache observations. "
+                                    + "An absent metric alone does not establish that a vertex is stateless.");
+
     public static final ConfigOption<Integer> A4S_MAX_ATTEMPTS =
             autoScalerConfig("a4s.max-attempts")
                     .intType()
@@ -435,6 +445,44 @@ public class AutoScalerOptions {
                     .defaultValue(5e-6 * 1000)
                     .withDescription(
                             "Latency (in sec) for a cache miss operation.");
+
+    public static final ConfigOption<Boolean> A4S_ONLINE_CACHE_COSTS_ENABLED =
+            autoScalerConfig("a4s.online-cache-costs.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.online-cache-costs.enabled"))
+                    .withDescription(
+                            "Learn the incremental per-record cache miss cost from recent "
+                                    + "RocksDB lookup timings. Hold A4S when a required QuickMRC fit "
+                                    + "is unavailable or outside its support. Learned projections are "
+                                    + "limited to the current parallelism.");
+
+    public static final ConfigOption<Boolean> A4S_ONLINE_CACHE_COSTS_SHADOW =
+            autoScalerConfig("a4s.online-cache-costs.shadow")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Report the online QuickMRC fit without using it for decisions. "
+                                    + "The explicitly configured fixed or calibrated policy remains active.");
+
+    public static final ConfigOption<Boolean> A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE =
+            autoScalerConfig("a4s.online-cache-costs.use-fixed-baseline")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.online-cache-costs.use-fixed-baseline"))
+                    .withDescription(
+                            "In shadow mode, compare the learned miss increment using the configured "
+                                    + "hit latency as the zero-miss cost.");
+
+    public static final ConfigOption<Map<String, String>> A4S_CALIBRATED_CACHE_COSTS =
+            autoScalerConfig("a4s.calibrated-cache-costs")
+                    .mapType()
+                    .defaultValue(Map.of())
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.calibrated-cache-costs"))
+                    .withDescription(
+                            "Measured cache costs keyed by hexadecimal job vertex ID. Each value "
+                                    + "is zeroMissCost/missPenalty in seconds per input record. "
+                                    + "Vertices without an entry use the configured legacy latencies.");
 
     public static final ConfigOption<Boolean> A4S_MANAGED_MEMORY_OVERRIDE_ENABLED =
             autoScalerConfig("a4s.managed-memory-override.enabled")

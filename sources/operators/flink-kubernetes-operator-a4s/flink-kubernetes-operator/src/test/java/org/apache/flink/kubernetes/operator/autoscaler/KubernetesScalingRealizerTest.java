@@ -23,6 +23,7 @@ import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
 
 import org.junit.jupiter.api.Test;
 
@@ -85,6 +86,36 @@ public class KubernetesScalingRealizerTest {
                                 .getResource()
                                 .getMemory())
                 .isEqualTo(String.valueOf(memoryOverride.getBytes()));
+    }
+
+    @Test
+    public void testHoldKeepsBothAppliedOverridesDuringWarmup() {
+        var context = TestingKubernetesAutoscalerUtils.createContext("test", null);
+        var resource = (FlinkDeployment) context.getResource();
+        var config = resource.getSpec().getFlinkConfiguration();
+        String parallelismKey = PipelineOptions.PARALLELISM_OVERRIDES.key();
+        String profilesKey = KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES.key();
+        config.put(parallelismKey, "source:2,join:4");
+        config.put(profilesKey, "'join:ResourceProfile{cpuCores=1, managedMemory=192.000mb}'");
+        var applied = Map.copyOf(config);
+        resource.getStatus().getReconciliationStatus()
+                .serializeAndSetLastReconciledSpec(resource.getSpec(), resource);
+
+        resource.getStatus().getReconciliationStatus().setState(ReconciliationState.DEPLOYED);
+        config.remove(parallelismKey);
+        config.put(profilesKey, "join:startup-profile");
+        config.put("execution.checkpointing.interval", "30 s");
+        new KubernetesScalingRealizer().preserveAppliedResourceOverrides(context);
+
+        assertThat(config.get(parallelismKey)).isEqualTo(applied.get(parallelismKey));
+        assertThat(config.get(profilesKey)).isEqualTo(applied.get(profilesKey));
+        assertThat(config.get("execution.checkpointing.interval")).isEqualTo("30 s");
+
+        resource.getSpec().setFlinkConfiguration(null);
+        new KubernetesScalingRealizer().preserveAppliedResourceOverrides(context);
+        assertThat(resource.getSpec().getFlinkConfiguration())
+                .containsEntry(parallelismKey, applied.get(parallelismKey))
+                .containsEntry(profilesKey, applied.get(profilesKey));
     }
 
     private void assertOverridesDoNotChange(
