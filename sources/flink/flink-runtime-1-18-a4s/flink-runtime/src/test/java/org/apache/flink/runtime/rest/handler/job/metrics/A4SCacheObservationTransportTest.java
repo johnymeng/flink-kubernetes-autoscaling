@@ -41,6 +41,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.metrics.A4SHistogramMetricCodec;
 import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization.MetricDumpDeserializer;
 import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization.MetricDumpSerializer;
+import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization.MetricSerializationResult;
 import org.apache.flink.runtime.metrics.dump.QueryScopeInfo;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricFetcher;
@@ -54,10 +55,15 @@ import org.apache.flink.runtime.rest.util.RestMapperUtils;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
-import java.util.List;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -74,7 +80,7 @@ class A4SCacheObservationTransportTest {
             new A4SAggregatingVertexMetricsHandler(
                     () -> CompletableFuture.completedFuture(null),
                     Time.seconds(1),
-                    Map.of(),
+                    Collections.emptyMap(),
                     Runnable::run,
                     new MetricFetcher() {
                         @Override
@@ -101,7 +107,7 @@ class A4SCacheObservationTransportTest {
         assertTrue(raw.length() > 65_535);
         String wire = A4SHistogramMetricCodec.encode(raw);
         addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, wire);
-        var response = response(Map.of(0, attempt(0, 0)));
+        A4SAggregatedMetricsResponseBody response = response(Collections.singletonMap(0, attempt(0, 0)));
         assertEquals(Status.VALID, response.getCacheObservations().status);
         assertEquals(wire.length(), response.getCacheObservations().wireBytes);
         assertEquals(bins.length, response.getScaledMrc().getPoints().size());
@@ -116,15 +122,15 @@ class A4SCacheObservationTransportTest {
         addGauge(1, 0, "rocksdb", CacheObservation.METRIC_NAME,
                 observation(1, 0, new long[] {1}, now).toMetricString());
 
-        var currentVertex = new ArchivedExecutionJobVertex(
+        ArchivedExecutionJobVertex currentVertex = new ArchivedExecutionJobVertex(
                 new ArchivedExecutionVertex[] {task(0, 0), task(1, 1)},
                 vertex, "vertex", 2, 2, ResourceProfile.UNKNOWN, new StringifiedAccumulatorResult[0]);
-        var currentGraph = new ArchivedExecutionGraph(
-                job, "job", Map.of(vertex, currentVertex), List.of(currentVertex),
+        ArchivedExecutionGraph currentGraph = new ArchivedExecutionGraph(
+                job, "job", Collections.singletonMap(vertex, currentVertex), Collections.singletonList(currentVertex),
                 new long[JobStatus.values().length], JobStatus.RUNNING, null, "{}",
-                new StringifiedAccumulatorResult[0], Map.of(), new ExecutionConfig().archive(),
+                new StringifiedAccumulatorResult[0], Collections.emptyMap(), new ExecutionConfig().archive(),
                 false, null, null, null, null, null, null);
-        var gateway = (RestfulGateway) Proxy.newProxyInstance(
+        RestfulGateway gateway = (RestfulGateway) Proxy.newProxyInstance(
                 getClass().getClassLoader(),
                 new Class<?>[] {RestfulGateway.class},
                 (proxy, method, args) -> {
@@ -133,12 +139,15 @@ class A4SCacheObservationTransportTest {
                     }
                     throw new UnsupportedOperationException(method.getName());
                 });
-        var request = HandlerRequest.resolveParametersAndCreate(
+        Map<String, String> path = new HashMap<>();
+        path.put(JobIDPathParameter.KEY, job.toString());
+        path.put(JobVertexIdPathParameter.KEY, vertex.toString());
+        HandlerRequest<EmptyRequestBody> request = HandlerRequest.resolveParametersAndCreate(
                 EmptyRequestBody.getInstance(),
                 handler.getMessageHeaders().getUnresolvedMessageParameters(),
-                Map.of(JobIDPathParameter.KEY, job.toString(), JobVertexIdPathParameter.KEY, vertex.toString()),
-                Map.of("get", List.of("cacheObservations")),
-                List.of());
+                path,
+                Collections.singletonMap("get", Collections.singletonList("cacheObservations")),
+                Collections.emptyList());
         assertEquals(Status.INCOMPLETE, handler.handleRequest(request, gateway).get().getCacheObservations().status);
         addGauge(1, 1, "rocksdb", CacheObservation.METRIC_NAME,
                 observation(1, 1, new long[] {1}, now).toMetricString());
@@ -146,7 +155,7 @@ class A4SCacheObservationTransportTest {
     }
 
     private ArchivedExecutionVertex task(int index, int number) {
-        var result = new ArchivedExecution(
+        ArchivedExecution result = new ArchivedExecution(
                 new StringifiedAccumulatorResult[0], null, attempt(index, number),
                 ExecutionState.RUNNING, null, null, null,
                 new long[ExecutionState.values().length], new long[ExecutionState.values().length]);
@@ -163,25 +172,27 @@ class A4SCacheObservationTransportTest {
                 0, 0, "rocksdb", A4SCacheCostSample.METRIC_NAME,
                 "3:" + now + ":" + attempt(0, 0)
                         + ":1:1048576:0:1000:300:700:300:8:4:1800:24000:400:82.0:23:179:process:9000");
-        assertEquals(Status.INCOMPLETE,
-                response(Map.of(0, attempt(0, 0), 1, attempt(1, 0))).getCacheObservations().status);
-        assertEquals(Status.ABSENT, response(Map.of(0, attempt(0, 1))).getCacheObservations().status);
+        Map<Integer, ExecutionAttemptID> expected = new HashMap<>();
+        expected.put(0, attempt(0, 0));
+        expected.put(1, attempt(1, 0));
+        assertEquals(Status.INCOMPLETE, response(expected).getCacheObservations().status);
+        assertEquals(Status.ABSENT, response(Collections.singletonMap(0, attempt(0, 1))).getCacheObservations().status);
         addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, "a4s-gzip-v1:AQID");
-        var malformed = response(Map.of(0, attempt(0, 0)));
+        A4SAggregatedMetricsResponseBody malformed = response(Collections.singletonMap(0, attempt(0, 0)));
         assertEquals(Status.MALFORMED, malformed.getCacheObservations().status);
         assertTrue(malformed.getScaledMrc().getPoints().isEmpty());
-        var json = RestMapperUtils.getStrictObjectMapper().valueToTree(malformed);
+        JsonNode json = RestMapperUtils.getStrictObjectMapper().valueToTree(malformed);
         assertEquals(1, json.get("cacheCostSamples").size());
-        var timing = json.get("cacheCostSamples").get(0);
+        JsonNode timing = json.get("cacheCostSamples").get(0);
         assertEquals("process", timing.get("process").asText());
         assertEquals(9000, timing.get("observedAtNanos").asLong());
         addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, "a4s-gzip-v1:omitted");
-        assertEquals(Status.OVERSIZE, response(Map.of(0, attempt(0, 0))).getCacheObservations().status);
+        assertEquals(Status.OVERSIZE, response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
         addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME,
                 observation(0, 0, new long[] {1}, now - 31_000).toMetricString());
-        assertEquals(Status.STALE, response(Map.of(0, attempt(0, 0))).getCacheObservations().status);
+        assertEquals(Status.STALE, response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
         addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, raw);
-        assertEquals(Status.VALID, response(Map.of(0, attempt(0, 0))).getCacheObservations().status);
+        assertEquals(Status.VALID, response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
     }
 
     @Test
@@ -189,31 +200,33 @@ class A4SCacheObservationTransportTest {
         String legacy = new StackDistanceHistogram(new long[] {1}, 1, 1, 1, 4096).toMetricString();
         addGauge(0, 0, "rocksdb", "stack-distance-histogram", legacy);
         assertEquals(Status.UNSUPPORTED_VERSION,
-                response(Map.of(0, attempt(0, 0))).getCacheObservations().status);
+                response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
         String unknown = observation(0, 0, new long[] {1}, System.currentTimeMillis())
                 .toMetricString().replace("\"version\":1", "\"version\":2");
         addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, unknown);
         assertEquals(Status.UNSUPPORTED_VERSION,
-                response(Map.of(0, attempt(0, 0))).getCacheObservations().status);
+                response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
     }
 
     @Test
     void missingAndDuplicateFieldsAreMalformed() throws Exception {
         String valid =
                 observation(0, 0, new long[] {1}, System.currentTimeMillis()).toMetricString();
-        for (String raw : List.of(
+        for (String raw : Arrays.asList(
                 valid.replace("\"subtask\":0,", ""),
                 valid.replace("\"misses\":100000", "\"misses\":null"),
                 valid.replace("\"epoch\":0", "\"epoch\":0,\"epoch\":0"))) {
             addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, raw);
             assertEquals(Status.MALFORMED,
-                    response(Map.of(0, attempt(0, 0))).getCacheObservations().status);
+                    response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
         }
     }
 
     @Test
     void countsModifiedUtfBytesAndRejectsTruncatedGzip() {
-        String raw = "é".repeat(33_000);
+        char[] characters = new char[33_000];
+        Arrays.fill(characters, 'é');
+        String raw = new String(characters);
         String encoded = A4SHistogramMetricCodec.encode(raw);
         assertTrue(encoded.startsWith("a4s-gzip-v1:"));
         assertEquals(raw, A4SHistogramMetricCodec.decode(encoded));
@@ -234,7 +247,7 @@ class A4SCacheObservationTransportTest {
                 attempt(subtask, number).toString(),
                 Status.VALID,
                 new CacheObservation.Window(
-                        "process", subtask + 1, 0, 2, List.of(1L), CacheObservation.QUICK_MRC,
+                        "process", subtask + 1, 0, 2, Collections.singletonList(1L), CacheObservation.QUICK_MRC,
                         CacheObservation.FIXED_4K, CacheObservation.CACHE_POLICY, .02, 1_048_576,
                         1_000, 10_000_001_000L, now, 1_000_000, 100_000),
                 new StackDistanceHistogram(bins, 100, 1, 1, 4096));
@@ -245,10 +258,10 @@ class A4SCacheObservationTransportTest {
         QueryScopeInfo scopeInfo = new QueryScopeInfo.OperatorQueryScopeInfo(
                 job.toString(), vertex.toString(), subtask, number, "operator", scope);
         Gauge<String> gauge = () -> value;
-        var serializer = new MetricDumpSerializer();
+        MetricDumpSerializer serializer = new MetricDumpSerializer();
         try {
-            var dump = serializer.serialize(
-                    Map.of(), Map.of(gauge, Tuple2.of(scopeInfo, name)), Map.of(), Map.of());
+            MetricSerializationResult dump = serializer.serialize(
+                    Collections.emptyMap(), Collections.singletonMap(gauge, Tuple2.of(scopeInfo, name)), Collections.emptyMap(), Collections.emptyMap());
             assertEquals(1, dump.numGauges);
             new MetricDumpDeserializer().deserialize(dump).forEach(store::add);
         } finally {
@@ -258,8 +271,8 @@ class A4SCacheObservationTransportTest {
 
     private A4SAggregatedMetricsResponseBody response(Map<Integer, ExecutionAttemptID> expected)
             throws Exception {
-        var mapper = RestMapperUtils.getStrictObjectMapper();
-        var response = handler.processVersionedRequest(job.toString(), vertex.toString(), expected, true);
+        ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
+        A4SAggregatedMetricsResponseBody response = handler.processVersionedRequest(job.toString(), vertex.toString(), expected, true);
         return mapper.readValue(mapper.writeValueAsBytes(response), A4SAggregatedMetricsResponseBody.class);
     }
 }

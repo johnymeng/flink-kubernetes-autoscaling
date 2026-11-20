@@ -28,6 +28,8 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMap
 
 import javax.annotation.Nullable;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -166,7 +168,9 @@ public final class CacheObservation {
             this.cacheId = cacheId;
             this.epoch = epoch;
             this.sequence = sequence;
-            this.owners = List.copyOf(owners);
+            List<Long> copy = new ArrayList<>(owners);
+            copy.forEach(Objects::requireNonNull);
+            this.owners = Collections.unmodifiableList(copy);
             this.population = Objects.requireNonNull(population);
             this.chargePolicy = Objects.requireNonNull(chargePolicy);
             this.cachePolicy = Objects.requireNonNull(cachePolicy);

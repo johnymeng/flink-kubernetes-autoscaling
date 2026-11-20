@@ -58,19 +58,19 @@ class A4SCacheSnapshotsTest {
 
     @Test
     void readersShareOnePublicationAndCannotRelabelPooledHistory() {
-        var cache = new A4SCacheSnapshots<Integer>(10);
+        A4SCacheSnapshots<Integer> cache = new A4SCacheSnapshots<>(10);
         long first = cache.attach();
         AtomicInteger reads = new AtomicInteger();
-        var exclusive = cache.poll(0, reads::incrementAndGet);
+        A4SCacheSnapshots.Publication<Integer> exclusive = cache.poll(0, reads::incrementAndGet);
         assertTrue(exclusive.exclusive);
         long second = cache.attach();
-        var pooled = cache.poll(1, reads::incrementAndGet);
+        A4SCacheSnapshots.Publication<Integer> pooled = cache.poll(1, reads::incrementAndGet);
         assertFalse(pooled.exclusive);
         assertEquals(2, pooled.owners.size());
         assertSame(pooled, cache.poll(2, reads::incrementAndGet));
         assertSame(pooled, cache.poll(9, reads::incrementAndGet));
         assertEquals(1, reads.get());
-        var secondInterval = cache.poll(10, reads::incrementAndGet);
+        A4SCacheSnapshots.Publication<Integer> secondInterval = cache.poll(10, reads::incrementAndGet);
         assertSame(secondInterval, cache.poll(11, reads::incrementAndGet));
         assertEquals(2, reads.get());
         cache.detach(second);
@@ -79,18 +79,18 @@ class A4SCacheSnapshotsTest {
         long replacement = cache.attach();
         assertFalse(cache.poll(20, reads::incrementAndGet).exclusive);
         assertTrue(replacement > second);
-        var recreated = new A4SCacheSnapshots<Integer>(10);
+        A4SCacheSnapshots<Integer> recreated = new A4SCacheSnapshots<>(10);
         recreated.attach();
         assertTrue(recreated.poll(20, reads::incrementAndGet).exclusive);
     }
     @Test
     void resizeAndCounterResetDoNotPublishAcrossGenerations() {
-        var nativeState = new AtomicReference<>(new long[] {1, 7, 8192, 1, 1, 100, 20});
-        var cache = new A4SCacheTelemetry(nativeState::get, () -> new long[] {9, 1}, .1, 1);
+        AtomicReference<long[]> nativeState = new AtomicReference<>(new long[] {1, 7, 8192, 1, 1, 100, 20});
+        A4SCacheTelemetry cache = new A4SCacheTelemetry(nativeState::get, () -> new long[] {9, 1}, .1, 1);
         cache.attach();
         assertEquals(Status.WARMUP, read(cache, 10).status);
         nativeState.set(new long[] {1, 7, 8192, 1, 1, 200, 40});
-        var valid = read(cache, 20);
+        CacheObservation valid = read(cache, 20);
         assertEquals(Status.VALID, valid.status);
         assertEquals(100, valid.window.references);
         nativeState.set(new long[] {1, 7, 16384, 2, 1, 300, 60});
@@ -98,7 +98,7 @@ class A4SCacheSnapshotsTest {
         nativeState.set(new long[] {1, 7, 16384, 2, 1, 10, 2});
         assertEquals(Status.COUNTER_RESET, read(cache, 40).status);
         nativeState.set(new long[] {1, 7, 16384, 2, 1, 100, 10});
-        var recovered = read(cache, 50);
+        CacheObservation recovered = read(cache, 50);
         assertEquals(Status.VALID, recovered.status);
         assertEquals(90, recovered.window.references);
         assertEquals(2, recovered.window.epoch);

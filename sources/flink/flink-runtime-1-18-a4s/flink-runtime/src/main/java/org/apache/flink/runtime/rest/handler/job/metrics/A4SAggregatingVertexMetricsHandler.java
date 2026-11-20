@@ -156,7 +156,7 @@ public class A4SAggregatingVertexMetricsHandler
     private static Map<Integer, ExecutionAttemptID> expectedExecutions(
             @Nullable AccessExecutionJobVertex vertex) {
         if (vertex == null) {
-            return Map.of();
+            return Collections.emptyMap();
         }
         Map<Integer, ExecutionAttemptID> expected = new TreeMap<>();
         for (AccessExecutionVertex task : vertex.getTaskVertices()) {
@@ -164,11 +164,11 @@ public class A4SAggregatingVertexMetricsHandler
             if (attempt == null
                     || task.getCurrentExecutions().size() != 1
                     || attempt.getState() != ExecutionState.RUNNING) {
-                return Map.of();
+                return Collections.emptyMap();
             }
             expected.put(task.getParallelSubtaskIndex(), attempt.getAttemptId());
         }
-        return expected.size() == vertex.getParallelism() ? expected : Map.of();
+        return expected.size() == vertex.getParallelism() ? expected : Collections.emptyMap();
     }
 
     A4SAggregatedMetricsResponseBody processVersionedRequest(
@@ -189,7 +189,7 @@ public class A4SAggregatingVertexMetricsHandler
             expected.forEach(
                     (subtask, attempt) -> {
                         expectedIds.put(subtask, attempt.toString());
-                        var metrics = store.getSubtaskAttemptMetricStore(
+                        MetricStore.ComponentMetricStore metrics = store.getSubtaskAttemptMetricStore(
                                 job, vertex, subtask, attempt.getAttemptNumber());
                         if (metrics == null) {
                             return;
@@ -215,7 +215,7 @@ public class A4SAggregatingVertexMetricsHandler
                     });
         }
         int decodedChars = 0;
-        for (var entry : observationGauges.entrySet()) {
+        for (Map.Entry<Integer, List<String>> entry : observationGauges.entrySet()) {
             List<String> matching = entry.getValue();
             if (matching.isEmpty()) {
                 continue;
