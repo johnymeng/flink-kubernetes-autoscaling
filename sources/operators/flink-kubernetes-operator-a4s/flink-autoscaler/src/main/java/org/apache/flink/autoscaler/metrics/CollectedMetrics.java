@@ -17,6 +17,7 @@
 
 package org.apache.flink.autoscaler.metrics;
 
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -37,6 +38,16 @@ public class CollectedMetrics {
     private Map<ScalingMetric, Double> globalMetrics;
     private Map<JobVertexID, MissRateCurve> missRateCurves;
     private Map<JobVertexID, List<CacheCostSample>> cacheCostSamples;
+
+    private Map<JobVertexID, CacheObservationBatch> cacheObservations;
+
+    public CollectedMetrics(
+            Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics,
+            Map<ScalingMetric, Double> globalMetrics,
+            Map<JobVertexID, MissRateCurve> missRateCurves,
+            Map<JobVertexID, List<CacheCostSample>> cacheCostSamples) {
+        this(vertexMetrics, globalMetrics, missRateCurves, cacheCostSamples, null);
+    }
 
     public CollectedMetrics(
             Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics,

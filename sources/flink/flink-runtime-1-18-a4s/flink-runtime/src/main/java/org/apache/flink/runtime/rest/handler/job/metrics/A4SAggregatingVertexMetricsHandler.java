@@ -18,11 +18,19 @@
 
 package org.apache.flink.runtime.rest.handler.job.metrics;
 
+import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.CacheObservation.Status;
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
+import org.apache.flink.runtime.execution.ExecutionState;
+import org.apache.flink.runtime.executiongraph.AccessExecution;
+import org.apache.flink.runtime.executiongraph.AccessExecutionJobVertex;
+import org.apache.flink.runtime.executiongraph.AccessExecutionVertex;
+import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.metrics.A4SHistogramMetricCodec;
 import org.apache.flink.runtime.rest.handler.AbstractRestHandler;
@@ -51,6 +59,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -66,7 +75,10 @@ public class A4SAggregatingVertexMetricsHandler
     private static final String STACK_DISTANCE_HISTOGRAM_METRIC_NAME = "stack-distance-histogram";
 
     private final Executor executor;
+    private static final int MAX_VERTEX_WIRE_BYTES = 16 * 1024 * 1024;
+
     private final MetricFetcher fetcher;
+    private final Time requestTimeout;
 
     public A4SAggregatingVertexMetricsHandler(
             GatewayRetriever<? extends RestfulGateway> leaderRetriever,
@@ -81,6 +93,7 @@ public class A4SAggregatingVertexMetricsHandler
                 A4SAggregatedVertexMetricsHeaders.getInstance());
         this.executor = executor;
         this.fetcher = fetcher;
+        this.requestTimeout = timeout;
     }
 
     @Override
@@ -94,6 +107,24 @@ public class A4SAggregatingVertexMetricsHandler
                 selectors.contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COST_SAMPLES);
         boolean includeClassification =
                 selectors.contains(A4SCacheCostSample.COMPACTION_QUERY_SELECTOR);
+
+        if (selectors.contains(CacheObservationBatch.FIELD_NAME)) {
+            return gateway.requestJob(jobId, requestTimeout)
+                    .handleAsync(
+                            (graph, error) -> {
+                                if (error != null || graph == null) {
+                                    return invalidResponse(Status.REST_UNAVAILABLE);
+                                }
+                                Map<Integer, ExecutionAttemptID> expected =
+                                        expectedExecutions(graph.getJobVertex(vertexID));
+                                if (expected.isEmpty()) {
+                                    return invalidResponse(Status.INCOMPLETE);
+                                }
+                                return processVersionedRequest(
+                                        jobId.toString(), vertexID.toString(), expected, includeCacheCosts);
+                            },
+                            executor);
+        }
 
         return CompletableFuture.supplyAsync(
                 () -> {
@@ -115,6 +146,140 @@ public class A4SAggregatingVertexMetricsHandler
                     }
                 },
                 this.executor);
+    }
+
+    private static A4SAggregatedMetricsResponseBody invalidResponse(Status status) {
+        return new A4SAggregatedMetricsResponseBody(
+                null, null, CacheObservationBatch.invalid(status));
+    }
+
+    private static Map<Integer, ExecutionAttemptID> expectedExecutions(
+            @Nullable AccessExecutionJobVertex vertex) {
+        if (vertex == null) {
+            return Map.of();
+        }
+        Map<Integer, ExecutionAttemptID> expected = new TreeMap<>();
+        for (AccessExecutionVertex task : vertex.getTaskVertices()) {
+            AccessExecution attempt = task.getCurrentExecutionAttempt();
+            if (attempt == null
+                    || task.getCurrentExecutions().size() != 1
+                    || attempt.getState() != ExecutionState.RUNNING) {
+                return Map.of();
+            }
+            expected.put(task.getParallelSubtaskIndex(), attempt.getAttemptId());
+        }
+        return expected.size() == vertex.getParallelism() ? expected : Map.of();
+    }
+
+    A4SAggregatedMetricsResponseBody processVersionedRequest(
+            String job, String vertex, Map<Integer, ExecutionAttemptID> expected, boolean includeCacheCosts) {
+        fetcher.update();
+        MetricStore store = fetcher.getMetricStore();
+        long now = System.currentTimeMillis();
+        Map<Integer, String> expectedIds = new TreeMap<>();
+        List<CacheObservation> observations = new ArrayList<>();
+        List<A4SCacheCostSample> samples = new ArrayList<>();
+        long wireBytes = 0;
+        long maxAge = -1;
+        Status transportStatus = Status.VALID;
+        // MetricStore views are backed by concurrent maps. Copy just the relevant gauge strings,
+        // then decode and build curves without holding the global metric lock.
+        Map<Integer, List<String>> observationGauges = new TreeMap<>();
+        synchronized (store) {
+            expected.forEach(
+                    (subtask, attempt) -> {
+                        expectedIds.put(subtask, attempt.toString());
+                        var metrics = store.getSubtaskAttemptMetricStore(
+                                job, vertex, subtask, attempt.getAttemptNumber());
+                        if (metrics == null) {
+                            return;
+                        }
+                        List<String> matching = new ArrayList<>();
+                        metrics.metrics.forEach((name, value) -> {
+                            if (name.endsWith("." + CacheObservation.METRIC_NAME)) {
+                                matching.add(value);
+                            }
+                        });
+                        if (matching.isEmpty()
+                                && getStackDistanceHistogramRaw(metrics.metrics) != null) {
+                            matching.add(null); // unversioned legacy histogram
+                        }
+                        observationGauges.put(subtask, matching);
+                        if (includeCacheCosts) {
+                            A4SCacheCostSample sample = readCacheCostSample(
+                                    subtask, metrics.metrics, now, true, true);
+                            if (sample != null && sample.attempt.equals(expectedIds.get(subtask))) {
+                                samples.add(sample);
+                            }
+                        }
+                    });
+        }
+        int decodedChars = 0;
+        for (var entry : observationGauges.entrySet()) {
+            List<String> matching = entry.getValue();
+            if (matching.isEmpty()) {
+                continue;
+            }
+            if (matching.size() != 1) {
+                transportStatus = Status.DUPLICATE;
+                continue;
+            }
+            String raw = matching.get(0);
+            if (raw == null) {
+                transportStatus = Status.UNSUPPORTED_VERSION;
+                continue;
+            }
+            if (raw.length() > 65_535 || A4SHistogramMetricCodec.isOmitted(raw)) {
+                transportStatus = Status.OVERSIZE;
+                continue;
+            }
+            int bytes = A4SHistogramMetricCodec.modifiedUtfBytes(raw);
+            wireBytes += bytes;
+            if (bytes > 65_535) {
+                transportStatus = Status.OVERSIZE;
+                continue;
+            }
+            if (wireBytes > MAX_VERTEX_WIRE_BYTES) {
+                transportStatus = Status.OVERSIZE;
+                break;
+            }
+            try {
+                String json = A4SHistogramMetricCodec.decode(raw);
+                decodedChars += json.length();
+                if (decodedChars > MAX_VERTEX_WIRE_BYTES) {
+                    transportStatus = Status.OVERSIZE;
+                    break;
+                }
+                CacheObservation observation = CacheObservation.fromMetricString(json);
+                if (observation.window != null && observation.window.observedAtMillis > 0) {
+                    maxAge = Math.max(maxAge, now - observation.window.observedAtMillis);
+                }
+                if (observation.subtask != entry.getKey()) {
+                    transportStatus = Status.ATTEMPT_MISMATCH;
+                } else {
+                    observations.add(observation);
+                }
+            } catch (A4SHistogramMetricCodec.SizeLimitException oversized) {
+                transportStatus = Status.OVERSIZE;
+            } catch (IllegalArgumentException invalid) {
+                transportStatus = Status.MALFORMED;
+            }
+        }
+        A4SCacheObservationAggregator.Result aggregated =
+                transportStatus == Status.VALID
+                        ? A4SCacheObservationAggregator.aggregate(
+                                job, vertex, expectedIds, observations, now)
+                        : new A4SCacheObservationAggregator.Result(transportStatus);
+        if (aggregated.status != Status.VALID) {
+            log.debug(
+                    "A4S cache observations job={} vertex={} status={} coverage={}/{} ageMs={} wireBytes={}",
+                    job, vertex, aggregated.status, observations.size(), expected.size(), maxAge, wireBytes);
+        }
+        return new A4SAggregatedMetricsResponseBody(
+                aggregated.curve, samples,
+                new CacheObservationBatch(
+                        CacheObservation.VERSION, aggregated.status, expected.size(), wireBytes,
+                        maxAge, observations));
     }
 
     private A4SAggregatedMetricsResponseBody processRequest(
@@ -199,7 +364,7 @@ public class A4SAggregatingVertexMetricsHandler
                 continue;
             }
             A4SCacheCostSample sample =
-                    readCacheCostSample(subtask, active.metrics, now, includeClassification);
+                    readCacheCostSample(subtask, active.metrics, now, includeClassification, false);
             if (sample != null) {
                 samples.add(sample);
             }
@@ -210,7 +375,8 @@ public class A4SAggregatingVertexMetricsHandler
 
     @Nullable
     private A4SCacheCostSample readCacheCostSample(
-            int subtask, Map<String, String> metrics, long now, boolean includeClassification) {
+            int subtask, Map<String, String> metrics, long now,
+            boolean includeClassification, boolean includeProcess) {
         String raw = null;
         for (Map.Entry<String, String> entry : metrics.entrySet()) {
             if (entry.getKey().endsWith("." + A4SCacheCostSample.METRIC_NAME)) {
@@ -224,7 +390,7 @@ public class A4SAggregatingVertexMetricsHandler
         }
         return raw == null
                 ? null
-                : A4SCacheCostSample.fromMetricString(subtask, raw, now, includeClassification);
+                : A4SCacheCostSample.fromMetricString(subtask, raw, now, includeClassification, includeProcess);
     }
 
     @Nullable

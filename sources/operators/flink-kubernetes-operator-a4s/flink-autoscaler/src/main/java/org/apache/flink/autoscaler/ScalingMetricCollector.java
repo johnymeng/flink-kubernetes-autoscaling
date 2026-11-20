@@ -28,6 +28,8 @@ import org.apache.flink.autoscaler.metrics.FlinkMetric;
 import org.apache.flink.autoscaler.metrics.MetricNotFoundException;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetrics;
+import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
@@ -137,12 +139,24 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         var collectedVertexMetrics = queryAllAggregatedMetrics(ctx, filteredVertexMetricNames);        
         Map<JobVertexID, MissRateCurve> collectedMissRateCurves;
         Map<JobVertexID, List<CacheCostSample>> cacheCostSamples = null;
-        if (conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)) {
+        Map<JobVertexID, CacheObservationBatch> cacheObservations = null;
+        if (conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)
+                || (conf.get(AutoScalerOptions.JUSTIN_ENABLED) && conf.get(AutoScalerOptions.A4S_ENABLED))) {
             collectedMissRateCurves = new HashMap<>();
             cacheCostSamples = new HashMap<>();
-            for (var entry : queryAllA4SMetrics(ctx, filteredVertexMetricNames.keySet()).entrySet()) {
+            cacheObservations = new HashMap<>();
+            var activeVertices = new HashSet<>(topology.getVerticesInTopologicalOrder());
+            activeVertices.removeAll(topology.getFinishedVertices());
+            for (var entry : queryAllA4SMetrics(ctx, activeVertices).entrySet()) {
                 var response = entry.getValue();
-                collectedMissRateCurves.put(entry.getKey(), response.getScaledMrc());
+                var batch = response.getCacheObservations();
+                if (batch != null) {
+                    cacheObservations.put(entry.getKey(), batch);
+                    if (batch.version == CacheObservation.VERSION
+                            && batch.status == CacheObservation.Status.VALID) {
+                        collectedMissRateCurves.put(entry.getKey(), response.getScaledMrc());
+                    }
+                }
                 if (!response.getCacheCostSamples().isEmpty()) {
                     cacheCostSamples.put(entry.getKey(), response.getCacheCostSamples());
                 }
@@ -167,8 +181,18 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                         conf);
 
         scalingMetrics.setCacheCostSamples(cacheCostSamples);
+        scalingMetrics.setCacheObservations(cacheObservations);
 
         // Add scaling metrics to history if they were computed successfully
+        if (!metricHistory.isEmpty()) {
+            var previous = metricHistory.get(metricHistory.lastKey());
+            if (previous.getCacheObservations() != null) {
+                Map<JobVertexID, CacheObservationBatch> metadata = new HashMap<>();
+                previous.getCacheObservations().forEach(
+                        (vertex, batch) -> metadata.put(vertex, batch.withoutHistograms()));
+                previous.setCacheObservations(metadata);
+            }
+        }
         metricHistory.put(now, scalingMetrics);
 
         if (isStabilizing) {

@@ -19,13 +19,11 @@
 package org.apache.flink.contrib.streaming.state;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.a4s.core.StackDistanceHistogram;
-import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
+import org.apache.flink.a4s.core.CacheObservation;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.View;
 import org.apache.flink.runtime.executiongraph.IOMetrics;
-import org.apache.flink.runtime.metrics.A4SHistogramMetricCodec;
 import org.apache.flink.runtime.metrics.groups.InternalOperatorMetricGroup;
 import org.apache.flink.runtime.metrics.scope.ScopeFormat;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SCacheCostSample;
@@ -201,6 +199,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             }
             try {
                 long observedAtMillis = System.currentTimeMillis();
+                long observedAtNanos = System.nanoTime();
                 long[] cache = (long[]) readCache.invoke(lruCache);
                 if (cache == null || cache.length != 7 || cache[0] != 1 || cache[4] != 1) {
                     return "";
@@ -221,7 +220,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                 Long compactionMissCount =
                         compactionMisses == null ? null : statistics.getTickerCount(compactionMisses);
                 if (!RocksDBResourceContainer.hasExclusiveCacheOwner(lruCache)
-                        || System.currentTimeMillis() - observedAtMillis > 100) {
+                        || System.nanoTime() - observedAtNanos > 100_000_000) {
                     return "";
                 }
                 return new A4SCacheCostSample(
@@ -243,7 +242,9 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                                 observedAtMillis,
                                 abiVersion,
                                 compactionHitCount,
-                                compactionMissCount)
+                                compactionMissCount,
+                                A4SCacheTelemetry.PROCESS,
+                                observedAtNanos)
                         .toMetricString();
             } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
                 LOG.debug("Could not read the A4S online cache cost sample.", e);
@@ -293,11 +294,40 @@ public class RocksDBNativeMetricMonitor implements Closeable {
 
     /** Registers the stack distance histogram metric if enabled. */
     private void registerStackDistanceHistogram() {
-        if (options.isStackDistanceHistogramEnabled()) {
-            LOG.info("Registering stack distance histogram metric for RocksDB.");
-            RocksDBStackDistanceHistogramView view =
-                    new RocksDBStackDistanceHistogramView(lruCache);
-            metricGroup.gauge("rocksdb.stack-distance-histogram", view);
+        if (!options.isStackDistanceHistogramEnabled()
+                || !(metricGroup instanceof InternalOperatorMetricGroup)) {
+            return;
+        }
+        var variables = metricGroup.getAllVariables();
+        String job = variables.get(ScopeFormat.SCOPE_JOB_ID);
+        String vertex = variables.get(ScopeFormat.SCOPE_TASK_VERTEX_ID);
+        String attempt = variables.get(ScopeFormat.SCOPE_TASK_ATTEMPT_ID);
+        int subtask = Integer.parseInt(variables.get(ScopeFormat.SCOPE_TASK_SUBTASK_INDEX));
+        A4SCacheTelemetry telemetry = A4SCacheTelemetry.find(lruCache);
+        metricGroup.addGroup("rocksdb").gauge(
+                CacheObservation.METRIC_NAME,
+                () -> readCacheObservation(telemetry, job, vertex, subtask, attempt));
+    }
+
+    private String readCacheObservation(
+            @Nullable A4SCacheTelemetry telemetry, String job, String vertex, int subtask, String attempt) {
+        synchronized (lock) {
+            CacheObservation.Status status;
+            if (rocksDB == null) {
+                status = CacheObservation.Status.CLOSED;
+            } else if (telemetry == null) {
+                status = CacheObservation.Status.UNSUPPORTED_NATIVE;
+            } else {
+                try {
+                    return telemetry.metric(job, vertex, subtask, attempt);
+                } catch (RuntimeException error) {
+                    LOG.debug("Could not publish cache observation", error);
+                    status = CacheObservation.Status.MALFORMED;
+                }
+            }
+            return new CacheObservation(
+                    CacheObservation.VERSION, job, vertex, subtask, attempt, status, null, null)
+                    .toMetricString();
         }
     }
 
@@ -451,108 +481,4 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         }
     }
 
-    /** A stack distance histogram gauge updated by the shared {@link View} update cycle. */
-    class RocksDBStackDistanceHistogramView extends RocksDBNativeView implements Gauge<String> {
-
-        @Nullable private final LRUCache viewLruCache;
-        private final long bucketSizeScaling;
-        private final long cacheItemSizeBytes;
-        private StackDistanceHistogram latestHistogram;
-
-        RocksDBStackDistanceHistogramView(@Nullable LRUCache lruCache) {
-            this.viewLruCache = lruCache;
-            this.bucketSizeScaling = options.getStackDistanceHistogramBucketSizeScaling();
-            this.cacheItemSizeBytes = options.getStackDistanceHistogramCacheItemSizeBytes();
-            this.latestHistogram =
-                    new StackDistanceHistogram(
-                            new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
-        }
-
-        @Override
-        public void update() {
-            synchronized (lock) {
-                if (isClosed()) {
-                    return;
-                }
-                if (viewLruCache == null) {
-                    StackDistanceHistogram emptyHistogram =
-                            new StackDistanceHistogram(
-                                    new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
-                    LOG.debug(
-                            "A4S [{}]: histogramFingerprint={} numBuckets={} numPartitions={} reason=lru_cache_null",
-                            A4SMetricsFlowStep.ROCKSDB_HISTOGRAM_UPDATE_FAILED.name(),
-                            emptyHistogram.getHistogramFingerprint(),
-                            0,
-                            1);
-                    latestHistogram = emptyHistogram;
-                    return;
-                }
-                try {
-                    long[] histogramCounts = viewLruCache.getStackDistanceHistogram();
-                    viewLruCache.resetQuickMRCStats();
-                    if (histogramCounts == null) {
-                        StackDistanceHistogram emptyHistogram =
-                                new StackDistanceHistogram(
-                                        new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
-                        LOG.warn(
-                                "A4S [{}]: histogramFingerprint={} numBuckets={} numPartitions={} reason=histogram_null",
-                                A4SMetricsFlowStep.ROCKSDB_HISTOGRAM_UPDATE_FAILED.name(),
-                                emptyHistogram.getHistogramFingerprint(),
-                                0,
-                                1);
-                        latestHistogram = emptyHistogram;
-                        return;
-                    }
-
-                    long completeMisses =
-                            histogramCounts.length == 0 ? 0L : histogramCounts[histogramCounts.length - 1];
-                    long[] finiteBucketCounts =
-                            histogramCounts.length == 0
-                                    ? new long[0]
-                                    : java.util.Arrays.copyOf(histogramCounts, histogramCounts.length - 1);
-                    latestHistogram =
-                            new StackDistanceHistogram(
-                                    finiteBucketCounts,
-                                    completeMisses,
-                                    1,
-                                    bucketSizeScaling,
-                                    cacheItemSizeBytes);
-                    LOG.debug(
-                            "A4S [{}]: histogramFingerprint={} numBuckets={} numPartitions={} totalFrequency={}",
-                            A4SMetricsFlowStep.ROCKSDB_HISTOGRAM_UPDATED.name(),
-                            latestHistogram.getHistogramFingerprint(),
-                            latestHistogram.getNumBuckets(),
-                            latestHistogram.getNumPartitions(),
-                            latestHistogram.getTotalFrequency());
-                } catch (RuntimeException e) {
-                    StackDistanceHistogram empty =
-                            new StackDistanceHistogram(
-                                    new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
-                    LOG.warn(
-                            "A4S [{}]: histogramFingerprint={} numBuckets={} numPartitions={} reason=exception message={}",
-                            A4SMetricsFlowStep.ROCKSDB_HISTOGRAM_UPDATE_FAILED.name(),
-                            empty.getHistogramFingerprint(),
-                            0,
-                            1,
-                            e.getMessage(),
-                            e);
-                    latestHistogram = empty;
-                }
-            }
-        }
-
-        @Override
-        public String getValue() {
-            StackDistanceHistogram histogram;
-            synchronized (lock) {
-                histogram = latestHistogram;
-            }
-            if (histogram == null) {
-                histogram =
-                        new StackDistanceHistogram(
-                                new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
-            }
-            return A4SHistogramMetricCodec.encode(histogram.toMetricString());
-        }
-    }
 }
