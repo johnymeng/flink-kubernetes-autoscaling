@@ -145,12 +145,18 @@ public class ScalingMetricEvaluator {
                             continue;
                         }
                     } else {
-                        reason = OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED;
+                        reason = !shadow && QuickMrcCostProjection
+                                        .cannotMeetDemandAtCurrentParallelism(fit.getFit(), targetRate)
+                                ? OnlineCacheCost.Reason.INSUFFICIENT_CURRENT_PARALLELISM
+                                : OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED;
                     }
                 }
                 if (reason != OnlineCacheCost.Reason.QUALIFIED) {
+                    String mode = shadow ? "ONLINE_SHADOW"
+                            : reason == OnlineCacheCost.Reason.INSUFFICIENT_CURRENT_PARALLELISM
+                                    ? "ONLINE_OVERLOAD" : "INVALID";
                     LOG.info("A4S cache cost vertex={} mode={} reason={} measuredFit={}",
-                            vertex, shadow ? "ONLINE_SHADOW" : "INVALID", reason, fit.getFit());
+                            vertex, mode, reason, fit.getFit());
                     if (!shadow) {
                         cacheCostFailures.put(vertex, reason);
                         continue;
