@@ -259,7 +259,19 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             return false;
         }
 
-        if (strictCacheObservations && !checkCacheObservations(ctx, collectedMetrics)) {
+        if (strictCacheObservations
+                && (!checkCacheObservations(ctx, collectedMetrics)
+                        || !evaluatedMetrics.getCacheCostFailures().isEmpty())) {
+            resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
+            return false;
+        }
+
+        if (strictCacheObservations
+                && ctx.getConfiguration().get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)
+                && !ctx.getConfiguration().get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW)) {
+            // This executor only commits parallelism changes. The fitted curve is valid at the
+            // current parallelism and requires a separate cache-only allocation path.
+            LOG.info("A4S hold job={} reason=ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE", ctx.getJobID());
             resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
             return false;
         }

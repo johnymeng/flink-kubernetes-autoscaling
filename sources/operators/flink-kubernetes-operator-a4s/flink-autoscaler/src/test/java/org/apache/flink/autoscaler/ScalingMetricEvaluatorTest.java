@@ -20,7 +20,8 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.autoscaler.a4s.A4S;
-import org.apache.flink.autoscaler.a4s.CacheCostSample;
+import org.apache.flink.autoscaler.a4s.OnlineCacheCost;
+import org.apache.flink.autoscaler.a4s.QuickMrcOnlineCacheCostTest;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
@@ -85,70 +86,44 @@ public class ScalingMetricEvaluatorTest {
     }
 
     @Test
-    void usesQualifiedOnlineHistoryAndFallsBackForANewAttempt() {
+    void usesAQualifiedQuickMrcFitOnlyAtTheMeasuredParallelism() {
         var vertex = new JobVertexID();
         var history = cacheCostHistory(vertex);
         var snapshots = history.getMetricHistory();
-        var start = snapshots.get(snapshots.firstKey());
-        var end = snapshots.remove(snapshots.lastKey());
-        snapshots.put(Instant.ofEpochSecond(60), end);
-        end.setVertexMetrics(
-                Map.of(
-                        vertex,
-                        Map.of(
-                                ScalingMetric.NUM_RECORDS_IN, 60_000.0,
-                                ScalingMetric.NUM_RECORDS_OUT, 60_000.0,
-                                ScalingMetric.LAG, 0.0,
-                                ScalingMetric.LOAD, 0.8)));
-        start.setCacheCostSamples(
-                Map.of(vertex, List.of(new CacheCostSample(
-                        0, "original", 987, 524288, 1, 200, 100, 100, 100,
-                        10, 10, 50_000, 100_000, 500, 10, 1_000, 2, 0, 0))));
-        var latest = new CacheCostSample(
-                0, "original", 987, 524288, 1, 10_200, 5_100, 5_100, 5_100,
-                110, 110, 150_000, 2_200_000, 5_500, 610, 61_000, 2, 0, 0);
-        end.setCacheCostSamples(Map.of(vertex, List.of(latest)));
+        var curve = snapshots.get(snapshots.lastKey()).getMissRateCurves().get(vertex);
+        snapshots.clear();
+        for (int i = 0; i < 3; i++) {
+            var metrics = new CollectedMetrics(
+                    Map.of(vertex, Map.of(
+                            ScalingMetric.NUM_RECORDS_IN, 60_000.0 * i,
+                            ScalingMetric.NUM_RECORDS_OUT, 60_000.0 * i,
+                            ScalingMetric.LAG, 0.0,
+                            ScalingMetric.LOAD, 0.8)),
+                    Map.of(), Map.of(vertex, curve));
+            metrics.setCacheObservations(Map.of(vertex, QuickMrcOnlineCacheCostTest.batch(i, 0)));
+            metrics.setCacheCostSamples(Map.of(
+                    vertex, List.of(QuickMrcOnlineCacheCostTest.sample(i, 0, 0, 0))));
+            snapshots.put(Instant.ofEpochSecond(60L * i), metrics);
+        }
 
-        var legacy = evaluator.evaluate(new Configuration(), history, Duration.ZERO);
         var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
         var online = evaluator.evaluate(config, history, Duration.ZERO);
-        assertEquals(200.0,
-                legacy.getMemoryParallelismCurves().get(vertex)
-                        .getMemoryMbForParallelism(2).orElseThrow());
-        assertEquals(50.0,
-                online.getMemoryParallelismCurves().get(vertex)
-                        .getMemoryMbForParallelism(2).orElseThrow());
-        assertEquals(legacy.getVertexMetrics(), online.getVertexMetrics());
+        assertTrue(online.getCacheCostFailures().isEmpty());
+        var projection = online.getMemoryParallelismCurves().get(vertex);
+        assertEquals(8_192 / (1024.0 * 1024.0), projection.getMemoryMbForParallelism(1).orElseThrow());
+        assertTrue(projection.getMemoryMbForParallelism(2).isEmpty());
 
-        var commonBaseline =
-                new Configuration(config)
-                        .set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE, true)
-                        .set(AutoScalerOptions.A4S_HIT_LATENCY_SEC, 0.001975);
-        var fitted =
-                ScalingMetricEvaluator.selectedOnlineCacheCost(config, snapshots, vertex, 1)
-                        .orElseThrow();
-        var slopeOnly =
-                ScalingMetricEvaluator.selectedOnlineCacheCost(commonBaseline, snapshots, vertex, 1)
-                        .orElseThrow();
-        assertEquals(0.001975, slopeOnly.getZeroMissSecondsPerRecord());
-        assertEquals(
-                fitted.getMissPenaltySecondsPerRecord(), slopeOnly.getMissPenaltySecondsPerRecord());
-        assertEquals(
-                100.0,
-                evaluator.evaluate(commonBaseline, history, Duration.ZERO)
-                        .getMemoryParallelismCurves()
-                        .get(vertex)
-                        .getMemoryMbForParallelism(2)
-                        .orElseThrow());
+        snapshots.get(snapshots.lastKey()).getCacheCostSamples().get(vertex).get(0)
+                .setAttempt("restarted");
+        var invalid = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.UNBOUND_TIMING, invalid.getCacheCostFailures().get(vertex));
+        assertFalse(invalid.getMemoryParallelismCurves().containsKey(vertex));
 
-        latest.setAttempt("restarted");
-        assertTrue(
-                ScalingMetricEvaluator.selectedOnlineCacheCost(commonBaseline, snapshots, vertex, 1)
-                        .isEmpty());
-        var fallback = evaluator.evaluate(config, history, Duration.ZERO);
-        assertEquals(200.0,
-                fallback.getMemoryParallelismCurves().get(vertex)
-                        .getMemoryMbForParallelism(2).orElseThrow());
+        var shadow = evaluator.evaluate(
+                new Configuration(config).set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW, true),
+                history, Duration.ZERO);
+        assertTrue(shadow.getCacheCostFailures().isEmpty());
+        assertTrue(shadow.getMemoryParallelismCurves().get(vertex).getMemoryMbForParallelism(24).isPresent());
     }
 
     @Test

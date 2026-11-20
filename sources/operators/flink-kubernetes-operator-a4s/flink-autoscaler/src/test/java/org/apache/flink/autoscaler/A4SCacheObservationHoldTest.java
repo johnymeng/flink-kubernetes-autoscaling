@@ -25,6 +25,9 @@ import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
+import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.realizer.TestingScalingRealizer;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
@@ -34,9 +37,12 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -105,5 +111,75 @@ class A4SCacheObservationHoldTest {
                 List.of(observation))));
         metrics.setMissRateCurves(Map.of(vertex, new MissRateCurve(List.of(new MissRateCurve.Point(4096, .25)))));
         assertTrue(autoscaler.checkCacheObservations(context, history));
+    }
+
+    @Test
+    void distinguishesAQualifiedProjectionFromAnActuationPath() throws Exception {
+        var context = TestingAutoscalerUtils.createDefaultJobAutoScalerContext();
+        var config = context.getConfiguration();
+        config.set(AutoScalerOptions.AUTOSCALER_ENABLED, true);
+        config.set(AutoScalerOptions.A4S_ENABLED, true);
+        config.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        config.set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var stateStore = new InMemoryAutoScalerStateStore<JobID, JobAutoScalerContext<JobID>>();
+        var events = new TestingEventCollector<JobID, JobAutoScalerContext<JobID>>();
+        var vertex = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 10));
+        var collector = new TestingMetricsCollector<JobID, JobAutoScalerContext<JobID>>(topology) {
+            @Override
+            public CollectedMetricHistory updateMetrics(
+                    JobAutoScalerContext<JobID> ctx,
+                    AutoScalerStateStore<JobID, JobAutoScalerContext<JobID>> store) {
+                var latest = new CollectedMetrics();
+                var observation = new CacheObservation(
+                        CacheObservation.VERSION, context.getJobID().toString(),
+                        vertex.toString(), 0, "attempt", CacheObservation.Status.VALID,
+                        new CacheObservation.Window(
+                                "process", 1, 0, 2, List.of(1L), CacheObservation.QUICK_MRC,
+                                CacheObservation.FIXED_4K, CacheObservation.CACHE_POLICY, .1, 8192,
+                                1, 10_000_000_001L, System.currentTimeMillis(), 100, 25),
+                        null);
+                latest.setCacheObservations(Map.of(vertex, new CacheObservationBatch(
+                        CacheObservation.VERSION, CacheObservation.Status.VALID, 1, 32, 0,
+                        List.of(observation))));
+                latest.setMissRateCurves(Map.of(vertex, new MissRateCurve(List.of(
+                        new MissRateCurve.Point(4096, .25)))));
+                var history = new CollectedMetricHistory(topology, new TreeMap<>(Map.of(
+                        Instant.EPOCH, new CollectedMetrics(), Instant.now(), latest)), Instant.EPOCH);
+                history.setFullyCollected(true);
+                return history;
+            }
+        };
+        var evaluator = new ScalingMetricEvaluator() {
+            @Override
+            public EvaluatedMetrics evaluate(
+                    org.apache.flink.configuration.Configuration conf,
+                    CollectedMetricHistory metrics, Duration restartTime) {
+                return new EvaluatedMetrics(
+                        Map.of(vertex, new HashMap<>(Map.of(
+                                ScalingMetric.PARALLELISM, EvaluatedScalingMetric.of(1)))),
+                        Map.of());
+            }
+        };
+        var requests = new AtomicInteger();
+        var executor = new ScalingExecutor<JobID, JobAutoScalerContext<JobID>>(events, stateStore) {
+            @Override
+            public boolean scaleResource(
+                    JobAutoScalerContext<JobID> ctx, EvaluatedMetrics metrics,
+                    Map<JobVertexID, SortedMap<Instant, ScalingSummary>> history,
+                    ScalingTracking tracking, Instant now, JobTopology jobTopology,
+                    DelayedScaleDown delayedScaleDown) {
+                requests.incrementAndGet();
+                return false;
+            }
+        };
+        var autoscaler = new JobAutoScalerImpl<>(
+                collector, evaluator, executor, events, new TestingScalingRealizer<>(), stateStore);
+
+        autoscaler.scale(context);
+        assertEquals(0, requests.get());
+        config.set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW, true);
+        autoscaler.scale(context);
+        assertEquals(1, requests.get());
     }
 }

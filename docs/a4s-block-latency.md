@@ -141,8 +141,10 @@ miss fraction includes compaction. The model uses the observed foreground
 share of misses to translate that fraction into task busy time. When
 projecting to a different cache capacity, the estimate assumes a similar
 foreground share and lookup density. Different subtasks can also have
-different access patterns or read costs. A vertex falls back to the fixed
-cost when any subtask is unqualified.
+different access patterns or read costs. The versioned QuickMRC path reports
+unqualified observations and withholds learned selection. Shadow mode keeps
+the explicitly configured fixed or calibrated policy in use.
+[Current online selection and hold behavior](a4s-online-quickmrc-cost.md)
 
 A QuickMRC bin includes references whose inclusive stack distance fits its
 upper capacity boundary. The merged curve reports total native cache across

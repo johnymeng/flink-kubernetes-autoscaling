@@ -453,8 +453,17 @@ public class AutoScalerOptions {
                     .withFallbackKeys(oldOperatorConfigKey("a4s.online-cache-costs.enabled"))
                     .withDescription(
                             "Learn the incremental per-record cache miss cost from recent "
-                                    + "RocksDB lookup timings. Use configured legacy latencies "
-                                    + "until a qualified same-attempt window is available.");
+                                    + "RocksDB lookup timings. Hold A4S when a required QuickMRC fit "
+                                    + "is unavailable or outside its support. Learned projections are "
+                                    + "limited to the current parallelism.");
+
+    public static final ConfigOption<Boolean> A4S_ONLINE_CACHE_COSTS_SHADOW =
+            autoScalerConfig("a4s.online-cache-costs.shadow")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Report the online QuickMRC fit without using it for decisions. "
+                                    + "The explicitly configured fixed or calibrated policy remains active.");
 
     public static final ConfigOption<Boolean> A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE =
             autoScalerConfig("a4s.online-cache-costs.use-fixed-baseline")
@@ -462,8 +471,8 @@ public class AutoScalerOptions {
                     .defaultValue(false)
                     .withFallbackKeys(oldOperatorConfigKey("a4s.online-cache-costs.use-fixed-baseline"))
                     .withDescription(
-                            "Use the configured hit latency as the zero-miss cost in a qualified "
-                                    + "online model. Only the incremental miss cost is learned.");
+                            "In shadow mode, compare the learned miss increment using the configured "
+                                    + "hit latency as the zero-miss cost.");
 
     public static final ConfigOption<Map<String, String>> A4S_CALIBRATED_CACHE_COSTS =
             autoScalerConfig("a4s.calibrated-cache-costs")
