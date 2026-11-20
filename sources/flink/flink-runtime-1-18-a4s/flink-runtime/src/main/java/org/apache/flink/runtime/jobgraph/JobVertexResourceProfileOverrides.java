@@ -28,6 +28,7 @@ import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -46,13 +47,14 @@ public final class JobVertexResourceProfileOverrides {
     private static final ConfigOption<Map<String, String>> PROFILES =
             ConfigOptions.key("pipeline.jobvertex-resourceprofile-overrides")
                     .mapType()
-                    .defaultValue(Map.of());
+                    .defaultValue(Collections.emptyMap());
 
     private JobVertexResourceProfileOverrides() {}
 
     public static void apply(JobGraph jobGraph, Configuration clusterConfiguration) {
-        var jobConfiguration = jobGraph.getJobConfiguration();
-        if (!jobConfiguration.getOptional(ENABLED).orElseGet(() -> clusterConfiguration.get(ENABLED))) {
+        Configuration jobConfiguration = jobGraph.getJobConfiguration();
+        if (!jobConfiguration.getOptional(ENABLED)
+                .orElseGet(() -> clusterConfiguration.get(ENABLED))) {
             return;
         }
 

@@ -60,6 +60,7 @@ import org.apache.flink.runtime.highavailability.JobResultStoreOptions;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertex;
+import org.apache.flink.runtime.jobgraph.JobVertexResourceProfileOverrides;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
@@ -600,7 +601,7 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
 
     private CompletableFuture<Acknowledge> internalSubmitJob(JobGraph jobGraph) {
         applyParallelismOverrides(jobGraph);
-        org.apache.flink.runtime.jobgraph.JobVertexResourceProfileOverrides.apply(jobGraph, configuration);
+        JobVertexResourceProfileOverrides.apply(jobGraph, configuration);
         log.info("Submitting job '{}' ({}).", jobGraph.getName(), jobGraph.getJobID());
 
         // track as an outstanding job

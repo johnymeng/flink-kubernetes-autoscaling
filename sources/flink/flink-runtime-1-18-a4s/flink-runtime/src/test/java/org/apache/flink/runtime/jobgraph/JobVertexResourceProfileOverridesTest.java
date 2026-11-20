@@ -27,6 +27,8 @@ import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 
 import org.junit.Test;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
@@ -59,7 +61,7 @@ public class JobVertexResourceProfileOverridesTest {
         JobVertexResourceProfileOverrides.apply(
                 graph,
                 Configuration.fromMap(
-                        Map.of(PROFILES, vertex.getID() + ":" + profile(17))));
+                        Collections.singletonMap(PROFILES, vertex.getID() + ":" + profile(17))));
 
         assertSame(original, vertex.getSlotSharingGroup());
     }
@@ -75,11 +77,8 @@ public class JobVertexResourceProfileOverridesTest {
         JobGraph graph = new JobGraph(new JobID(), "enabled", vertex, other);
         ResourceProfile expected = profile(17_000_001);
         Configuration conf =
-                Configuration.fromMap(
-                        Map.of(
-                                ENABLED, "true",
-                                PROFILES, encode(
-                                        Map.of(vertex.getID().toHexString(), expected.toString()))));
+                enabledWithProfiles(
+                        Collections.singletonMap(vertex.getID().toHexString(), expected.toString()));
 
         JobVertexResourceProfileOverrides.apply(graph, conf);
 
@@ -94,14 +93,10 @@ public class JobVertexResourceProfileOverridesTest {
         SlotSharingGroup original = new SlotSharingGroup();
         vertex.setSlotSharingGroup(original);
         JobGraph graph = new JobGraph(new JobID(), "invalid", vertex);
-        Configuration conf =
-                Configuration.fromMap(
-                        Map.of(
-                                ENABLED, "true",
-                                PROFILES, encode(
-                                        Map.of(
-                                                vertex.getID().toString(), profile(100).toString(),
-                                                new JobVertexID().toString(), profile(200).toString()))));
+        Map<String, String> profiles = new LinkedHashMap<>();
+        profiles.put(vertex.getID().toString(), profile(100).toString());
+        profiles.put(new JobVertexID().toString(), profile(200).toString());
+        Configuration conf = enabledWithProfiles(profiles);
 
         assertThrows(
                 IllegalArgumentException.class,
@@ -109,7 +104,10 @@ public class JobVertexResourceProfileOverridesTest {
         assertSame(original, vertex.getSlotSharingGroup());
     }
 
-    private static String encode(Map<String, String> profiles) {
-        return ConfigurationUtils.convertValue(profiles, String.class);
+    private static Configuration enabledWithProfiles(Map<String, String> profiles) {
+        Configuration conf = new Configuration();
+        conf.setString(ENABLED, "true");
+        conf.setString(PROFILES, ConfigurationUtils.convertValue(profiles, String.class));
+        return conf;
     }
 }
