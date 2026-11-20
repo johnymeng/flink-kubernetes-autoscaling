@@ -81,8 +81,15 @@ class A4SCacheObservationHoldTest {
         context.getConfiguration().set(AutoScalerOptions.A4S_ENABLED, true);
         context.getConfiguration().set(AutoScalerOptions.JUSTIN_ENABLED, true);
         stateStore.storeParallelismOverrides(context, Map.of(vertex.toString(), "2"));
+        context.getConfiguration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        AtomicInteger preservationCalls = new AtomicInteger();
         AtomicInteger realizationCalls = new AtomicInteger();
         var recordingRealizer = new TestingScalingRealizer<JobID, JobAutoScalerContext<JobID>>() {
+            @Override
+            public void preserveAppliedResourceOverrides(JobAutoScalerContext<JobID> ctx) {
+                preservationCalls.incrementAndGet();
+            }
+
             @Override
             public void realizeParallelismOverrides(
                     JobAutoScalerContext<JobID> ctx, Map<String, String> parallelism,
@@ -100,6 +107,7 @@ class A4SCacheObservationHoldTest {
 
         autoscaler.scale(context);
 
+        assertEquals(1, preservationCalls.get());
         assertEquals(0, realizationCalls.get());
         assertEquals(Map.of(vertex.toString(), "2"), stateStore.getParallelismOverrides(context));
         var history = collector.updateMetrics(context, stateStore);

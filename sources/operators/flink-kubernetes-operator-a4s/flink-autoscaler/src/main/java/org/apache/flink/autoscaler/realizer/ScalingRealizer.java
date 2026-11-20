@@ -51,6 +51,13 @@ public interface ScalingRealizer<KEY, Context extends JobAutoScalerContext<KEY>>
             throws Exception;
 
     /**
+     * Preserve applied resource overrides in a writable desired spec during a hold.
+     *
+     * <p>Imperative realizers have no desired spec to preserve.
+     */
+    default void preserveAppliedResourceOverrides(Context context) throws Exception {}
+
+    /**
      * Updates the TaskManager memory configuration.
      *
      * @throws Exception Error during realize config overrides.

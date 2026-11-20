@@ -23,7 +23,9 @@ import org.apache.flink.autoscaler.tuning.MemoryTuning;
 import org.apache.flink.configuration.*;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.spec.Resource;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigBuilder;
+import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import org.slf4j.Logger;
@@ -32,6 +34,8 @@ import org.slf4j.LoggerFactory;
 import javax.annotation.Nullable;
 
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /** The Kubernetes implementation for applying parallelism overrides. */
@@ -75,6 +79,35 @@ public class KubernetesScalingRealizer
                 .put(
                         RESOURCE_PROFILE_OVERRIDES.key(),
                         getOverrideString(context, justinOverrides));
+    }
+
+    @Override
+    public void preserveAppliedResourceOverrides(KubernetesJobAutoScalerContext context) {
+        var resource = context.getResource();
+        var status = resource.getStatus().getReconciliationStatus();
+        if (status.isBeforeFirstDeployment()
+                || (status.getState() != ReconciliationState.DEPLOYED
+                        && status.getState() != ReconciliationState.ROLLED_BACK)) {
+            return;
+        }
+
+        var deployed = ReconciliationUtils.getDeployedSpec(resource);
+        if (deployed == null || deployed.getFlinkConfiguration() == null) {
+            return;
+        }
+        var applied = deployed.getFlinkConfiguration();
+        var desired = resource.getSpec().getFlinkConfiguration();
+        // Omitting an applied override is interpreted as a request to remove it.
+        for (var key : List.of(PipelineOptions.PARALLELISM_OVERRIDES.key(),
+                RESOURCE_PROFILE_OVERRIDES.key())) {
+            if (applied.containsKey(key)) {
+                if (desired == null) {
+                    desired = new HashMap<>();
+                    resource.getSpec().setFlinkConfiguration(desired);
+                }
+                desired.put(key, applied.get(key));
+            }
+        }
     }
 
     @Override

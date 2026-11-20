@@ -95,8 +95,9 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 ctx.getConfiguration().get(JUSTIN_ENABLED)
                         && ctx.getConfiguration().get(AutoScalerOptions.A4S_ENABLED);
         boolean applyOverrides = !strictCacheObservations;
+        boolean enabled = ctx.getConfiguration().getBoolean(AUTOSCALER_ENABLED);
         try {
-            if (!ctx.getConfiguration().getBoolean(AUTOSCALER_ENABLED)) {
+            if (!enabled) {
                 LOG.debug("Autoscaler is disabled");
                 stateStore.clearAll(ctx);
                 stateStore.flush(ctx);
@@ -127,6 +128,8 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                     if (!strictCacheObservations || !isActiveOnline(ctx.getConfiguration())) {
                         applyConfigOverrides(ctx);
                     }
+                } else if (enabled && strictCacheObservations && isActiveOnline(ctx.getConfiguration())) {
+                    scalingRealizer.preserveAppliedResourceOverrides(ctx);
                 }
             } catch (Exception e) {
                 LOG.error("Error applying overrides.", e);
