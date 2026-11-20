@@ -30,10 +30,13 @@ import org.apache.flink.autoscaler.utils.AutoScalerUtils;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
+import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.a4s.OnlineCacheCost;
+import org.apache.flink.autoscaler.a4s.QuickMrcCostProjection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -58,6 +61,8 @@ import static org.apache.flink.autoscaler.metrics.ScalingMetric.*;
 public class ScalingMetricEvaluator {
 
     private static final Logger LOG = LoggerFactory.getLogger(ScalingMetricEvaluator.class);
+    private static final double MAX_CACHE_COST_HOLDOUT_ERROR = 0.25;
+    private static final double BYTES_PER_MIB = 1024.0 * 1024.0;
     private static final Duration MIN_CACHE_COST_WINDOW =
             Duration.ofSeconds(OnlineCacheCost.MIN_WINDOW_SECONDS);
     private static final Duration MAX_CACHE_COST_WINDOW =
@@ -68,6 +73,7 @@ public class ScalingMetricEvaluator {
         LOG.debug("Restart time used in metrics evaluation: {}", restartTime);
         var scalingOutput = new HashMap<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>>();
         var memoryParallelismCurves = new HashMap<JobVertexID, MemoryParallelismCurve>();
+        var cacheCostFailures = new HashMap<JobVertexID, OnlineCacheCost.Reason>();
         var metricsHistory = collectedMetrics.getMetricHistory();
         var topology = collectedMetrics.getJobTopology();
         CollectedMetrics latestCollectedMetrics = metricsHistory.get(metricsHistory.lastKey());
@@ -79,6 +85,9 @@ public class ScalingMetricEvaluator {
         double missLatencySec = conf.getDouble(AutoScalerOptions.A4S_MISS_LATENCY_SEC);
         var calibratedCacheCosts = conf.get(AutoScalerOptions.A4S_CALIBRATED_CACHE_COSTS);
         boolean onlineCacheCosts = conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED);
+        boolean strictA4s = conf.get(AutoScalerOptions.A4S_ENABLED)
+                && conf.get(AutoScalerOptions.JUSTIN_ENABLED);
+        boolean shadow = conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW);
         int vertexMinParallelism = conf.get(AutoScalerOptions.VERTEX_MIN_PARALLELISM);
         int vertexMaxParallelism = conf.get(AutoScalerOptions.VERTEX_MAX_PARALLELISM);
 
@@ -103,28 +112,56 @@ public class ScalingMetricEvaluator {
                 LOG.debug("A4S: No usable miss rate curve found for vertex {}, skipping", vertex);
                 continue;
             }
-            double targetRate = scalingOutput.get(vertex).get(TARGET_DATA_RATE).getAverage();
-            String calibratedCosts =
-                    onlineCacheCosts ? null : calibratedCacheCosts.get(vertex.toHexString());
-            Optional<OnlineCacheCost> onlineCost =
-                    selectedOnlineCacheCost(
-                            conf, metricsHistory, vertex, topology.get(vertex).getParallelism());
-            if (onlineCost.isPresent()) {
-                var cost = onlineCost.get();
-                LOG.debug("A4S online cache costs for vertex {}: {}", vertex, cost);
-                memoryParallelismCurves.put(
-                        vertex,
-                        requireFeasibleCurve(
-                                vertex,
-                                targetRate,
-                                MemoryParallelismCurve.fromCalibratedMissRateCurve(
-                                        targetRate,
-                                        cost.getZeroMissSecondsPerRecord(),
-                                        cost.getMissPenaltySecondsPerRecord(),
-                                        vertexMinParallelism,
-                                        vertexMaxParallelism,
-                                        missRateCurve)));
-            } else if (calibratedCosts == null) {
+            var metrics = scalingOutput.get(vertex);
+            double targetRate = strictA4s || onlineCacheCosts
+                    ? AutoScalerUtils.getTargetProcessingCapacity(
+                            metrics, conf, conf.get(TARGET_UTILIZATION), true, restartTime)
+                    : metrics.get(TARGET_DATA_RATE).getAverage();
+            if (onlineCacheCosts) {
+                var fit = selectOnlineFit(metricsHistory, vertex, topology.get(vertex).getParallelism());
+                OnlineCacheCost.Reason reason = fit.getReason();
+                Double fixedBaseline = shadow
+                                && conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE)
+                        ? hitLatencySec : null;
+                if (reason == OnlineCacheCost.Reason.QUALIFIED) {
+                    var recommendation = QuickMrcCostProjection.recommend(
+                            fit.getFit(), cacheObservation(latestCollectedMetrics, vertex),
+                            targetRate, fixedBaseline);
+                    if (recommendation.isPresent()) {
+                        var result = recommendation.get();
+                        LOG.info(
+                                "A4S cache cost vertex={} mode={} population={} demandRecordsPerSecond={} "
+                                        + "measuredFit={} effectiveFixedBaseline={} recommendation={}",
+                                vertex, shadow ? "ONLINE_SHADOW" : "ONLINE_QUALIFIED",
+                                CacheObservation.QUICK_MRC, targetRate, fit.getFit(),
+                                fixedBaseline, result);
+                        if (!shadow) {
+                            int parallelism = topology.get(vertex).getParallelism();
+                            memoryParallelismCurves.put(
+                                    vertex,
+                                    MemoryParallelismCurve.builder().targetThroughput(targetRate)
+                                            .addPoint(parallelism, result.getTotalNativeCacheBytes() / BYTES_PER_MIB)
+                                            .build());
+                            continue;
+                        }
+                    } else {
+                        reason = OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED;
+                    }
+                }
+                if (reason != OnlineCacheCost.Reason.QUALIFIED) {
+                    LOG.info("A4S cache cost vertex={} mode={} reason={} measuredFit={}",
+                            vertex, shadow ? "ONLINE_SHADOW" : "INVALID", reason, fit.getFit());
+                    if (!shadow) {
+                        cacheCostFailures.put(vertex, reason);
+                        continue;
+                    }
+                }
+            }
+
+            String calibratedCosts = calibratedCacheCosts.get(vertex.toHexString());
+            LOG.debug("A4S cache cost vertex={} mode={} demandRecordsPerSecond={}",
+                    vertex, calibratedCosts == null ? "LEGACY_FIXED" : "OFFLINE_CALIBRATED", targetRate);
+            if (calibratedCosts == null) {
                 memoryParallelismCurves.put(
                         vertex,
                         MemoryParallelismCurve.fromMissRateCurve(
@@ -154,7 +191,8 @@ public class ScalingMetricEvaluator {
                 scalingOutput, 
                 globalMetrics, 
                 memoryParallelismCurves, 
-                collectedMissRateCurves);
+                collectedMissRateCurves,
+                cacheCostFailures);
     }
 
     private static MemoryParallelismCurve requireFeasibleCurve(
@@ -167,45 +205,97 @@ public class ScalingMetricEvaluator {
         return curve;
     }
 
-    static Optional<OnlineCacheCost> selectedOnlineCacheCost(
-            Configuration conf,
-            SortedMap<Instant, CollectedMetrics> history,
-            JobVertexID vertex,
-            int parallelism) {
-        if (!conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)) {
-            return Optional.empty();
+    @VisibleForTesting
+    static OnlineCacheCost.FitResult selectOnlineFit(
+            SortedMap<Instant, CollectedMetrics> history, JobVertexID vertex, int parallelism) {
+        Instant end = history.lastKey();
+        var current = cacheCostSamples(history.get(end), vertex);
+        if (current.size() != parallelism) {
+            return OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.MISSING_TIMING);
         }
-        var fitted = onlineCacheCost(history, vertex, parallelism);
-        if (conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE)) {
-            double baseline = conf.get(AutoScalerOptions.A4S_HIT_LATENCY_SEC);
-            return fitted.map(
-                    cost -> new OnlineCacheCost(baseline, cost.getMissPenaltySecondsPerRecord()));
+        var candidates = fitStartTimes(history, end);
+        OnlineCacheCost.FitResult latestRejection = null;
+        for (int i = candidates.size() - 1; i >= 0; i--) {
+            Instant start = candidates.get(i);
+            var fit = fitBetween(history, vertex, start, end);
+            if (fit.getFit() == null) {
+                if (latestRejection == null) {
+                    latestRejection = fit;
+                }
+                continue;
+            }
+            var priorStarts = fitStartTimes(history, start);
+            for (int n = priorStarts.size() - 1; n >= 0; n--) {
+                var prior = fitBetween(history, vertex, priorStarts.get(n), start);
+                if (prior.getFit() == null) {
+                    continue;
+                }
+                double error = prior.getFit().holdoutRelativeError(fit.getFit());
+                LOG.info("A4S cache cost holdout vertex={} maxActualMissRelativeError={} "
+                                + "fitEndMillis={} holdoutEndMillis={}",
+                        vertex, error, prior.getFit().getWindowEndMillis(), fit.getFit().getWindowEndMillis());
+                if (error > MAX_CACHE_COST_HOLDOUT_ERROR
+                        || !prior.getFit().hasStableAccessMix(fit.getFit())) {
+                    return new OnlineCacheCost.FitResult(OnlineCacheCost.Reason.PHASE_DRIFT, fit.getFit());
+                }
+                return fit;
+            }
+            return new OnlineCacheCost.FitResult(OnlineCacheCost.Reason.MISSING_HOLDOUT, fit.getFit());
         }
-        return fitted;
+        return latestRejection == null
+                ? OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.WINDOW_DURATION)
+                : latestRejection;
     }
 
-    @VisibleForTesting
-    static Optional<OnlineCacheCost> onlineCacheCost(
-            SortedMap<Instant, CollectedMetrics> history, JobVertexID vertex, int parallelism) {
-        Instant latest = history.lastKey();
-        var current = cacheCostSamples(history.get(latest), vertex);
-        if (current.size() != parallelism) {
-            return Optional.empty();
-        }
-
-        Instant earliest = latest.minus(MAX_CACHE_COST_WINDOW);
-        Instant mostRecent = latest.minus(MIN_CACHE_COST_WINDOW);
-        Optional<OnlineCacheCost> cost = Optional.empty();
-        for (var entry : history.tailMap(earliest).entrySet()) {
-            if (entry.getKey().isAfter(mostRecent)) {
+    private static List<Instant> fitStartTimes(
+            SortedMap<Instant, CollectedMetrics> history, Instant end) {
+        Instant earliest = end.minus(MAX_CACHE_COST_WINDOW);
+        Instant mostRecent = end.minus(MIN_CACHE_COST_WINDOW);
+        List<Instant> candidates = new ArrayList<>();
+        for (Instant timestamp : history.subMap(earliest, end).keySet()) {
+            if (timestamp.isAfter(mostRecent)) {
                 break;
             }
-            var estimate = OnlineCacheCost.from(cacheCostSamples(entry.getValue(), vertex), current);
-            if (estimate.isPresent()) {
-                cost = estimate;
+            candidates.add(timestamp);
+        }
+        return candidates;
+    }
+
+    private static OnlineCacheCost.FitResult fitBetween(
+            SortedMap<Instant, CollectedMetrics> history, JobVertexID vertex, Instant start, Instant end) {
+        var before = history.get(start);
+        var after = history.get(end);
+        var initialSamples = cacheCostSamples(before, vertex);
+        var previous = initialSamples;
+        for (var entry : history.subMap(start, end).values()) {
+            var batch = cacheObservation(entry, vertex);
+            if (batch != null && (batch.status == CacheObservation.Status.COUNTER_RESET
+                    || batch.status == CacheObservation.Status.CACHE_CHANGED
+                    || batch.status == CacheObservation.Status.SHARED_CACHE)) {
+                return OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.CONTEXT_CHANGED);
+            }
+            var samples = cacheCostSamples(entry, vertex);
+            if (!samples.isEmpty() && samples.size() == previous.size()) {
+                if (OnlineCacheCost.hasDiscontinuity(previous, samples)) {
+                    return OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.CONTEXT_CHANGED);
+                }
+                previous = samples;
             }
         }
-        return cost;
+        var current = cacheCostSamples(after, vertex);
+        if (previous != initialSamples
+                && current.size() == previous.size()
+                && OnlineCacheCost.hasDiscontinuity(previous, current)) {
+            return OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.CONTEXT_CHANGED);
+        }
+        return OnlineCacheCost.fitQuickMrc(
+                cacheObservation(before, vertex), cacheCostSamples(before, vertex),
+                cacheObservation(after, vertex), current);
+    }
+
+    private static CacheObservationBatch cacheObservation(CollectedMetrics metrics, JobVertexID vertex) {
+        var observations = metrics.getCacheObservations();
+        return observations == null ? null : observations.get(vertex);
     }
 
     private static List<CacheCostSample> cacheCostSamples(

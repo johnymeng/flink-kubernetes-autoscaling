@@ -63,7 +63,11 @@ skew at most 5 s and end age at most 30 s. The skew check assumes synchronized w
 `IDLE`, `ABSENT`, `WARMUP`, `SHARED_CACHE`, `INCOMPLETE`, `COUNTER_RESET` and
 `CACHE_CHANGED` all withhold a curve. Unknown schema versions, unknown populations, mismatched
 attempts and incompatible bins are explicit invalid states. ABI-3 timing fields are carried on
-their existing separately selected path. A timing sample's presence alone does not establish a
+their existing separately selected path. Timing wire version 3 appends the process UUID and
+monotonic capture time to the existing ABI-3 counter sequence. The versioned REST selector
+exposes them as process and observedAtNanos while retaining timingAbi 3. They bind timing to the
+QuickMRC cache and allow elapsed windows within one process. Older timing payloads remain
+readable for diagnostics. A timing sample's presence alone does not establish a
 compatible MRC window or population.
 
 The codec preserves small JSON and sends larger values as `a4s-gzip-v1:<base64>`, with an

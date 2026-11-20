@@ -7,6 +7,9 @@ Run from the repository root.
 
 Provide one CSV row per non-overlapping measurement window.
   capacity_bytes,records,lookups,misses,busy_seconds[,predicted_miss_rate]
+Optional evidence columns: trial_id,forecast_at_ms,window_start_ms.
+When trial IDs are present, each entire trial must belong to one capacity.
+Provide both timestamps for dated forecasts and freeze the prediction before the window.
 
 Counts and busy seconds are deltas summed across the same vertex's subtasks.
 Use exact resident counters from the physical LRU lookups that feed the MRC, and hold
@@ -29,6 +32,7 @@ Holdout errors are signed as predicted minus observed.
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -53,6 +57,9 @@ class Window:
     misses: int
     busy_seconds: float
     predicted_miss_rate: Optional[float] = None
+    trial_id: Optional[str] = None
+    forecast_at_ms: Optional[int] = None
+    window_start_ms: Optional[int] = None
 
     @property
     def miss_rate(self):
@@ -80,6 +87,8 @@ def read_windows(path):
                 if None in row or any(row[column] is None for column in REQUIRED_COLUMNS):
                     raise ValueError("wrong number of CSV fields")
                 predicted = (row.get("predicted_miss_rate") or "").strip()
+                forecast_at = (row.get("forecast_at_ms") or "").strip()
+                window_start = (row.get("window_start_ms") or "").strip()
                 window = Window(
                     capacity_bytes=int(row["capacity_bytes"]),
                     records=int(row["records"]),
@@ -87,6 +96,9 @@ def read_windows(path):
                     misses=int(row["misses"]),
                     busy_seconds=float(row["busy_seconds"]),
                     predicted_miss_rate=float(predicted) if predicted else None,
+                    trial_id=(row.get("trial_id") or "").strip() or None,
+                    forecast_at_ms=int(forecast_at) if forecast_at else None,
+                    window_start_ms=int(window_start) if window_start else None,
                 )
                 if window.capacity_bytes < 0 or min(window.records, window.lookups) <= 0:
                     raise ValueError("capacity must be nonnegative and records/lookups positive")
@@ -99,6 +111,14 @@ def read_windows(path):
                     and not 0 <= window.predicted_miss_rate <= 1
                 ):
                     raise ValueError("predicted_miss_rate must be a fraction between zero and one")
+                if window.forecast_at_ms is not None or window.window_start_ms is not None:
+                    if (
+                        window.predicted_miss_rate is None
+                        or window.forecast_at_ms is None
+                        or window.window_start_ms is None
+                        or not 0 <= window.forecast_at_ms <= window.window_start_ms
+                    ):
+                        raise ValueError("dated forecasts must precede the holdout window")
             except ValueError as error:
                 raise ValueError(f"CSV line {rows.line_num}: {error}") from error
             yield window
@@ -172,6 +192,12 @@ def describe_holdout(window, hit_sec, penalty_sec):
         "observed_miss_rate": window.miss_rate,
         "observed_service_sec_per_record": observed_sec,
         "predicted_miss_rate": predicted_rate,
+        "trial_id": window.trial_id,
+        "forecast_at_ms": window.forecast_at_ms,
+        "window_start_ms": window.window_start_ms,
+        "actual_miss_plug_in_error_sec_per_record": (
+            hit_sec + penalty_sec * window.miss_rate - observed_sec
+        ),
     }
     if predicted_rate is not None:
         calibrated_sec = hit_sec + penalty_sec * predicted_rate
@@ -188,8 +214,18 @@ def describe_holdout(window, hit_sec, penalty_sec):
 
 def calibrate(windows, holdout_capacity, vertex):
     by_capacity = defaultdict(list)
+    trial_capacities = {}
+    unidentified_trials = False
     for window in windows:
         by_capacity[window.capacity_bytes].append(window)
+        if window.trial_id is None:
+            unidentified_trials = True
+        else:
+            capacity = trial_capacities.setdefault(window.trial_id, window.capacity_bytes)
+            if capacity != window.capacity_bytes:
+                raise ValueError("a trial spans multiple capacities and cannot be split safely")
+    if trial_capacities and unidentified_trials:
+        raise ValueError("provide trial IDs for every window or use the legacy capacity-only format")
     holdout = by_capacity.pop(holdout_capacity, None)
     if not holdout:
         raise ValueError("no windows found at the requested holdout capacity")
@@ -208,8 +244,24 @@ def calibrate(windows, holdout_capacity, vertex):
         for capacity_windows in by_capacity.values()
         for window in capacity_windows
     ]
+    training_receipt = [
+        (window.capacity_bytes, window.records, window.lookups, window.misses, window.busy_seconds)
+        for window in training
+    ]
+    model_fingerprint = hashlib.sha256(
+        json.dumps([hit_sec, penalty_sec, training_receipt], separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     evidence = {
         "vertex_id": vertex,
+        "model_sha256": model_fingerprint,
+        "training_split": "whole_trial" if trial_capacities else "capacity_only",
+        "training_trial_ids": sorted(
+            trial for trial, capacity in trial_capacities.items() if capacity != holdout_capacity
+        ),
+        "holdout_trial_ids": sorted(
+            trial for trial, capacity in trial_capacities.items() if capacity == holdout_capacity
+        ),
+        "holdout_forecasts_dated": all(window.forecast_at_ms is not None for window in holdout),
         "hit_sec_per_record": hit_sec,
         "miss_penalty_sec_per_record": penalty_sec,
         "legacy_hit_sec_per_record": LEGACY_HIT_SEC,

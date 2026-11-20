@@ -53,7 +53,11 @@ boundary. Deduplicate by (TaskManager process generation, native cache ID), even
 if two task attempts report it. Never reuse an ID across a process restart
 merely because the numeric ID matches.
 
-## What still blocks a controller estimate
+## Connecting the native snapshot to the controller
+
+The [QuickMRC observation contract](a4s-cache-observations-v1.md) and
+[online cost model](a4s-online-quickmrc-cost.md) describe runtime pairing and
+controller hold behavior.
 
 A caller has to bracket the native observation with its monotonic poll times
 and align the two boundaries with **the same subtask attempt's** processed
@@ -64,9 +68,9 @@ Do not run a second sampler on another wrapper around the same physical
 cache. A task-level reporter must prove, not assume, the P=1 trial has one
 exclusive cache owner and no unrelated traffic (a shared RocksDB cache can
 include lookups for other operators/backends). Even with clean alignment,
-infer a workload marginal cost using held-out controlled fixed-parallelism
-cache-capacity interventions, not these counters alone; current A4S constants
-still apply and existing placement and rescaling behavior remains unchanged.
+validate the workload marginal cost using held-out, controlled fixed-parallelism
+cache-capacity interventions. The controller combines these counters with task
+and timing measurements under the model's qualification rules.
 
 ## Focused verification
 
