@@ -37,6 +37,8 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.EmptyResponseBody;
 import org.apache.flink.runtime.rest.util.RestMapperUtils;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -94,8 +96,7 @@ class NativeJustinSameParallelismTransportTest {
                 new JustinVertexResourceRequirements.Parallelism(1, 2), profile);
         var mapper = RestMapperUtils.getStrictObjectMapper();
         var body = new JustinResourceRequirementsBody(new JustinResourceRequirements(Map.of(id, requirements)));
-        var getResponse = mapper.createObjectNode();
-        getResponse.setAll(mapper.valueToTree(body));
+        ObjectNode getResponse = mapper.valueToTree(body);
         getResponse.putObject("appliedSlots").put("capturedAtMillis", 17L).putArray("tasks");
 
         assertEquals(body, mapper.treeToValue(getResponse, JustinResourceRequirementsBody.class));

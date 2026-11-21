@@ -17,12 +17,14 @@
  */
 package org.apache.flink.runtime.jobgraph.justin;
 
+import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.dispatcher.SingleJobJobGraphStore;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsBody;
+import org.apache.flink.runtime.rest.messages.taskmanager.SlotInfo;
 import org.apache.flink.runtime.rest.util.RestMapperUtils;
 import org.apache.flink.util.InstantiationUtil;
 
@@ -80,6 +82,12 @@ class JustinResourceRequirementsSerializationTest {
         assertThat(observed.getAppliedSlots().capturedAtMillis).isEqualTo(17L);
         assertThat(observed.getAppliedSlots().tasks.get(0).profile).isEqualTo(physical);
         assertThat(observed.getAppliedSlots().tasks.get(0).attempt).isEqualTo("attempt");
+
+        SlotInfo worker = new SlotInfo(new JobID(), physical,
+                observed.getAppliedSlots().tasks.get(0).allocation);
+        SlotInfo restoredSlot = mapper.readValue(mapper.writeValueAsBytes(worker), SlotInfo.class);
+        assertThat(restoredSlot).isEqualTo(worker);
+        assertThat(restoredSlot.getExactProfile()).isEqualTo(physical);
     }
 
     @Test
