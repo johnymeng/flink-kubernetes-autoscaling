@@ -1,0 +1,650 @@
+diff --git a/cache/lru_cache.cc b/cache/lru_cache.cc
+index 93443185ee7e69be3205a216b5b5dc34bb8e3ff8..6428e39f6dcb22d95cc2ae1f408b89f2e64ca853 100644
+--- a/cache/lru_cache.cc
++++ b/cache/lru_cache.cc
+@@ -818,37 +818,39 @@ std::string LRUCacheShard::GetPrintableOptions() const {
+   return std::string(buffer);
+ }
+
+-std::vector<uint64_t> LRUCacheShard::GetQuickMRCStackDistanceHistogram() const {
++std::vector<uint64_t> LRUCacheShard::GetQuickMRCStackDistanceHistogram(
++    uint64_t* complete_misses) const {
+   MutexLock l(&mutex_);
+-  return quick_mrc_histogram_;
++  if (complete_misses != nullptr) {
++    *complete_misses =
++        quick_mrc_complete_miss_count_ - quick_mrc_legacy_base_complete_misses_;
++  }
++  auto bins = quick_mrc_histogram_;
++  for (size_t i = 0; i < quick_mrc_legacy_base_bins_.size(); ++i) {
++    bins[i] -= quick_mrc_legacy_base_bins_[i];
++  }
++  while (!bins.empty() && bins.back() == 0) {
++    bins.pop_back();
++  }
++  return bins;
+ }
+
+ uint64_t LRUCacheShard::GetQuickMRCCompleteMissCount() const {
+   MutexLock l(&mutex_);
+-  return quick_mrc_complete_miss_count_;
++  return quick_mrc_complete_miss_count_ - quick_mrc_legacy_base_complete_misses_;
+ }
+
+ void LRUCacheShard::ResetQuickMRCStats() {
+   MutexLock l(&mutex_);
+-  quick_mrc_histogram_.clear();
+-  quick_mrc_complete_miss_count_ = 0;
+-  quick_mrc_cache_buckets_.clear();
+-  quick_mrc_ghost_buckets_.clear();
+-  quick_mrc_ghost_index_.clear();
+-  quick_mrc_ghost_lru_.clear();
+-  quick_mrc_resident_units_ = 0;
+-  quick_mrc_resident_entries_ = 0;
+-  quick_mrc_next_bucket_id_ = 1;
+-  table_.ApplyToAllCacheEntries([this](LRUHandle* h) {
+-    h->quick_mrc_in_bucket = false;
+-    h->quick_mrc_bucket_id = 0;
+-    h->quick_mrc_charge_units = 0;
+-    if (h->InCache()) {
+-      quick_mrc_resident_entries_++;
+-      quick_mrc_resident_units_ += QuickMRCChargeUnits(h->charge);
+-      QuickMRCTouchCacheHandle(h);
+-    }
+-  });
++  // Reset only the legacy reporting interval. Recency, ghosts and sampling
++  // state belong to the cache's lifetime, independent of its observers.
++  if (a4s_count_cache_lookups_) {
++    quick_mrc_legacy_base_bins_ = quick_mrc_histogram_;
++    quick_mrc_legacy_base_complete_misses_ = quick_mrc_complete_miss_count_;
++  } else {
++    quick_mrc_histogram_.clear();
++    quick_mrc_complete_miss_count_ = 0;
++  }
+ }
+
+ LRUCache::LRUCache(size_t capacity, int num_shard_bits,
+@@ -946,9 +948,10 @@ std::vector<uint64_t> LRUCache::GetQuickMRCStackDistanceHistogram() const {
+   std::vector<uint64_t> merged;
+   uint64_t complete_miss_count = 0;
+   for (int i = 0; i < num_shards_; i++) {
++    uint64_t shard_misses = 0;
+     std::vector<uint64_t> shard_hist =
+-        shards_[i].GetQuickMRCStackDistanceHistogram();
+-    complete_miss_count += shards_[i].GetQuickMRCCompleteMissCount();
++        shards_[i].GetQuickMRCStackDistanceHistogram(&shard_misses);
++    complete_miss_count += shard_misses;
+     if (merged.size() < shard_hist.size()) {
+       merged.resize(shard_hist.size(), 0);
+     }
+@@ -966,10 +969,29 @@ bool LRUCacheShard::GetA4SCacheLookupCounters(
+     return false;
+   }
+   MutexLock l(&mutex_);
++  CopyA4SCacheLookupCounters(snapshot);
++  return true;
++}
++
++void LRUCacheShard::CopyA4SCacheLookupCounters(
++    A4SCacheLookupSnapshot* snapshot) const {
+   snapshot->capacity_bytes = capacity_;
+   snapshot->capacity_generation = a4s_capacity_generation_;
+   snapshot->lookups = a4s_lookups_;
+   snapshot->resident_misses = a4s_resident_misses_;
++}
++
++bool LRUCacheShard::GetA4SQuickMrcSnapshot(A4SQuickMrcSnapshot* snapshot) {
++  if (!a4s_count_cache_lookups_) {
++    return false;
++  }
++  // Lookup and SetCapacity use this lock for their relevant updates. Never
++  // acquire ShardedCache's capacity mutex here: resize takes it before mutex_.
++  MutexLock l(&mutex_);
++  snapshot->finite_bins = quick_mrc_histogram_;
++  snapshot->complete_misses = quick_mrc_complete_miss_count_;
++  CopyA4SCacheLookupCounters(&snapshot->lookup);
++  snapshot->sequence = ++a4s_snapshot_sequence_;
+   return true;
+ }
+
+@@ -984,6 +1006,17 @@ bool LRUCache::GetA4SCacheLookupSnapshot(
+   return true;
+ }
+
++bool LRUCache::GetA4SQuickMrcSnapshot(A4SQuickMrcSnapshot* snapshot) {
++  if (num_shards_ != 1 || a4s_cache_id_ == 0 ||
++      !shards_[0].GetA4SQuickMrcSnapshot(snapshot)) {
++    return false;
++  }
++  // These attributes are immutable for the lifetime of the cache.
++  snapshot->lookup.cache_id = a4s_cache_id_;
++  snapshot->lookup.shard_count = num_shards_;
++  return true;
++}
++
+ void LRUCache::ResetQuickMRCStats() {
+   for (int i = 0; i < num_shards_; i++) {
+     shards_[i].ResetQuickMRCStats();
+diff --git a/cache/lru_cache.h b/cache/lru_cache.h
+index 1d01515fb579bedabc7ed1ec190503b61520698f..87d096de8f21da5dc1e0a90b060fd64c69ca023a 100644
+--- a/cache/lru_cache.h
++++ b/cache/lru_cache.h
+@@ -208,6 +208,17 @@ struct A4SCacheLookupSnapshot {
+   uint64_t resident_misses = 0;
+ };
+
++// A coherent cumulative sample. Subtract endpoints from the same cache and
++// capacity generation to obtain an interval. Bins can grow; absent bins in an
++// earlier sample are zero. Sequence counts observations, not lookups.
++struct A4SQuickMrcSnapshot {
++  static constexpr uint64_t kSchemaVersion = 1;
++  A4SCacheLookupSnapshot lookup;
++  uint64_t sequence = 0;
++  uint64_t complete_misses = 0;
++  std::vector<uint64_t> finite_bins;
++};
++
+ // A single shard of sharded cache.
+ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+  public:
+@@ -258,10 +269,12 @@ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+
+   virtual std::string GetPrintableOptions() const override;
+
+-  std::vector<uint64_t> GetQuickMRCStackDistanceHistogram() const;
++  std::vector<uint64_t> GetQuickMRCStackDistanceHistogram(
++      uint64_t* complete_misses = nullptr) const;
+   void ResetQuickMRCStats();
+   uint64_t GetQuickMRCCompleteMissCount() const;
+   bool GetA4SCacheLookupCounters(A4SCacheLookupSnapshot* snapshot) const;
++  bool GetA4SQuickMrcSnapshot(A4SQuickMrcSnapshot* snapshot);
+
+   void TEST_GetLRUList(LRUHandle** lru, LRUHandle** lru_low_pri);
+
+@@ -296,6 +309,8 @@ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+   void QuickMRCInsertGhost(const Slice& key, size_t charge);
+   bool QuickMRCProbeGhost(const Slice& key);
+   void QuickMRCEnforceGhostCapacity();
++  // Requires mutex_.
++  void CopyA4SCacheLookupCounters(A4SCacheLookupSnapshot* snapshot) const;
+
+   void LRU_Remove(LRUHandle* e);
+   void LRU_Insert(LRUHandle* e);
+@@ -363,6 +378,7 @@ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+   uint64_t a4s_capacity_generation_ = 0;
+   uint64_t a4s_lookups_ = 0;
+   uint64_t a4s_resident_misses_ = 0;
++  uint64_t a4s_snapshot_sequence_ = 0;
+
+   // quickMRC config
+   bool quick_mrc_enabled_;
+@@ -380,7 +396,10 @@ class ALIGN_AS(CACHE_LINE_SIZE) LRUCacheShard final : public CacheShard {
+   std::deque<QuickMRCBucket> quick_mrc_ghost_buckets_;
+   std::unordered_map<std::string, QuickMRCGhostEntry> quick_mrc_ghost_index_;
+   std::list<std::string> quick_mrc_ghost_lru_;
++  // Cumulative when A4S counting is enabled, otherwise legacy interval counts.
+   std::vector<uint64_t> quick_mrc_histogram_;
++  std::vector<uint64_t> quick_mrc_legacy_base_bins_;
++  uint64_t quick_mrc_legacy_base_complete_misses_ = 0;
+ };
+
+ class LRUCache
+@@ -420,6 +439,7 @@ class LRUCache
+
+   // V1 supports a single physical shard so there is one snapshot boundary.
+   bool GetA4SCacheLookupSnapshot(A4SCacheLookupSnapshot* snapshot) const;
++  bool GetA4SQuickMrcSnapshot(A4SQuickMrcSnapshot* snapshot);
+
+  private:
+   LRUCacheShard* shards_ = nullptr;
+diff --git a/cache/lru_cache_test.cc b/cache/lru_cache_test.cc
+index b057d3400cdb995560fa21bbbfae685bc019b249..8b92d404b6092c4d5955e7bb3a1e875a2c185a89 100644
+--- a/cache/lru_cache_test.cc
++++ b/cache/lru_cache_test.cc
+@@ -7,6 +7,9 @@
+
+ #include <atomic>
+ #include <string>
++#include <cstdlib>
++#include <future>
++#include <numeric>
+ #include <thread>
+ #include <vector>
+ #include "port/port.h"
+@@ -29,7 +32,8 @@ class LRUCacheTest : public testing::Test {
+
+   void NewCache(size_t capacity, double high_pri_pool_ratio = 0.0,
+                 bool use_adaptive_mutex = kDefaultToAdaptiveMutex,
+-                bool count_a4s_lookups = false) {
++                bool count_a4s_lookups = false,
++                uint32_t max_bucket_size = 60, double sampling_rate = 1.0) {
+     DeleteCache();
+     cache_ = reinterpret_cast<LRUCacheShard*>(
+         port::cacheline_aligned_alloc(sizeof(LRUCacheShard)));
+@@ -37,9 +41,9 @@ class LRUCacheTest : public testing::Test {
+                                high_pri_pool_ratio, use_adaptive_mutex,
+                                kDontChargeCacheMetadata,
+                                true /*quick_mrc_enabled*/,
+-                               60 /*quick_mrc_max_bucket_size*/,
++                               max_bucket_size,
+                                1 /*quick_mrc_ghost_cache_multiplier*/,
+-                               1.0 /*quick_mrc_sampling_rate*/,
++                               sampling_rate,
+                                1 /*quick_mrc_histogram_bin_size*/,
+                                count_a4s_lookups);
+   }
+@@ -212,28 +216,18 @@ TEST_F(LRUCacheTest, QuickMRCHistogramTracksHitsAndGhostHits) {
+
+   std::vector<uint64_t> histogram = cache_->GetQuickMRCStackDistanceHistogram();
+   ASSERT_FALSE(histogram.empty());
+-  uint64_t total = 0;
+-  for (size_t i = 0; i + 1 < histogram.size(); ++i) {
+-    total += histogram[i];
+-  }
+-  ASSERT_GE(total, 2U);
++  ASSERT_EQ(2U, std::accumulate(histogram.begin(), histogram.end(), uint64_t{0}));
+   cache_->ResetQuickMRCStats();
+-  std::vector<uint64_t> reset_hist = cache_->GetQuickMRCStackDistanceHistogram();
+-  ASSERT_EQ(1U, reset_hist.size());
+-  ASSERT_EQ(0U, reset_hist.back());
++  ASSERT_TRUE(cache_->GetQuickMRCStackDistanceHistogram().empty());
++  ASSERT_EQ(0U, cache_->GetQuickMRCCompleteMissCount());
+ }
+
+ TEST_F(LRUCacheTest, QuickMRCAppendsCompleteMissBucket) {
+-  NewCache(3);
+-  Insert("a");
+-  Insert("b");
+-
+-  ASSERT_FALSE(Lookup("x"));
+-  ASSERT_FALSE(Lookup("y"));
+-
+-  std::vector<uint64_t> histogram = cache_->GetQuickMRCStackDistanceHistogram();
+-  ASSERT_FALSE(histogram.empty());
+-  ASSERT_EQ(2U, histogram.back());
++  LRUCache cache(3, 0, false, 0.0, nullptr, kDefaultToAdaptiveMutex,
++                 kDontChargeCacheMetadata, true, 1, 1, 1.0, 1);
++  ASSERT_EQ(nullptr, cache.Lookup("x", nullptr));
++  ASSERT_EQ(nullptr, cache.Lookup("y", nullptr));
++  ASSERT_EQ(std::vector<uint64_t>({2}), cache.GetQuickMRCStackDistanceHistogram());
+ }
+
+ TEST_F(LRUCacheTest, QuickMRCResidentUnitFitsFirstBin) {
+@@ -253,6 +247,185 @@ TEST_F(LRUCacheTest, A4SLookupAccountingIsOffByDefault) {
+   ASSERT_FALSE(Lookup("cold"));
+   A4SCacheLookupSnapshot snapshot;
+   ASSERT_FALSE(cache_->GetA4SCacheLookupCounters(&snapshot));
++  A4SQuickMrcSnapshot quick_mrc;
++  ASSERT_FALSE(cache_->GetA4SQuickMrcSnapshot(&quick_mrc));
++}
++
++TEST_F(LRUCacheTest, A4SResetKeepsGhostReuseAcrossPoll) {
++  NewCache(3, 0.0, kDefaultToAdaptiveMutex, true, 1);
++  Insert("a");
++  Insert("b");
++  Insert("c");
++  Insert("d");  // "a" now lives in the ghost index.
++  cache_->ResetQuickMRCStats();
++
++  ASSERT_FALSE(Lookup("a"));
++  EXPECT_EQ(0U, cache_->GetQuickMRCCompleteMissCount());
++  EXPECT_FALSE(cache_->GetQuickMRCStackDistanceHistogram().empty());
++}
++
++TEST_F(LRUCacheTest, A4SResetKeepsNextResidentDistance) {
++  auto next_distance = [this](bool poll) {
++    NewCache(3, 0.0, kDefaultToAdaptiveMutex, true, 1);
++    Insert("a");
++    Insert("b");
++    Insert("c");
++    EXPECT_TRUE(Lookup("a"));  // Resident recency now differs from hash traversal order.
++    const auto before = cache_->GetQuickMRCStackDistanceHistogram();
++    if (poll) {
++      cache_->ResetQuickMRCStats();
++    }
++    EXPECT_TRUE(Lookup("a"));
++    auto after = cache_->GetQuickMRCStackDistanceHistogram();
++    if (!poll) {
++      for (size_t i = 0; i < before.size(); ++i) {
++        after[i] -= before[i];
++      }
++      while (!after.empty() && after.back() == 0) {
++        after.pop_back();
++      }
++    }
++    return after;
++  };
++  EXPECT_EQ(next_distance(false), next_distance(true));
++}
++
++TEST_F(LRUCacheTest, A4SSnapshotsConserveLookupsAcrossBarrierAndLegacyReset) {
++  NewCache(3, 0.0, kDefaultToAdaptiveMutex, true, 1);
++  Insert("resident");
++  A4SQuickMrcSnapshot before;
++  ASSERT_TRUE(cache_->GetA4SQuickMrcSnapshot(&before));
++
++  std::promise<void> first_access;
++  auto first_access_done = first_access.get_future();
++  std::promise<void> continue_access;
++  auto resume = continue_access.get_future();
++  std::thread writer([&] {
++    EXPECT_TRUE(Lookup("resident"));
++    EXPECT_FALSE(Lookup("cold-first"));
++    first_access.set_value();
++    resume.wait();
++    EXPECT_TRUE(Lookup("resident"));
++    EXPECT_FALSE(Lookup("cold-second"));
++  });
++  first_access_done.wait();
++  A4SQuickMrcSnapshot middle;
++  EXPECT_TRUE(cache_->GetA4SQuickMrcSnapshot(&middle));
++  cache_->ResetQuickMRCStats();
++  continue_access.set_value();
++  writer.join();
++  A4SQuickMrcSnapshot after;
++  ASSERT_TRUE(cache_->GetA4SQuickMrcSnapshot(&after));
++
++  EXPECT_EQ(before.sequence + 1, middle.sequence);
++  EXPECT_EQ(middle.sequence + 1, after.sequence);
++  EXPECT_EQ(0U, before.lookup.lookups);
++  EXPECT_EQ(2U, middle.lookup.lookups);
++  EXPECT_EQ(1U, middle.lookup.resident_misses);
++  EXPECT_EQ(1U, middle.complete_misses);
++  EXPECT_EQ(std::vector<uint64_t>({1}), middle.finite_bins);
++  EXPECT_EQ(4U, after.lookup.lookups);
++  EXPECT_EQ(2U, after.lookup.resident_misses);
++  EXPECT_EQ(2U, after.complete_misses);
++  EXPECT_EQ(std::vector<uint64_t>({2}), after.finite_bins);
++  EXPECT_EQ(1U, cache_->GetQuickMRCCompleteMissCount());
++  EXPECT_EQ(std::vector<uint64_t>({1}), cache_->GetQuickMRCStackDistanceHistogram());
++}
++
++TEST_F(LRUCacheTest, A4SObservationDeltasAreIndependentOfPollingPositions) {
++  auto replay = [this](size_t poll_every) {
++    NewCache(3, 0.0, kDefaultToAdaptiveMutex, true, 1, 0.5);
++    A4SQuickMrcSnapshot total;
++    A4SQuickMrcSnapshot previous;
++    size_t actions = 0;
++    auto poll = [&] {
++      A4SQuickMrcSnapshot now;
++      EXPECT_TRUE(cache_->GetA4SQuickMrcSnapshot(&now));
++      EXPECT_EQ(previous.sequence + 1, now.sequence);
++      total.lookup.lookups += now.lookup.lookups - previous.lookup.lookups;
++      total.lookup.resident_misses +=
++          now.lookup.resident_misses - previous.lookup.resident_misses;
++      total.complete_misses += now.complete_misses - previous.complete_misses;
++      total.finite_bins.resize(now.finite_bins.size(), 0);
++      for (size_t i = 0; i < now.finite_bins.size(); ++i) {
++        uint64_t earlier = i < previous.finite_bins.size() ? previous.finite_bins[i] : 0;
++        EXPECT_GE(now.finite_bins[i], earlier);
++        total.finite_bins[i] += now.finite_bins[i] - earlier;
++      }
++      previous = std::move(now);
++      cache_->ResetQuickMRCStats();  // A legacy observer cannot drain the cumulative stream.
++    };
++    auto maybe_poll = [&] {
++      if (poll_every != 0 && ++actions % poll_every == 0) {
++        poll();
++      }
++    };
++    for (int pass = 0; pass < 8; ++pass) {
++      for (char key : std::string("abcd")) {
++        Insert(key);
++        maybe_poll();
++      }
++      for (char key : std::string("dbaxcby")) {
++        Lookup(key);
++        maybe_poll();
++      }
++    }
++    poll();
++    return total;
++  };
++  auto unpolled = replay(0);
++  ASSERT_EQ(56U, unpolled.lookup.lookups);
++  ASSERT_FALSE(unpolled.finite_bins.empty());
++  ASSERT_GT(unpolled.complete_misses, 0U);
++  for (size_t cadence : {1, 3, 11}) {
++    auto polled = replay(cadence);
++    EXPECT_EQ(unpolled.lookup.lookups, polled.lookup.lookups);
++    EXPECT_EQ(unpolled.lookup.resident_misses, polled.lookup.resident_misses);
++    EXPECT_EQ(unpolled.complete_misses, polled.complete_misses);
++    EXPECT_EQ(unpolled.finite_bins, polled.finite_bins);
++  }
++}
++
++TEST_F(LRUCacheTest, A4SSnapshotIdentityAndCapacityGeneration) {
++  LRUCache cache(3, 0, false, 0.0, nullptr, kDefaultToAdaptiveMutex,
++                 kDontChargeCacheMetadata, true, 1, 1, 1.0, 1);
++  LRUCache multishard(4, 1, false, 0.0, nullptr, kDefaultToAdaptiveMutex,
++                      kDontChargeCacheMetadata, true, 1, 1, 1.0, 1);
++  A4SQuickMrcSnapshot snapshot;
++  EXPECT_FALSE(multishard.GetA4SQuickMrcSnapshot(&snapshot));
++  const char* setting = std::getenv("FLINK_A4S_COUNT_CACHE_LOOKUPS");
++  if (setting == nullptr || std::string(setting) != "1") {
++    EXPECT_FALSE(cache.GetA4SQuickMrcSnapshot(&snapshot));
++    return;
++  }
++  ASSERT_TRUE(cache.GetA4SQuickMrcSnapshot(&snapshot));
++  const auto initial = snapshot;
++  EXPECT_GT(initial.lookup.cache_id, 0U);
++  EXPECT_EQ(1U, initial.lookup.shard_count);
++  EXPECT_EQ(1U, initial.sequence);
++  EXPECT_EQ(3U, initial.lookup.capacity_bytes);
++  ASSERT_EQ(nullptr, cache.Lookup("cold", nullptr));
++  cache.SetCapacity(5);
++  cache.SetCapacity(3);
++  cache.SetCapacity(3);
++  A4SCacheLookupSnapshot exact;
++  ASSERT_TRUE(cache.GetA4SCacheLookupSnapshot(&exact));
++  ASSERT_TRUE(cache.GetA4SQuickMrcSnapshot(&snapshot));
++  EXPECT_EQ(initial.lookup.cache_id, snapshot.lookup.cache_id);
++  EXPECT_EQ(initial.lookup.capacity_bytes, snapshot.lookup.capacity_bytes);
++  EXPECT_EQ(initial.lookup.capacity_generation + 2, snapshot.lookup.capacity_generation);
++  EXPECT_EQ(exact.capacity_generation, snapshot.lookup.capacity_generation);
++  EXPECT_EQ(exact.lookups, snapshot.lookup.lookups);
++  EXPECT_EQ(exact.resident_misses, snapshot.lookup.resident_misses);
++  EXPECT_EQ(1U, snapshot.complete_misses);
++  EXPECT_EQ(2U, snapshot.sequence);
++
++  LRUCache replacement(3, 0, false, 0.0, nullptr, kDefaultToAdaptiveMutex,
++                       kDontChargeCacheMetadata, true, 1, 1, 1.0, 1);
++  ASSERT_TRUE(replacement.GetA4SQuickMrcSnapshot(&snapshot));
++  EXPECT_NE(initial.lookup.cache_id, snapshot.lookup.cache_id);
++  EXPECT_EQ(1U, snapshot.sequence);
++  EXPECT_EQ(0U, snapshot.lookup.lookups);
+ }
+
+ TEST_F(LRUCacheTest, A4SLookupCountsGhostMissAndIgnoresHistogramReset) {
+@@ -305,12 +478,19 @@ TEST_F(LRUCacheTest, A4SLookupSnapshotsAreCoherentDuringLookups) {
+   });
+
+   uint64_t last = 0;
++  uint64_t last_sequence = 0;
+   do {
+     A4SCacheLookupSnapshot snapshot;
+     EXPECT_TRUE(cache_->GetA4SCacheLookupCounters(&snapshot));
+     EXPECT_EQ(snapshot.lookups, snapshot.resident_misses);
+     EXPECT_GE(snapshot.lookups, last);
+     last = snapshot.lookups;
++    A4SQuickMrcSnapshot combined;
++    EXPECT_TRUE(cache_->GetA4SQuickMrcSnapshot(&combined));
++    EXPECT_EQ(++last_sequence, combined.sequence);
++    EXPECT_EQ(combined.lookup.lookups, combined.lookup.resident_misses);
++    EXPECT_EQ(combined.lookup.resident_misses, combined.complete_misses);
++    EXPECT_TRUE(combined.finite_bins.empty());
+   } while (!done.load(std::memory_order_acquire));
+
+   writer.join();
+diff --git a/java/rocksjni/lru_cache.cc b/java/rocksjni/lru_cache.cc
+index 530f9d2fed737983cf8a39b703dc99e7d7bcd912..69922619f5085b61b93a4ea14be1530a01dcb415 100644
+--- a/java/rocksjni/lru_cache.cc
++++ b/java/rocksjni/lru_cache.cc
+@@ -101,6 +101,72 @@ jlongArray Java_org_rocksdb_LRUCache_getA4SCacheLookupSnapshot(
+   return result;
+ }
+
++jlongArray Java_org_rocksdb_LRUCache_getA4SQuickMrcSnapshotNative(
++    JNIEnv* env, jclass /*jcls*/, jlong jhandle, jint expected_schema) {
++  using ROCKSDB_NAMESPACE::A4SQuickMrcSnapshot;
++  if (expected_schema != static_cast<jint>(A4SQuickMrcSnapshot::kSchemaVersion)) {
++    env->ThrowNew(env->FindClass("java/lang/UnsupportedOperationException"),
++                  "QuickMRC snapshot schema mismatch");
++    return nullptr;
++  }
++  auto* handle =
++      reinterpret_cast<std::shared_ptr<ROCKSDB_NAMESPACE::Cache>*>(jhandle);
++  if (handle == nullptr || !*handle) {
++    return nullptr;
++  }
++  auto* cache = static_cast<ROCKSDB_NAMESPACE::LRUCache*>(handle->get());
++  A4SQuickMrcSnapshot snapshot;
++  if (!cache->GetA4SQuickMrcSnapshot(&snapshot)) {
++    return nullptr;
++  }
++
++  const auto& lookup = snapshot.lookup;
++  const uint64_t header[] = {A4SQuickMrcSnapshot::kSchemaVersion,
++                             lookup.cache_id,
++                             lookup.capacity_bytes,
++                             lookup.capacity_generation,
++                             lookup.shard_count,
++                             snapshot.sequence,
++                             lookup.lookups,
++                             lookup.resident_misses,
++                             snapshot.complete_misses,
++                             snapshot.finite_bins.size()};
++  constexpr size_t header_length = sizeof(header) / sizeof(header[0]);
++  if (snapshot.finite_bins.size() >
++      static_cast<size_t>(std::numeric_limits<jsize>::max()) - header_length) {
++    env->ThrowNew(env->FindClass("java/lang/ArithmeticException"),
++                  "QuickMRC snapshot exceeds the Java array limit");
++    return nullptr;
++  }
++  std::vector<jlong> wire;
++  wire.reserve(header_length + snapshot.finite_bins.size());
++  auto append = [&](uint64_t value) {
++    if (value > static_cast<uint64_t>(std::numeric_limits<jlong>::max())) {
++      env->ThrowNew(env->FindClass("java/lang/ArithmeticException"),
++                    "QuickMRC counter exceeds the Java long limit");
++      return false;
++    }
++    wire.push_back(static_cast<jlong>(value));
++    return true;
++  };
++  for (auto value : header) {
++    if (!append(value)) {
++      return nullptr;
++    }
++  }
++  for (auto count : snapshot.finite_bins) {
++    if (!append(count)) {
++      return nullptr;
++    }
++  }
++  const auto length = static_cast<jsize>(wire.size());
++  auto result = env->NewLongArray(length);
++  if (result != nullptr) {
++    env->SetLongArrayRegion(result, 0, length, wire.data());
++  }
++  return result;
++}
++
+ void Java_org_rocksdb_LRUCache_resetQuickMRCStats(JNIEnv* /*env*/,
+                                                    jclass /*jcls*/,
+                                                    jlong jhandle) {
+diff --git a/java/src/main/java/org/rocksdb/LRUCache.java b/java/src/main/java/org/rocksdb/LRUCache.java
+index c08fe69473fc69935042af4dd5a9bd908edbc565..2c7103e412ac0339822abc09a9bdf239711766b3 100644
+--- a/java/src/main/java/org/rocksdb/LRUCache.java
++++ b/java/src/main/java/org/rocksdb/LRUCache.java
+@@ -9,6 +9,8 @@ package org.rocksdb;
+  * Least Recently Used Cache
+  */
+ public class LRUCache extends Cache {
++  public static final int A4S_QUICK_MRC_SNAPSHOT_VERSION = 1;
++  private static final int A4S_QUICK_MRC_HEADER_LENGTH = 10;
+
+   /**
+    * Create a new cache with a fixed size capacity
+@@ -110,7 +112,8 @@ public class LRUCache extends Cache {
+   }
+
+   /**
+-   * Resets collected quickMRC histogram statistics.
++   * Starts a new reporting interval for the legacy histogram getter. The
++   * estimator history and the cumulative A4S snapshot are unaffected.
+    */
+   public void resetQuickMRCStats() {
+     assert (isOwningHandle());
+@@ -132,6 +135,62 @@ public class LRUCache extends Cache {
+     return isOwningHandle() ? getA4SCacheLookupSnapshot(nativeHandle_) : null;
+   }
+
++  /**
++   * Returns a coherent cumulative QuickMRC sample from one physical shard.
++   *
++   * <p>V1 array: [schemaVersion, cacheId, capacityBytes, capacityGeneration,
++   * shardCount, snapshotSequence, totalLookups, totalResidentMisses,
++   * completeMisses, finiteBinCount, finiteBins...].
++   *
++   * <p>All counts are cumulative for this physical cache, independent of
++   * legacy reset calls. To obtain an interval, subtract samples with matching
++   * process-local cache ID, capacity and generation, and increasing sequence.
++   * Treat bins absent from the earlier sample as zero. A capacity change
++   * invalidates the pair, even when capacity has returned to its old size.
++   * This boundary covers the native cache only.
++   *
++   * @return the sample or null when closed, counting is disabled, or the
++   *     cache has more than one shard
++   * @throws UnsupportedOperationException if the JNI build or schema is incompatible
++   * @throws IllegalStateException if the native payload is malformed
++   * @throws ArithmeticException if native values cannot be represented in Java
++   */
++  public synchronized long[] getA4SQuickMrcSnapshot() {
++    if (!isOwningHandle()) {
++      return null;
++    }
++    try {
++      return validateA4SQuickMrcSnapshot(getA4SQuickMrcSnapshotNative(
++          nativeHandle_, A4S_QUICK_MRC_SNAPSHOT_VERSION));
++    } catch (final UnsatisfiedLinkError mismatch) {
++      throw new UnsupportedOperationException(
++          "QuickMRC snapshot requires a matching RocksDB JNI library", mismatch);
++    }
++  }
++
++  static long[] validateA4SQuickMrcSnapshot(final long[] sample) {
++    if (sample == null) {
++      return null;
++    }
++    if (sample.length > 0 && sample[0] != A4S_QUICK_MRC_SNAPSHOT_VERSION) {
++      throw new UnsupportedOperationException(
++          "Unsupported QuickMRC snapshot schema: " + sample[0]);
++    }
++    if (sample.length < A4S_QUICK_MRC_HEADER_LENGTH
++        || sample[1] <= 0 || sample[2] < 0 || sample[3] < 0
++        || sample[4] != 1 || sample[5] <= 0
++        || sample[6] < sample[7] || sample[7] < sample[8] || sample[8] < 0
++        || sample[9] != sample.length - A4S_QUICK_MRC_HEADER_LENGTH) {
++      throw new IllegalStateException("Malformed QuickMRC snapshot header");
++    }
++    for (int i = A4S_QUICK_MRC_HEADER_LENGTH; i < sample.length; i++) {
++      if (sample[i] < 0) {
++        throw new IllegalStateException("Negative QuickMRC finite bin count");
++      }
++    }
++    return sample;
++  }
++
+   @Override
+   public synchronized void close() {
+     // Keep the Java-owned pointer alive for the full snapshot JNI call.
+@@ -139,6 +198,8 @@ public class LRUCache extends Cache {
+   }
+
+   private native static long[] getA4SCacheLookupSnapshot(final long handle);
++  private native static long[] getA4SQuickMrcSnapshotNative(
++      final long handle, final int expectedSchema);
+
+   private native static long newLRUCache(final long capacity,
+       final int numShardBits, final boolean strictCapacityLimit,

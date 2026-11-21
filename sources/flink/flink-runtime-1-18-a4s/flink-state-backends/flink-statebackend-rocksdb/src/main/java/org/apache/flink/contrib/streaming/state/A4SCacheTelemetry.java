@@ -30,106 +30,117 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 
-/** Publishes the legacy QuickMRC stream once per cache interval. */
+/** One publisher per process-local native cache ID. */
 final class A4SCacheTelemetry {
     private static final Logger LOG = LoggerFactory.getLogger(A4SCacheTelemetry.class);
-    private static final Map<Cache, A4SCacheTelemetry> LIVE = new IdentityHashMap<>();
-    static final String PROCESS = UUID.randomUUID().toString();
+    private static final Registry LIVE = new Registry(UUID.randomUUID().toString());
     private static final long INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(10);
     private static final int MAX_BUCKETS = 65_536;
-    private static final Method LOOKUP_SNAPSHOT = lookupSnapshotMethod();
+    private static final int SNAPSHOT_HEADER = 10;
+    private static final Method LOOKUP_SNAPSHOT = method("getA4SCacheLookupSnapshot");
+    private static final Method QUICK_MRC_SNAPSHOT = method("getA4SQuickMrcSnapshot");
 
-    @Nullable private final Supplier<long[]> readNative;
-    private final Supplier<long[]> drainHistogram;
+    private final String process;
+    private final long cacheId;
     private final double sampleRate;
     private final int binItems;
     private final A4SCacheSnapshots<Interval> snapshots = new A4SCacheSnapshots<>(INTERVAL_NANOS);
+    private final Map<Source, Integer> sources = new LinkedHashMap<>();
 
+    private boolean compatible = true;
+    private boolean sampled;
     @Nullable private long[] previous;
 
-    A4SCacheTelemetry(
-            @Nullable Supplier<long[]> readNative,
-            Supplier<long[]> drainHistogram,
-            double sampleRate,
-            int binItems) {
-        this.readNative = readNative;
-        this.drainHistogram = drainHistogram;
+    private A4SCacheTelemetry(String process, long cacheId, double sampleRate, int binItems) {
+        this.process = process;
+        this.cacheId = cacheId;
         this.sampleRate = sampleRate;
         this.binItems = binItems;
     }
 
-    static synchronized void register(Cache cache, double sampleRate, int binItems) {
-        if (cache instanceof LRUCache && sampleRate > 0 && binItems > 0) {
-            LRUCache lru = (LRUCache) cache;
-            LIVE.put(
-                    cache,
-                    new A4SCacheTelemetry(
-                            LOOKUP_SNAPSHOT == null ? null : () -> lookupSnapshot(lru),
-                            () -> {
-                                long[] counts = lru.getStackDistanceHistogram();
-                                lru.resetQuickMRCStats();
-                                return counts;
-                            },
-                            sampleRate,
-                            binItems));
+    static void register(Cache cache, double sampleRate, int binItems) {
+        if (sampleRate > 0 && binItems > 0) {
+            Source source = nativeSource(cache);
+            if (source != null) {
+                LIVE.register(cache, source, sampleRate, binItems);
+            }
         }
+    }
+
+    static void release(Cache cache) {
+        LIVE.release(cache);
     }
 
     @Nullable
-    static synchronized A4SCacheTelemetry find(Cache cache) {
-        return LIVE.get(cache);
+    static Lease attachBackend(@Nullable Cache cache) {
+        return attach(cache, false);
     }
 
-    static synchronized void release(Cache cache) {
-        A4SCacheTelemetry telemetry = LIVE.remove(cache);
-        if (telemetry != null) {
-            telemetry.snapshots.close();
+    @Nullable
+    static Lease attachMonitor(@Nullable Cache cache) {
+        return attach(cache, true);
+    }
+
+    @Nullable
+    private static Lease attach(@Nullable Cache cache, boolean monitor) {
+        Source source = nativeSource(cache);
+        return source == null ? null : LIVE.attach(source, monitor);
+    }
+
+    @Nullable
+    private static Source nativeSource(@Nullable Cache cache) {
+        if (!(cache instanceof LRUCache) || LOOKUP_SNAPSHOT == null || QUICK_MRC_SNAPSHOT == null) {
+            return null;
+        }
+        LRUCache lru = (LRUCache) cache;
+        try {
+            long[] identity = invoke(LOOKUP_SNAPSHOT, lru);
+            return identity != null && identity.length == 7 && identity[0] == 1
+                            && identity[1] > 0 && identity[4] == 1
+                    ? new Source(identity[1], identity[5], () -> invoke(QUICK_MRC_SNAPSHOT, lru))
+                    : null;
+        } catch (RuntimeException | LinkageError unavailable) {
+            LOG.debug("QuickMRC native cache identity is unavailable", unavailable);
+            return null;
         }
     }
 
-    long attach() {
-        return snapshots.attach();
-    }
-
-    void detach(long owner) {
-        snapshots.detach(owner);
-    }
-
-    boolean hasExclusiveOwner() {
-        return snapshots.hasExclusiveOwner();
-    }
-
-    String metric(String job, String vertex, int subtask, String attempt) {
-        return metric(job, vertex, subtask, attempt, System.nanoTime());
-    }
-
-    String metric(String job, String vertex, int subtask, String attempt, long nowNanos) {
+    private synchronized String metric(
+            long monitor, String job, String vertex, int subtask, String attempt, long nowNanos) {
         A4SCacheSnapshots.Publication<Interval> publication =
-                snapshots.poll(nowNanos, this::readInterval);
+                snapshots.poll(monitor, nowNanos, this::readInterval);
         Interval interval = publication.value;
-        Status status = !publication.exclusive ? Status.SHARED_CACHE : interval.status;
+        Status status = !compatible ? Status.INCOMPATIBLE
+                : publication.ownershipChanged ? Status.SHARED_CACHE
+                : publication.exclusive || interval.state == null
+                        ? interval.status : Status.SHARED_CACHE;
         CacheObservation.Window window = null;
-        if (interval != null && interval.after != null) {
-            long[] nativeState = interval.after;
+        // A lease transition invalidates eligibility immediately. Do not relabel the same
+        // native sequence as a new interval with a different owner set.
+        if (compatible && !publication.ownershipChanged && interval.state != null) {
+            long[] state = interval.state;
             window = new CacheObservation.Window(
-                    PROCESS,
-                    nativeState[1],
-                    nativeState[3],
-                    publication.sequence,
+                    process,
+                    cacheId,
+                    state[3],
+                    state[5],
                     publication.owners,
                     CacheObservation.QUICK_MRC,
                     CacheObservation.FIXED_4K,
                     CacheObservation.CACHE_POLICY,
                     sampleRate,
-                    nativeState[2],
+                    state[2],
                     publication.startNanos,
                     publication.endNanos,
                     interval.wallTime,
@@ -138,114 +149,274 @@ final class A4SCacheTelemetry {
         }
         return A4SHistogramMetricCodec.encode(
                 new CacheObservation(
-                        CacheObservation.VERSION,
-                        job,
-                        vertex,
-                        subtask,
-                        attempt,
-                        status,
-                        window,
-                        status == Status.VALID ? interval.histogram : null)
-                        .toMetricString());
+                        CacheObservation.VERSION, job, vertex, subtask, attempt, status, window,
+                        status == Status.VALID ? interval.histogram : null).toMetricString());
     }
 
     private Interval readInterval() {
-        if (readNative == null) {
-            return new Interval(Status.UNSUPPORTED_NATIVE);
-        }
         try {
-            long[] before = readNative.get();
-            if (!valid(before)) {
+            long[] state = null;
+            for (Source source : sources.keySet()) {
+                state = source.read.get();
+                if (state != null) {
+                    break;
+                }
+            }
+            if (state == null) {
                 previous = null;
                 return new Interval(Status.UNSUPPORTED_NATIVE);
             }
-            long[] counts = drainHistogram.get();
-            long[] after = readNative.get();
-            long[] baseline = previous;
-            previous = valid(after) ? after : null;
-            if (previous == null || !sameGeneration(before, after)) {
+            if (!valid(state)) {
+                previous = null;
+                return new Interval(Status.MALFORMED);
+            }
+            if (state[1] != cacheId) {
+                previous = null;
                 return new Interval(Status.CACHE_CHANGED);
             }
+            // A surviving native alias may outlive all local registrations. A fresh registry
+            // entry must not make a previously sampled physical cache exclusive again.
+            if (!sampled) {
+                if (state[5] > 1) {
+                    snapshots.disqualifyPriorUse();
+                }
+                sampled = true;
+            }
+            long[] baseline = previous;
+            previous = state.clone();
+            if (!compatible) {
+                return new Interval(Status.INCOMPATIBLE, previous, 0, 0, null);
+            }
             if (baseline == null) {
-                return new Interval(Status.WARMUP, after, 0, 0, null);
+                return new Interval(Status.WARMUP, previous, 0, 0, null);
             }
-            if (!sameGeneration(baseline, before)) {
-                return new Interval(Status.CACHE_CHANGED, after, 0, 0, null);
+            if (baseline[2] != state[2] || baseline[3] != state[3]) {
+                return new Interval(Status.CACHE_CHANGED, previous, 0, 0, null);
             }
-            long references = before[5] - baseline[5];
-            long misses = before[6] - baseline[6];
-            if (references < 0
-                    || misses < 0
-                    || misses > references
-                    || after[5] < before[5]
-                    || after[6] < before[6]) {
-                return new Interval(Status.COUNTER_RESET, after, 0, 0, null);
+            long references = state[6] - baseline[6];
+            long misses = state[7] - baseline[7];
+            long completeMisses = state[8] - baseline[8];
+            if (state[5] <= baseline[5] || references < 0 || misses < 0 || misses > references
+                    || completeMisses < 0 || completeMisses > misses || state.length < baseline.length) {
+                return new Interval(Status.COUNTER_RESET, previous, 0, 0, null);
             }
-            // The old native ABI exposes separate calls for counters, histogram and reset.
-            // Reject intervals whose publication boundary lost a material number of references.
-            if (after[5] - before[5] > references / 50) {
-                return new Interval(Status.INCOMPATIBLE, after, references, misses, null);
+            int populatedBins = 0;
+            for (int i = SNAPSHOT_HEADER; i < state.length; i++) {
+                long count = state[i] - (i < baseline.length ? baseline[i] : 0);
+                if (count < 0) {
+                    return new Interval(Status.COUNTER_RESET, previous, 0, 0, null);
+                }
+                if (count != 0) {
+                    populatedBins = i - SNAPSHOT_HEADER + 1;
+                }
             }
             if (references == 0) {
-                return new Interval(Status.IDLE, after, 0, 0, null);
+                return new Interval(Status.IDLE, previous, 0, 0, null);
             }
-            if (counts == null || counts.length < 2) {
-                return new Interval(Status.WARMUP, after, references, misses, null);
+            if (populatedBins == 0) {
+                return new Interval(Status.WARMUP, previous, references, misses, null);
             }
-            if (counts.length > MAX_BUCKETS + 1) {
-                return new Interval(Status.OVERSIZE, after, references, misses, null);
+            if (populatedBins > MAX_BUCKETS) {
+                return new Interval(Status.OVERSIZE, previous, references, misses, null);
             }
-            StackDistanceHistogram histogram =
-                    new StackDistanceHistogram(
-                            Arrays.copyOf(counts, counts.length - 1),
-                            counts[counts.length - 1],
-                            1,
-                            binItems,
-                            4096);
-            return new Interval(Status.VALID, after, references, misses, histogram);
-        } catch (RuntimeException | LinkageError error) {
+            long[] bins = Arrays.copyOfRange(state, SNAPSHOT_HEADER, SNAPSHOT_HEADER + populatedBins);
+            for (int i = 0; i < bins.length && i + SNAPSHOT_HEADER < baseline.length; i++) {
+                bins[i] -= baseline[i + SNAPSHOT_HEADER];
+            }
+            return new Interval(Status.VALID, previous, references, misses,
+                    new StackDistanceHistogram(bins, completeMisses, 1, binItems, 4096));
+        } catch (UnsupportedOperationException | LinkageError unavailable) {
+            previous = null;
+            return new Interval(Status.UNSUPPORTED_NATIVE);
+        } catch (RuntimeException error) {
             previous = null;
             LOG.debug("Could not read cache telemetry", error);
             return new Interval(Status.MALFORMED);
         }
     }
 
-    private static long[] lookupSnapshot(LRUCache cache) {
+    private void markRegistration(Source source) {
+        if (source.initialLookups != 0) {
+            snapshots.disqualifyPriorUse();
+        }
+        // The sequence also marks an allocation that used the cache without any
+        // counted lookups or metric polls. The marker does not become a fit endpoint.
         try {
-            return (long[]) LOOKUP_SNAPSHOT.invoke(cache);
+            long[] marker = source.read.get();
+            if (marker != null && valid(marker) && marker[1] == cacheId) {
+                if (marker[5] > 1) {
+                    snapshots.disqualifyPriorUse();
+                }
+                sampled = true;
+            }
+        } catch (RuntimeException | LinkageError unavailable) {
+            LOG.debug("Could not mark QuickMRC registration", unavailable);
+        }
+    }
+
+    private static boolean valid(long[] sample) {
+        if (sample.length < SNAPSHOT_HEADER || sample[0] != 1 || sample[1] <= 0
+                || sample[2] <= 0 || sample[3] < 0 || sample[4] != 1 || sample[5] <= 0
+                || sample[6] < sample[7] || sample[7] < sample[8] || sample[8] < 0
+                || sample[9] != sample.length - SNAPSHOT_HEADER) {
+            return false;
+        }
+        for (int i = SNAPSHOT_HEADER; i < sample.length; i++) {
+            if (sample[i] < 0) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Nullable
+    private static long[] invoke(Method method, LRUCache cache) {
+        try {
+            return (long[]) method.invoke(cache);
+        } catch (InvocationTargetException error) {
+            if (error.getCause() instanceof UnsupportedOperationException
+                    || error.getCause() instanceof LinkageError) {
+                throw new UnsupportedOperationException("QuickMRC JNI snapshot unavailable", error.getCause());
+            }
+            throw new IllegalStateException("Cannot read the native cache snapshot", error.getCause());
         } catch (ReflectiveOperationException error) {
             throw new IllegalStateException("Cannot read the native cache snapshot", error);
         }
     }
 
     @Nullable
-    private static Method lookupSnapshotMethod() {
+    private static Method method(String name) {
         try {
-            return LRUCache.class.getMethod("getA4SCacheLookupSnapshot");
+            return LRUCache.class.getMethod(name);
         } catch (NoSuchMethodException | LinkageError unavailable) {
             return null;
         }
     }
 
-    private static boolean valid(@Nullable long[] sample) {
-        return sample != null
-                && sample.length == 7
-                && sample[0] == 1
-                && sample[1] > 0
-                && sample[2] > 0
-                && sample[3] >= 0
-                && sample[4] == 1
-                && sample[5] >= sample[6]
-                && sample[6] >= 0;
+    static final class Source {
+        final long cacheId;
+        final long initialLookups;
+        final Supplier<long[]> read;
+
+        Source(long cacheId, long initialLookups, Supplier<long[]> read) {
+            this.cacheId = cacheId;
+            this.initialLookups = initialLookups;
+            this.read = read;
+        }
     }
 
-    private static boolean sameGeneration(long[] first, long[] second) {
-        return first[1] == second[1] && first[2] == second[2] && first[3] == second[3];
+    /** Lock order is registry, publisher, publication state. Readers never lock the registry. */
+    static final class Registry {
+        private final String process;
+        private final Map<Long, A4SCacheTelemetry> live = new HashMap<>();
+        // Wrapper tokens only pair allocation registration with release.
+        private final Map<Object, Source> allocations = new IdentityHashMap<>();
+
+        Registry(String process) {
+            this.process = process;
+        }
+
+        synchronized void register(Object allocation, Source source, double sampleRate, int binItems) {
+            if (allocations.putIfAbsent(allocation, source) != null) {
+                return;
+            }
+            A4SCacheTelemetry publisher = live.computeIfAbsent(source.cacheId, id -> {
+                A4SCacheTelemetry created = new A4SCacheTelemetry(process, id, sampleRate, binItems);
+                created.markRegistration(source);
+                return created;
+            });
+            synchronized (publisher) {
+                publisher.compatible &= publisher.sampleRate == sampleRate && publisher.binItems == binItems;
+                publisher.sources.merge(source, 1, Integer::sum);
+            }
+        }
+
+        @Nullable
+        synchronized Lease attach(Source source, boolean monitor) {
+            A4SCacheTelemetry publisher = live.get(source.cacheId);
+            if (publisher == null) {
+                return null;
+            }
+            synchronized (publisher) {
+                publisher.sources.merge(source, 1, Integer::sum);
+                return new Lease(this, publisher, source, publisher.snapshots.attach(monitor), monitor);
+            }
+        }
+
+        synchronized void release(Object allocation) {
+            Source source = allocations.remove(allocation);
+            if (source != null) {
+                A4SCacheTelemetry publisher = live.get(source.cacheId);
+                synchronized (publisher) {
+                    removeSource(publisher, source);
+                }
+            }
+        }
+
+        synchronized void close(Lease lease) {
+            if (lease.closed) {
+                return;
+            }
+            lease.closed = true;
+            synchronized (lease.publisher) {
+                lease.publisher.snapshots.detach(lease.owner, lease.monitor);
+                removeSource(lease.publisher, lease.source);
+            }
+        }
+
+        private void removeSource(A4SCacheTelemetry publisher, Source source) {
+            publisher.sources.computeIfPresent(source, (ignored, count) -> count == 1 ? null : count - 1);
+            if (publisher.sources.isEmpty()) {
+                publisher.snapshots.close();
+                live.remove(publisher.cacheId);
+            }
+        }
+    }
+
+    static final class Lease implements AutoCloseable {
+        private final Registry registry;
+        private final A4SCacheTelemetry publisher;
+        private final Source source;
+        private final long owner;
+        private final boolean monitor;
+        private boolean closed;
+
+        private Lease(Registry registry, A4SCacheTelemetry publisher, Source source, long owner, boolean monitor) {
+            this.registry = registry;
+            this.publisher = publisher;
+            this.source = source;
+            this.owner = owner;
+            this.monitor = monitor;
+        }
+
+        long exclusiveGeneration() {
+            synchronized (publisher) {
+                return monitor && publisher.compatible && publisher.previous != null
+                        ? publisher.snapshots.exclusiveGeneration(owner) : -1;
+            }
+        }
+
+        String process() {
+            return publisher.process;
+        }
+
+        long cacheId() {
+            return publisher.cacheId;
+        }
+
+        String metric(String job, String vertex, int subtask, String attempt, long nowNanos) {
+            return publisher.metric(owner, job, vertex, subtask, attempt, nowNanos);
+        }
+
+        @Override
+        public void close() {
+            registry.close(this);
+        }
     }
 
     private static final class Interval {
         private final Status status;
-        @Nullable private final long[] after;
+        @Nullable private final long[] state;
         private final long references;
         private final long misses;
         @Nullable private final StackDistanceHistogram histogram;
@@ -255,14 +426,10 @@ final class A4SCacheTelemetry {
             this(status, null, 0, 0, null);
         }
 
-        private Interval(
-                Status status,
-                @Nullable long[] after,
-                long references,
-                long misses,
+        private Interval(Status status, @Nullable long[] state, long references, long misses,
                 @Nullable StackDistanceHistogram histogram) {
             this.status = status;
-            this.after = after;
+            this.state = state;
             this.references = references;
             this.misses = misses;
             this.histogram = histogram;

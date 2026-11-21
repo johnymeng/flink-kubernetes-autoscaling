@@ -5,10 +5,10 @@ Its deterministic fixtures cover the same population and byte units.
 
 ## Trace a cache to the controller
 
-1. Each Flink-managed RocksDB allocation owns its registry entry. The owning Java cache wrapper
-   lives as long as that physical allocation. Each backend resource container acquires a local
-   owner lease before opening its DB and releases it during close. An allocation seen by a second
-   backend stays ineligible for exclusive attribution until the physical cache is recreated.
+1. The process-scoped registry has one publisher per native physical cache ID. Wrapper aliases
+   can supply the same publisher with a read source. Each backend and monitored DB has its own
+   lease. Ownership changes advance the ownership generation and invalidate the old publication.
+   Prior use and concurrent backend or DB leases prevent exclusive attribution.
 2. Each cache publishes at most one interval on metric queries spaced at least ten seconds apart.
    The first publication establishes the baseline. Every observer of the same allocation and
    interval gets the same sequence and native interval. Shared intervals carry a diagnostic
@@ -54,11 +54,25 @@ It uses common support only and requires max/min lookup rate at most 1.25. The c
 in the observations are native block-cache bytes. Allocation and managed-memory translation
 belong to the planner.
 
-The publisher warms up after a physical allocation and detects generation changes and decreasing
-native counters. The legacy QuickMRC JNI separates counter reads, histogram reads and resets.
-The publisher brackets the drain and rejects intervals with over 2% of their references at the
-boundary. Its counters describe resident-cache lookups while its nominal bin charges are 4 KiB
-per item. Variable block sizes can still bias the nominal capacity estimate.
+Snapshot schema 1 is additive to the existing native lookup API and timing ABI 3. Under the
+physical shard mutex, the native snapshot copies the capacity generation, increasing sequence,
+exact lookups and misses, and cumulative complete misses and finite bins. Accesses and capacity
+changes use the same mutex. Each interval differences two snapshots of one compatible generation
+and ownership. Adjacent compatible snapshot pairs partition the observed access stream.
+A delayed publisher poll still covers the full interval between its endpoints. Consumers need
+evidence of coverage if they miss a published interval. The publisher rebaselines on a new
+generation or decreasing counter.
+Routine polling does not reset native counters, resident recency, or ghost history.
+
+The legacy histogram getters still return a resettable interval. Their separate reads and
+legacy reset cannot certify a coherent interval. Resetting that interval leaves the cumulative
+snapshot and reuse state intact. Snapshot schema mismatch or unavailable JNI capability is
+explicitly ineligible. Only one physical shard is supported. Timing sample and busy-time reads
+have separate consistency boundaries.
+
+Native counters describe resident-cache lookups. The histogram bins retain the estimator's
+sampling weights and inclusive edges, with the existing nominal 4 KiB capacity label per item.
+Variable native charges can bias that nominal capacity estimate.
 
 Monotonic duration is local to each process. REST accepts 9–30 s windows with wall start and end
 skew at most 5 s and end age at most 30 s. The skew check assumes synchronized worker wall clocks.
@@ -86,7 +100,8 @@ bounds each expanded gauge to 4 MiB. REST also bounds cumulative wire and decode
 | Versioned | Versioned | Legacy | Legacy route has no versioned histogram. Mixed deploy does not provide the new controller safety gate |
 | Versioned | Versioned | Versioned | Valid slices reach the collector. Incompatible, missing and expired slices cause hold |
 
-Upgrade TaskManagers, JobManager and operator together before enabling this reconciliation path.
+Use the matched native library and Java binding in each TaskManager. Upgrade TaskManagers,
+JobManager and operator together before enabling this reconciliation path.
 The remaining live check is two concurrent RocksDB backends on the same physical cache followed
 by an isolated exclusive placement. Match cache identity and owner scope across metrics and verify
 the controller logs an explicit shared-cache hold before accepting the new exclusive window.

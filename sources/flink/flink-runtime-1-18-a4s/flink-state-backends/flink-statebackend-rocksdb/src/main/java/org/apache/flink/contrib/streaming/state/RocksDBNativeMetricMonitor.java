@@ -74,6 +74,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     private Statistics statistics;
 
     @Nullable private final LRUCache lruCache;
+    @Nullable private final A4SCacheTelemetry.Lease cacheMonitor;
 
     @Nullable private A4SBlockLatencyWindow a4sBlockLatency;
 
@@ -89,9 +90,15 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         this.statistics = statistics;
         this.lruCache = (blockCache instanceof LRUCache) ? (LRUCache) blockCache : null;
         this.lock = new Object();
-        registerStatistics();
-        registerStackDistanceHistogram();
-        registerA4SBlockLatency();
+        this.cacheMonitor = A4SCacheTelemetry.attachMonitor(lruCache);
+        try {
+            registerStatistics();
+            registerStackDistanceHistogram();
+            registerA4SBlockLatency();
+        } catch (RuntimeException | Error failure) {
+            closeNativeMetrics();
+            throw failure;
+        }
     }
 
     /** Register gauges to pull native metrics for the database. */
@@ -193,16 +200,19 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             @Nullable TickerType compactionMisses,
             int abiVersion) {
         synchronized (lock) {
-            if (statistics == null
-                    || lruCache == null
-                    || !RocksDBResourceContainer.hasExclusiveCacheOwner(lruCache)) {
+            if (statistics == null || lruCache == null || cacheMonitor == null) {
+                return "";
+            }
+            long ownershipGeneration = cacheMonitor.exclusiveGeneration();
+            if (ownershipGeneration < 0) {
                 return "";
             }
             try {
                 long observedAtMillis = System.currentTimeMillis();
                 long observedAtNanos = System.nanoTime();
                 long[] cache = (long[]) readCache.invoke(lruCache);
-                if (cache == null || cache.length != 7 || cache[0] != 1 || cache[4] != 1) {
+                if (cache == null || cache.length != 7 || cache[0] != 1 || cache[4] != 1
+                        || cache[1] != cacheMonitor.cacheId()) {
                     return "";
                 }
                 IOMetrics task = operator.getTaskIOMetricGroup().createSnapshot();
@@ -220,7 +230,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                         compactionHits == null ? null : statistics.getTickerCount(compactionHits);
                 Long compactionMissCount =
                         compactionMisses == null ? null : statistics.getTickerCount(compactionMisses);
-                if (!RocksDBResourceContainer.hasExclusiveCacheOwner(lruCache)
+                if (cacheMonitor.exclusiveGeneration() != ownershipGeneration
                         || System.nanoTime() - observedAtNanos > 100_000_000) {
                     return "";
                 }
@@ -244,7 +254,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                                 abiVersion,
                                 compactionHitCount,
                                 compactionMissCount,
-                                A4SCacheTelemetry.PROCESS,
+                                cacheMonitor.process(),
                                 observedAtNanos)
                         .toMetricString();
             } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
@@ -304,23 +314,21 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         String vertex = variables.get(ScopeFormat.SCOPE_TASK_VERTEX_ID);
         String attempt = variables.get(ScopeFormat.SCOPE_TASK_ATTEMPT_ID);
         int subtask = Integer.parseInt(variables.get(ScopeFormat.SCOPE_TASK_SUBTASK_INDEX));
-        A4SCacheTelemetry telemetry = A4SCacheTelemetry.find(lruCache);
         metricGroup.addGroup("rocksdb").gauge(
                 CacheObservation.METRIC_NAME,
-                () -> readCacheObservation(telemetry, job, vertex, subtask, attempt));
+                () -> readCacheObservation(job, vertex, subtask, attempt));
     }
 
-    private String readCacheObservation(
-            @Nullable A4SCacheTelemetry telemetry, String job, String vertex, int subtask, String attempt) {
+    private String readCacheObservation(String job, String vertex, int subtask, String attempt) {
         synchronized (lock) {
             CacheObservation.Status status;
             if (rocksDB == null) {
                 status = CacheObservation.Status.CLOSED;
-            } else if (telemetry == null) {
+            } else if (cacheMonitor == null) {
                 status = CacheObservation.Status.UNSUPPORTED_NATIVE;
             } else {
                 try {
-                    return telemetry.metric(job, vertex, subtask, attempt);
+                    return cacheMonitor.metric(job, vertex, subtask, attempt, System.nanoTime());
                 } catch (RuntimeException error) {
                     LOG.debug("Could not publish cache observation", error);
                     status = CacheObservation.Status.MALFORMED;
@@ -384,11 +392,18 @@ public class RocksDBNativeMetricMonitor implements Closeable {
 
     @Override
     public void close() {
+        closeNativeMetrics();
+    }
+
+    private void closeNativeMetrics() {
         synchronized (lock) {
             rocksDB = null;
             statistics = null;
             if (a4sBlockLatency != null) {
                 a4sBlockLatency.clear();
+            }
+            if (cacheMonitor != null) {
+                cacheMonitor.close();
             }
         }
     }

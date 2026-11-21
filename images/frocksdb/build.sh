@@ -11,7 +11,13 @@ build_dir=$(mktemp -d "${TMPDIR:-/tmp}/a4s-frocksdb.XXXXXXXX")
 trap 'rm -rf -- "$build_dir"' EXIT
 mkdir -p "$build_dir/source" "$build_dir/artifacts"
 git -C "$FROCKSDB_SOURCE" archive "$pin" | tar -xf - -C "$build_dir/source"
-for patch in frocksdb-a4s-block-latency frocksdb-a4s-cache-lookup-v1; do
+patches=(
+    frocksdb-a4s-block-latency
+    frocksdb-a4s-cache-lookup-v1
+    frocksdb-a4s-quickmrc-snapshot-v1
+    frocksdb-a4s-no-sampled-hit-log
+)
+for patch in "${patches[@]}"; do
     git -C "$build_dir/source" apply --no-index "$REPO_ROOT/sources/libs/patches/$patch.patch"
 done
 

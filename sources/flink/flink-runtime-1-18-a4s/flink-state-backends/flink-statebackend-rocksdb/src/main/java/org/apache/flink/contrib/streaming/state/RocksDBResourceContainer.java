@@ -88,8 +88,7 @@ public final class RocksDBResourceContainer implements AutoCloseable {
      * want exceptions to be reported.
      */
     @Nullable private final OpaqueMemoryResource<RocksDBSharedResources> sharedResources;
-    @Nullable private final A4SCacheTelemetry cacheTelemetry;
-    private final long cacheOwner;
+    @Nullable private final A4SCacheTelemetry.Lease cacheOwner;
 
     private final boolean enableStatistics;
 
@@ -137,13 +136,7 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
         this.enableStatistics = enableStatistics;
         this.handlesToClose = new ArrayList<>();
-        this.cacheTelemetry = A4SCacheTelemetry.find(getBlockCache());
-        this.cacheOwner = cacheTelemetry == null ? 0 : cacheTelemetry.attach();
-    }
-
-    static boolean hasExclusiveCacheOwner(Cache cache) {
-        A4SCacheTelemetry telemetry = A4SCacheTelemetry.find(cache);
-        return telemetry != null && telemetry.hasExclusiveOwner();
+        this.cacheOwner = A4SCacheTelemetry.attachBackend(getBlockCache());
     }
 
     /** Gets the RocksDB {@link DBOptions} to be used for RocksDB instances. */
@@ -294,8 +287,8 @@ public final class RocksDBResourceContainer implements AutoCloseable {
 
     @Override
     public void close() throws Exception {
-        if (cacheTelemetry != null) {
-            cacheTelemetry.detach(cacheOwner);
+        if (cacheOwner != null) {
+            cacheOwner.close();
         }
         handlesToClose.forEach(IOUtils::closeQuietly);
         handlesToClose.clear();
