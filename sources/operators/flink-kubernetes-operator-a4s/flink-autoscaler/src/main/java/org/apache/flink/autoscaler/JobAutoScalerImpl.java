@@ -385,18 +385,20 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             var batch = batches == null ? null : batches.get(vertex);
             var status = OnlineCacheCost.observationStatus(
                     batch, history.getJobTopology().get(vertex).getParallelism());
-            if (status == Status.VALID
+            boolean localOnly = ctx.getConfiguration().get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)
+                    && status.supportsLocalObservations() && batch.hasPairedLocalObservations();
+            if (!localOnly && status == Status.VALID
                     && (latest.getMissRateCurves() == null
                             || latest.getMissRateCurves().get(vertex) == null
                             || latest.getMissRateCurves().get(vertex).getPoints().isEmpty())) {
                 status = Status.INCOMPLETE;
             }
-            if (status == Status.VALID && batch.subtasks.stream().anyMatch(
+            if ((status == Status.VALID || localOnly) && batch.subtasks.stream().anyMatch(
                     sample -> sample.window == null
                             || !CacheObservation.isFresh(sample.window.observedAtMillis, nowMillis))) {
                 status = Status.STALE;
             }
-            if (status != Status.VALID) {
+            if (status != Status.VALID && (status != Status.AGGREGATE_RATE_SKEW || !localOnly)) {
                 failures.put(vertex, status);
             }
         }

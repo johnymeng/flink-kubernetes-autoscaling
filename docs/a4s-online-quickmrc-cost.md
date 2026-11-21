@@ -55,10 +55,13 @@ The thesis repository returned HTTP 403 during validation.
 - For a candidate capacity, evaluate each subtask as
   *B/R + k × (m(candidate) − m(current))* using its own QuickMRC. Anchor a live capacity between
   bins at the enclosing upper edge to avoid overestimating improvement. Every cache needs
-  support for both the live and candidate capacities. Apply the measured record shares and
-  require the predicted work at target throughput to fit within one busy second per second on
-  every subtask. Use the existing throughput demand helper, including backlog, restart catch-up,
-  and target utilization.
+  support for both the live and candidate capacities. The existing throughput demand helper
+  includes backlog, restart catch-up, and target utilization.
+- Processed-record shares do not identify future arrival shares. With no verified attribution,
+  feasibility requires each task to be able to handle the full demand. The recommendation reports
+  the worst task's predicted seconds per record. Current-parallelism insufficiency requires demand
+  to exceed the sum of the optimistic task capacity ceilings. If any task ceiling is unknown, the
+  model returns no proof of insufficiency. Ordinary throughput recovery uses its own qualification.
 - Changes to attempts, process, cache capacity, or parallelism require fresh observations.
   Qualification needs two disjoint 60–120 s windows. Retain sufficient metric history for both
   and for startup warmup.

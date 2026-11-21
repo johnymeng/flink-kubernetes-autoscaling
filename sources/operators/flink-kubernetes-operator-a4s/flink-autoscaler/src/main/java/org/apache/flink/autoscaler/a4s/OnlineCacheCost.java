@@ -274,8 +274,8 @@ public class OnlineCacheCost {
         }
         Status startStatus = observationStatus(startObservation, start.size());
         Status endStatus = observationStatus(endObservation, end.size());
-        if (startStatus != Status.VALID || endStatus != Status.VALID) {
-            Status status = startStatus != Status.VALID ? startStatus : endStatus;
+        if (!startStatus.supportsLocalObservations() || !endStatus.supportsLocalObservations()) {
+            Status status = startStatus.supportsLocalObservations() ? endStatus : startStatus;
             return FitResult.rejected(
                             status == Status.COUNTER_RESET
                                     ? Reason.COUNTER_RESET : Reason.MISSING_OBSERVATIONS)
@@ -324,8 +324,11 @@ public class OnlineCacheCost {
         if (batch.version != CacheObservation.VERSION) {
             return Status.UNSUPPORTED_VERSION;
         }
-        if (batch.status == Status.VALID
+        if (batch.status.supportsLocalObservations()
                 && (batch.expectedSubtasks != size || batch.subtasks.size() != size)) {
+            return Status.INCOMPLETE;
+        }
+        if (batch.status == Status.AGGREGATE_RATE_SKEW && !batch.hasPairedLocalObservations()) {
             return Status.INCOMPLETE;
         }
         return batch.status;
@@ -435,8 +438,6 @@ public class OnlineCacheCost {
         double totalRecords = 0;
         double busySecondsAtZeroMisses = 0;
         double secondsAtFullMissRate = 0;
-        double minRecordRate = Double.POSITIVE_INFINITY;
-        double maxRecordRate = 0;
         long oldestStart = Long.MAX_VALUE;
         long oldestEnd = Long.MAX_VALUE;
         for (int subtask = 0; subtask < end.size(); subtask++) {
@@ -474,6 +475,10 @@ public class OnlineCacheCost {
             if (misses > lookups || compactionHits > lookups - misses || compactionMisses > misses) {
                 return rejectedTiming(Reason.TIMING_COVERAGE, subtask, null, null,
                         coveredHits, coveredMisses, sampledHits, sampledMisses);
+            }
+            if (lookups == 0) {
+                return FitResult.rejected(Reason.NO_HIT_OR_MISS)
+                        .withObservationStatus(Status.IDLE).withFailingSubtask(subtask);
             }
             long foregroundHits = lookups - misses - compactionHits;
             long foregroundMisses = misses - compactionMisses;
@@ -516,14 +521,8 @@ public class OnlineCacheCost {
             totalRecords += recordsIn;
             busySecondsAtZeroMisses += residual;
             secondsAtFullMissRate += cost.getMissPenaltySecondsPerRecord() * recordsIn;
-            double recordRate = recordsIn / (double) elapsedNanos;
-            minRecordRate = Math.min(minRecordRate, recordRate);
-            maxRecordRate = Math.max(maxRecordRate, recordRate);
             oldestStart = Math.min(oldestStart, before.getObservedAtMillis());
             oldestEnd = Math.min(oldestEnd, after.getObservedAtMillis());
-        }
-        if (monotonic && maxRecordRate > minRecordRate * 1.25) {
-            return FitResult.rejected(Reason.RECORD_SKEW);
         }
         return new FitResult(
                 Reason.QUALIFIED,

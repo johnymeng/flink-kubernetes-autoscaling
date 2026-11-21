@@ -467,6 +467,17 @@ public class ScalingMetricEvaluatorTest {
     }
 
     @Test
+    void alignedLocalWindowsReachTheFitterWithoutAnAggregateCurve() {
+        var vertex = new JobVertexID();
+        var history = compatibleQuickMrcHistory(vertex);
+        history.getMetricHistory().values().forEach(snapshot -> snapshot.setMissRateCurves(Map.of()));
+        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var evaluated = evaluator.evaluate(config, history, Duration.ZERO);
+        var decision = evaluated.getCacheEvaluation().getVertices().get(vertex);
+        assertTrue(decision.getFit() != null && decision.getFit().getFit() != null);
+    }
+
+    @Test
     void boundedEndpointsStayInMemoryOnlyAndMissingEndpointsHold() {
         var vertex = new JobVertexID();
         var history = compatibleQuickMrcHistory(vertex).getMetricHistory();

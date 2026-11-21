@@ -169,6 +169,35 @@ class A4SCacheObservationTransportTest {
         assertTrue(duplicate.getCacheCostSamples().isEmpty());
     }
 
+    @Test
+    void preservesPairedTaskDataWhenOnlyPooledLookupRateIsUnsupported() throws Exception {
+        long now = System.currentTimeMillis();
+        for (int subtask = 0; subtask < 2; subtask++) {
+            CacheObservation original = observation(subtask, 0, new long[] {7}, now);
+            CacheObservation.Window old = original.window;
+            CacheObservation observation = new CacheObservation(
+                    original.version, original.job, original.vertex, subtask, original.attempt,
+                    Status.VALID,
+                    new CacheObservation.Window(
+                            old.process, old.cacheId, old.epoch, old.sequence, old.owners,
+                            old.population, old.chargePolicy, old.cachePolicy, old.samplingRate,
+                            old.capacityBytes, old.startNanos, old.endNanos, now,
+                            1_000L / (subtask + 1), 100L),
+                    original.histogram);
+            addGauge(subtask, 0, "rocksdb", CacheObservation.METRIC_NAME,
+                    paired(observation, now, 1, 3).toMetricString());
+        }
+        A4SAggregatedMetricsResponseBody withRateSkew = response(expectedAttempts(0, 0, 1));
+        assertEquals(Status.AGGREGATE_RATE_SKEW, withRateSkew.getCacheObservations().status);
+        assertTrue(withRateSkew.getScaledMrc().getPoints().isEmpty());
+        assertTrue(withRateSkew.getCacheObservations().hasPairedLocalObservations());
+        assertEquals(2, withRateSkew.getCacheCostSamples().size());
+
+        A4SAggregatedMetricsResponseBody missing = response(expectedAttempts(0, 0, 1, 2));
+        assertEquals(Status.INCOMPLETE, missing.getCacheObservations().status);
+        assertTrue(missing.getCacheCostSamples().isEmpty());
+    }
+
     private CacheObservation paired(CacheObservation row, long now, long afterNanos, int abi) {
         long nativeNanos = row.window.endNanos;
         String timing = abi == 3

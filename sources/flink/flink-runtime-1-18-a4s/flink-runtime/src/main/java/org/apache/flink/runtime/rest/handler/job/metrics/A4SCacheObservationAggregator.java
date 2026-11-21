@@ -121,7 +121,7 @@ final class A4SCacheObservationAggregator {
                 return new Result(Status.SKEWED);
             }
             if (maxRate > MAX_RATE_SKEW * minRate) {
-                return new Result(Status.SKEWED);
+                return new Result(Status.AGGREGATE_RATE_SKEW);
             }
             long[] cumulativeHits = new long[observations.size()];
             List<MissRateCurve.Point> points = new ArrayList<>(commonBins);

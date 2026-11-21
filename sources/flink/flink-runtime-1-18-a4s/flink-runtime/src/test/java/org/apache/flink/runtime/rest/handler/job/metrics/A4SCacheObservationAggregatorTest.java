@@ -142,6 +142,15 @@ class A4SCacheObservationAggregatorTest {
     }
 
     @Test
+    void alignedUnequalLookupRatesRejectOnlyTheHomogeneousCurve() {
+        CacheObservation a = observation(0, "a", 1, 100, NOW, new long[] {1, 2}, 1);
+        CacheObservation b = observation(1, "b", 2, 200, NOW, new long[] {3, 1}, 1);
+        A4SCacheObservationAggregator.Result result = aggregate(Arrays.asList(a, b));
+        assertEquals(Status.AGGREGATE_RATE_SKEW, result.status);
+        assertTrue(result.curve.getPoints().isEmpty());
+    }
+
+    @Test
     void rejectsIncompleteDuplicateStaleAndReplacedAttempts() {
         CacheObservation first = observation(0, "a", 1, 100, NOW, new long[] {1}, 3);
         assertEquals(Status.INCOMPLETE, aggregate(Collections.singletonList(first)).status);
@@ -153,7 +162,7 @@ class A4SCacheObservationAggregatorTest {
         assertEquals(Status.ATTEMPT_MISMATCH, aggregate(Arrays.asList(first, replaced)).status);
         CacheObservation skewed = observation(1, "b", 2, 200, NOW, new long[] {2}, 3);
         A4SCacheObservationAggregator.Result skewedResult = aggregate(Arrays.asList(first, skewed));
-        assertEquals(Status.SKEWED, skewedResult.status);
+        assertEquals(Status.AGGREGATE_RATE_SKEW, skewedResult.status);
         assertTrue(skewedResult.curve.getPoints().isEmpty());
     }
 

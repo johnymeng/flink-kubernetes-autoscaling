@@ -280,10 +280,10 @@ public class A4SAggregatingVertexMetricsHandler
                 .anyMatch(observation -> observation.version == CacheObservation.ALIGNED_VERSION)) {
             // Never mix independently collected legacy timings with paired boundaries.
             samples.clear();
-            if (aggregated.status == Status.VALID && !independentTiming.isEmpty()) {
+            if (aggregated.status.supportsLocalObservations() && !independentTiming.isEmpty()) {
                 aggregated = new A4SCacheObservationAggregator.Result(Status.DUPLICATE);
             }
-            if (aggregated.status == Status.VALID) {
+            if (aggregated.status.supportsLocalObservations()) {
                 for (CacheObservation observation : observations) {
                     CacheObservation.Endpoint endpoint = observation.endpoint;
                     if (endpoint == null) {
@@ -302,7 +302,7 @@ public class A4SAggregatingVertexMetricsHandler
                     samples.add(timing);
                 }
             }
-            if (aggregated.status != Status.VALID) {
+            if (!aggregated.status.supportsLocalObservations()) {
                 samples.clear();
             }
         }

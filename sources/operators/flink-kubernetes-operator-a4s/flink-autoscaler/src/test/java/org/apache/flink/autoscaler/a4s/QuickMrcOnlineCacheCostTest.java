@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -91,6 +92,80 @@ public class QuickMrcOnlineCacheCostTest {
         var newEpoch = qualify(sample(1, 1, 0, 0), sample(2, 1, 0, 0), 1, 2).getFit();
         assertEquals(CacheObservation.Status.CACHE_CHANGED, prior.holdoutContextStatus(newEpoch));
         assertEquals(Double.POSITIVE_INFINITY, prior.holdoutRelativeError(newEpoch));
+    }
+
+    @Test
+    void unequalProcessedRatesDoNotInvalidateAnOtherwiseCompleteLocalFit() {
+        var before = List.of(sample(0, 0, 0, 0), sample(0, 0, 0, 1));
+        var after = List.of(sample(1, 0, 0, 0), sample(1, 0, 0, 1));
+        after.get(1).setRecordsIn(10_000);
+        var fit = OnlineCacheCost.fitQuickMrc(
+                localBatch(before, 1), before, localBatch(after, 2), after);
+        assertEquals(OnlineCacheCost.Reason.QUALIFIED, fit.getReason());
+    }
+
+    @Test
+    void unequalProcessingDoesNotQualifyFutureArrivalShares() {
+        var before = List.of(sample(0, 0, 0, 0), sample(0, 0, 0, 1));
+        var after = List.of(sample(1, 0, 0, 0), sample(1, 0, 0, 1));
+        after.get(1).setRecordsIn(10_000);
+        var current = localBatch(after, 2);
+        var fit = OnlineCacheCost.fitQuickMrc(localBatch(before, 1), before, current, after).getFit();
+
+        // The slow task processed one third of records. At equal arrivals, the
+        // slow task cannot handle half of 19,000 records/s at any common bin.
+        assertTrue(QuickMrcCostProjection.recommend(fit, current, 19_000, null).isEmpty());
+        assertTrue(QuickMrcCostProjection.recommend(fit, current, 5_000, null).isPresent());
+        assertFalse(QuickMrcCostProjection.cannotMeetDemandAtCurrentParallelism(fit, 19_000));
+        assertTrue(QuickMrcCostProjection.cannotMeetDemandAtCurrentParallelism(fit, 50_000));
+    }
+
+    @Test
+    void heterogeneousHoldoutStillRejectsPerTaskMixDrift() {
+        var start = List.of(sample(0, 0, 0, 0), sample(0, 0, 0, 1));
+        var middle = List.of(sample(1, 0, 0, 0), sample(1, 0, 0, 1));
+        var end = List.of(sample(2, 0, 0, 0), sample(2, 0, 0, 1));
+        middle.get(1).setRecordsIn(10_000);
+        end.get(1).setRecordsIn(30_000);
+        var fit = OnlineCacheCost.fitQuickMrc(
+                localBatch(start, 1), start, localBatch(middle, 2), middle);
+        var holdout = OnlineCacheCost.fitQuickMrc(
+                localBatch(middle, 2), middle, localBatch(end, 3), end);
+        assertEquals(OnlineCacheCost.Reason.QUALIFIED, fit.getReason());
+        assertEquals(OnlineCacheCost.Reason.QUALIFIED, holdout.getReason());
+        assertFalse(fit.getFit().hasStableAccessMix(holdout.getFit()));
+    }
+
+    @Test
+    void idleTaskWithholdsTheLocalModel() {
+        var before = List.of(sample(0, 0, 0, 0), sample(0, 0, 0, 1));
+        var after = List.of(sample(1, 0, 0, 0), sample(0, 0, 0, 1));
+        after.get(1).setObservedAtMillis(after.get(0).getObservedAtMillis());
+        after.get(1).setObservedAtNanos(after.get(0).getObservedAtNanos());
+        var fit = OnlineCacheCost.fitQuickMrc(
+                localBatch(before, 1), before, localBatch(after, 2), after);
+        assertEquals(OnlineCacheCost.Reason.NO_HIT_OR_MISS, fit.getReason());
+        assertEquals(CacheObservation.Status.IDLE, fit.getObservationStatus());
+        assertEquals(1, fit.getFailingSubtask());
+    }
+
+    private static CacheObservationBatch localBatch(List<CacheCostSample> samples, long sequence) {
+        var rows = new java.util.ArrayList<CacheObservation>();
+        for (CacheCostSample timing : samples) {
+            long endNanos = timing.getObservedAtNanos();
+            rows.add(new CacheObservation(
+                    CacheObservation.VERSION, "job", "vertex", timing.getSubtask(), timing.getAttempt(),
+                    CacheObservation.Status.VALID,
+                    new CacheObservation.Window(
+                            "process", timing.getCacheId(), timing.getCacheEpoch(), sequence, List.of(1L),
+                            CacheObservation.QUICK_MRC, CacheObservation.ATTESTED_BYTE_CHARGE,
+                            CacheObservation.CACHE_POLICY, .02, timing.getCapacityBytes(),
+                            endNanos - 10_000_000_000L, endNanos, timing.getObservedAtMillis(),
+                            1000, 500),
+                    new StackDistanceHistogram(new long[] {10, 40, 25}, 25, 1, 1, 4096)));
+        }
+        return new CacheObservationBatch(
+                CacheObservation.VERSION, CacheObservation.Status.VALID, samples.size(), 128, 0, rows);
     }
 
     @Test

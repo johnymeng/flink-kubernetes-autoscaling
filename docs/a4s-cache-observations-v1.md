@@ -59,6 +59,12 @@ It uses common support only and requires max/min lookup rate at most 1.25. The c
 in the observations are native block-cache bytes. Allocation and managed-memory translation
 belong to the planner.
 
+A complete, time-aligned observation outside the homogeneous lookup-rate limit carries
+`AGGREGATE_RATE_SKEW` and an empty scalar curve. Verified paired endpoints are still available
+to the task-local model. Clock or acquisition misalignment continues to carry `SKEWED` and
+withholds model input. The local projection still requires uniform allocation, compatible
+geometry and byte-support attestation.
+
 Snapshot schema 1 is additive to the existing native lookup API and timing ABI 3. Under the
 physical shard mutex, the native snapshot copies the capacity generation, increasing sequence,
 exact lookups and misses, and cumulative complete misses and finite bins. Accesses and capacity

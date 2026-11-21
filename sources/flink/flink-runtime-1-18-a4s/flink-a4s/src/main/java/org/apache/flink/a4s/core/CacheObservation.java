@@ -79,9 +79,15 @@ public final class CacheObservation {
         OVERSIZE,
         INCOMPATIBLE,
         SKEWED,
+        /** Complete aligned local observations outside the homogeneous lookup-rate domain. */
+        AGGREGATE_RATE_SKEW,
         CACHE_CHANGED,
         COUNTER_RESET,
-        REST_UNAVAILABLE
+        REST_UNAVAILABLE;
+
+        public boolean supportsLocalObservations() {
+            return this == VALID || this == AGGREGATE_RATE_SKEW;
+        }
     }
 
     public final int version;

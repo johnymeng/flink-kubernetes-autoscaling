@@ -123,8 +123,11 @@ public class ScalingMetricEvaluator {
             var batch = cacheObservation(latestCollectedMetrics, vertex);
             int parallelism = topology.get(vertex).getParallelism();
             var observationStatus = OnlineCacheCost.observationStatus(batch, parallelism);
-            if (missRateCurve == null || missRateCurve.getPoints().isEmpty()) {
-                LOG.debug("A4S: No usable miss rate curve found for vertex {}, skipping", vertex);
+            boolean hasAggregateCurve = missRateCurve != null && !missRateCurve.getPoints().isEmpty();
+            boolean localInput = onlineCacheCosts && observationStatus.supportsLocalObservations()
+                    && batch.hasPairedLocalObservations();
+            if (!hasAggregateCurve && !localInput) {
+                LOG.debug("A4S: No usable curve or paired local observations for vertex {}", vertex);
                 if ((strictA4s || onlineCacheCosts) && !exemptVertices.contains(vertex.toString())
                         && !topology.getFinishedVertices().contains(vertex)) {
                     var status = observationStatus == CacheObservation.Status.VALID
@@ -133,14 +136,19 @@ public class ScalingMetricEvaluator {
                             onlineCacheCosts && shadow ? CacheMode.ONLINE_SHADOW : CacheMode.INVALID,
                             null, ObservationEvidence.capture(parallelism, status, batch,
                                     cacheCostSamples(latestCollectedMetrics, vertex)),
-                            null, null, OnlineCacheCost.Reason.MISSING_OBSERVATIONS, null, null, null,
+                            null, null, status == CacheObservation.Status.AGGREGATE_RATE_SKEW
+                                    ? OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED
+                                    : OnlineCacheCost.Reason.MISSING_OBSERVATIONS, null, null, null,
                             null, null, null));
+                }
+                if (observationStatus == CacheObservation.Status.AGGREGATE_RATE_SKEW) {
+                    cacheCostFailures.put(vertex, OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED);
                 }
                 continue;
             }
-            var points = missRateCurve.getPoints();
-            long observedMinBytes = points.get(0).getCacheSizeBytes();
-            long observedMaxBytes = points.get(points.size() - 1).getCacheSizeBytes();
+            var points = hasAggregateCurve ? missRateCurve.getPoints() : List.<MissRateCurve.Point>of();
+            Long observedMinBytes = hasAggregateCurve ? points.get(0).getCacheSizeBytes() : null;
+            Long observedMaxBytes = hasAggregateCurve ? points.get(points.size() - 1).getCacheSizeBytes() : null;
             var metrics = scalingOutput.get(vertex);
             double targetRate = strictA4s || onlineCacheCosts
                     ? AutoScalerUtils.getTargetProcessingCapacity(
@@ -180,7 +188,8 @@ public class ScalingMetricEvaluator {
                             startBatch, cacheCostSamples(first, vertex), fit.getFailingSubtask());
                 }
                 decisions.put(vertex, new CacheDecision(mode,
-                        shadow ? configuredPolicy : recommendation == null ? null : mode,
+                        shadow ? (hasAggregateCurve ? configuredPolicy : null)
+                                : recommendation == null ? null : mode,
                         observation, fitStart, fit, reason, finite(targetRate), observedMinBytes,
                         observedMaxBytes, projection,
                         shadow && configuredPolicy == CacheMode.LEGACY_FIXED ? fixedCosts : null,
@@ -203,6 +212,11 @@ public class ScalingMetricEvaluator {
                 decisions.put(vertex, new CacheDecision(configuredPolicy, configuredPolicy,
                         observation, null, null, null, finite(targetRate), observedMinBytes,
                         observedMaxBytes, null, calibratedCosts == null ? fixedCosts : null, null));
+            }
+
+            if (!hasAggregateCurve) {
+                cacheCostFailures.put(vertex, OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED);
+                continue;
             }
 
             if (calibratedCosts == null) {
@@ -401,7 +415,7 @@ public class ScalingMetricEvaluator {
                                         : OnlineCacheCost.Reason.CONTEXT_CHANGED)
                         .withObservationStatus(batch.status).withAttemptedWindow(window);
             }
-            if (startBatch != null && batch != null && batch.status == CacheObservation.Status.VALID
+            if (startBatch != null && batch != null && batch.status.supportsLocalObservations()
                     && batch.expectedSubtasks > 0 && batch.subtasks.size() == batch.expectedSubtasks
                     && batch.expectedSubtasks != startBatch.expectedSubtasks) {
                 return OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.CONTEXT_CHANGED)

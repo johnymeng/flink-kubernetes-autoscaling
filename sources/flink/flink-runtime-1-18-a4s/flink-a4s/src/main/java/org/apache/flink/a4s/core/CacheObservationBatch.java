@@ -56,6 +56,14 @@ public final class CacheObservationBatch {
         this.subtasks = Collections.unmodifiableList(copy);
     }
 
+    public boolean hasPairedLocalObservations() {
+        return status.supportsLocalObservations()
+                && expectedSubtasks > 0 && subtasks.size() == expectedSubtasks
+                && subtasks.stream().allMatch(row -> row.version == CacheObservation.ALIGNED_VERSION
+                        && row.status == CacheObservation.Status.VALID
+                        && row.window != null && row.endpoint != null);
+    }
+
     public CacheObservationBatch withoutHistograms() {
         return new CacheObservationBatch(
                 version, status, expectedSubtasks, wireBytes, oldestAgeMillis,

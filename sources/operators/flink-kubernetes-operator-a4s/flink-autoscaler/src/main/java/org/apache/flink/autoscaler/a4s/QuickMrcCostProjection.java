@@ -93,19 +93,17 @@ public final class QuickMrcCostProjection {
         if (!Double.isFinite(demand) || demand <= 0) {
             return false;
         }
-        var subtasks = fit.getSubtasks();
-        double inputRate = subtasks.stream()
-                .mapToDouble(task -> task.getRecords() / (double) task.getElapsedNanos())
-                .sum();
-        for (var task : subtasks) {
-            double share = task.getRecords() / (double) task.getElapsedNanos() / inputRate;
-            // The miss fraction can drop by at most one, regardless of histogram support.
+        double optimisticTotalCapacity = 0;
+        for (var task : fit.getSubtasks()) {
+            // Actual future arrivals can concentrate differently from past processing.
+            // Even the most favorable assignment cannot exceed the sum of local ceilings.
             double workFloor = task.getBusySecondsPerRecord() - task.getMissPenaltySecondsPerRecord();
-            if (workFloor > 0 && demand * share * workFloor > 1) {
-                return true;
+            if (!Double.isFinite(workFloor) || workFloor <= 0) {
+                return false;
             }
+            optimisticTotalCapacity += 1.0 / workFloor;
         }
-        return false;
+        return !fit.getSubtasks().isEmpty() && demand > optimisticTotalCapacity;
     }
 
     private static Result recommendWithinSupport(
@@ -131,8 +129,6 @@ public final class QuickMrcCostProjection {
         List<StackDistanceHistogram> histograms = new ArrayList<>(parallelism);
         long[] totals = new long[parallelism];
         double[] anchorMissRates = new double[parallelism];
-        double[] inputRates = new double[parallelism];
-        double totalInputRate = 0;
         double worstBias = 0;
         int commonBins = Integer.MAX_VALUE;
         for (int i = 0; i < parallelism; i++) {
@@ -170,8 +166,6 @@ public final class QuickMrcCostProjection {
             }
             OnlineCacheCost.SubtaskCost local = fit.getSubtasks().get(i);
             anchorMissRates[i] = 1.0 - hitsAtAnchor / (double) totals[i];
-            inputRates[i] = local.getRecords() / (double) local.getElapsedNanos();
-            totalInputRate += inputRates[i];
             double observedWindowMissRate =
                     observation.window.misses / (double) observation.window.references;
             worstBias = Math.max(worstBias, Math.abs(anchorMissRates[i] - observedWindowMissRate));
@@ -183,7 +177,7 @@ public final class QuickMrcCostProjection {
                 Math.multiplyExact(Math.multiplyExact(commonBins, binBytes), parallelism);
         long[] hits = new long[parallelism];
         for (int bin = 0; bin < commonBins; bin++) {
-            double weightedSeconds = 0;
+            double worstSeconds = 0;
             boolean fits = true;
             for (int i = 0; i < parallelism; i++) {
                 hits[i] = Math.addExact(hits[i], histograms.get(i).getFrequency(bin));
@@ -193,29 +187,30 @@ public final class QuickMrcCostProjection {
                 double seconds = fixedBaseline == null
                         ? local.getBusySecondsPerRecord() + slope * (missRate - anchorMissRates[i])
                         : fixedBaseline + slope * missRate;
-                double recordShare = inputRates[i] / totalInputRate;
-                if (!Double.isFinite(seconds) || seconds <= 0 || target * recordShare * seconds > 1) {
+                // There is no per-task arrival attribution. A task can receive up to
+                // all future input, so each must be able to handle the full demand.
+                if (!Double.isFinite(seconds) || seconds <= 0 || target * seconds > 1) {
                     fits = false;
                 }
-                weightedSeconds += recordShare * seconds;
+                worstSeconds = Math.max(worstSeconds, seconds);
             }
             if (fits) {
                 boolean unconstrained = bin == 0;
                 long localBytes = unconstrained ? capacityBytes : Math.multiplyExact(bin + 1L, binBytes);
                 if (unconstrained) {
-                    weightedSeconds = 0;
+                    worstSeconds = 0;
                     for (int i = 0; i < parallelism; i++) {
                         OnlineCacheCost.SubtaskCost local = fit.getSubtasks().get(i);
                         double seconds = fixedBaseline == null
                                 ? local.getBusySecondsPerRecord()
                                 : fixedBaseline + local.getMissPenaltySecondsPerRecord() * anchorMissRates[i];
-                        weightedSeconds += inputRates[i] / totalInputRate * seconds;
+                        worstSeconds = Math.max(worstSeconds, seconds);
                     }
                 }
                 return new Result(
                         new Recommendation(
                                 Math.multiplyExact(localBytes, parallelism),
-                                weightedSeconds,
+                                worstSeconds,
                                 minSupportedTotalBytes,
                                 maxSupportedTotalBytes,
                                 worstBias,
