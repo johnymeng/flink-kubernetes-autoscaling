@@ -21,6 +21,8 @@ package org.apache.flink.a4s.core;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
@@ -49,7 +51,9 @@ public final class CacheObservationBatch {
         this.expectedSubtasks = expectedSubtasks;
         this.wireBytes = wireBytes;
         this.oldestAgeMillis = oldestAgeMillis;
-        this.subtasks = List.copyOf(subtasks);
+        List<CacheObservation> copy = new ArrayList<>(subtasks);
+        copy.forEach(Objects::requireNonNull);
+        this.subtasks = Collections.unmodifiableList(copy);
     }
 
     public CacheObservationBatch withoutHistograms() {
@@ -59,6 +63,6 @@ public final class CacheObservationBatch {
     }
 
     public static CacheObservationBatch invalid(CacheObservation.Status status) {
-        return new CacheObservationBatch(CacheObservation.VERSION, status, 0, 0, -1, List.of());
+        return new CacheObservationBatch(CacheObservation.VERSION, status, 0, 0, -1, Collections.emptyList());
     }
 }

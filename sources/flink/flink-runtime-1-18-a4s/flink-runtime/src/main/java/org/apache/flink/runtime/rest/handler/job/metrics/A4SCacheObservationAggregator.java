@@ -25,6 +25,7 @@ import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -205,7 +206,7 @@ final class A4SCacheObservationAggregator {
         final MissRateCurve curve;
 
         Result(Status status) {
-            this(status, new MissRateCurve(List.of()));
+            this(status, new MissRateCurve(Collections.emptyList()));
         }
 
         Result(Status status, MissRateCurve curve) {

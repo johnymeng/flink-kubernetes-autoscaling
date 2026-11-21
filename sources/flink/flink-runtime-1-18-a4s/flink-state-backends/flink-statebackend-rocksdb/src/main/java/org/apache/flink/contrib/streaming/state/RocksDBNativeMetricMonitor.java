@@ -48,6 +48,7 @@ import java.io.Closeable;
 import java.lang.reflect.Method;
 import java.math.BigInteger;
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * A monitor which pulls {{@link RocksDB}} native metrics and forwards them to Flink's metric group.
@@ -298,7 +299,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                 || !(metricGroup instanceof InternalOperatorMetricGroup)) {
             return;
         }
-        var variables = metricGroup.getAllVariables();
+        Map<String, String> variables = metricGroup.getAllVariables();
         String job = variables.get(ScopeFormat.SCOPE_JOB_ID);
         String vertex = variables.get(ScopeFormat.SCOPE_TASK_VERTEX_ID);
         String attempt = variables.get(ScopeFormat.SCOPE_TASK_ATTEMPT_ID);

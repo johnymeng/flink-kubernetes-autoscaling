@@ -18,6 +18,8 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -69,7 +71,7 @@ final class A4SCacheSnapshots<T> {
                             ++sequence,
                             startedAtNanos,
                             nowNanos,
-                            List.copyOf(owners),
+                            Collections.unmodifiableList(new ArrayList<>(owners)),
                             hasExclusiveOwner(),
                             value);
             startedAtNanos = nowNanos;
@@ -90,7 +92,7 @@ final class A4SCacheSnapshots<T> {
                             latest.sequence,
                             latest.startNanos,
                             latest.endNanos,
-                            List.copyOf(owners),
+                            Collections.unmodifiableList(new ArrayList<>(owners)),
                             false,
                             latest.value);
         }

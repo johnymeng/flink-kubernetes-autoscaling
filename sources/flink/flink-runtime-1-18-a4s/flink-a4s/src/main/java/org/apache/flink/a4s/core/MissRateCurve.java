@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 import java.util.Optional;
 
 public class MissRateCurve {
@@ -15,7 +16,13 @@ public class MissRateCurve {
 
     @JsonCreator
     public MissRateCurve(List<Point> points) {
-        this.points = points == null ? Collections.emptyList() : List.copyOf(points);
+        if (points == null) {
+            this.points = Collections.emptyList();
+        } else {
+            List<Point> copy = new ArrayList<>(points);
+            copy.forEach(Objects::requireNonNull);
+            this.points = Collections.unmodifiableList(copy);
+        }
     }
 
     @JsonValue
