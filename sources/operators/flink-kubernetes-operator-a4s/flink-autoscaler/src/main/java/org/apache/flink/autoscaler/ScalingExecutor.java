@@ -21,6 +21,7 @@ import org.apache.flink.a4s.core.CacheObservation;
 import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.AutoScalerEventHandler;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -44,24 +45,34 @@ import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.rest.messages.ClusterConfigurationInfoHeaders;
+import org.apache.flink.runtime.rest.messages.ConfigurationInfoEntry;
+import org.apache.flink.runtime.rest.messages.EmptyMessageParameters;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsHeaders;
+import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerDetailsHeaders;
+import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerDetailsInfo;
+import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagersHeaders;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.math.BigDecimal;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.*;
 import static org.apache.flink.autoscaler.event.AutoScalerEventHandler.SCALING_EXECUTION_DISABLED_REASON;
@@ -169,7 +180,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             return false;
         }
 
-        Map<String, String> currentProfileOverrides = Map.of();
+        Map<JobVertexID, ResourceProfile> retainedProfiles = Map.of();
         if (throughputOnly) {
             var profiles = preserveLiveProfiles(context, evaluatedMetrics, scalingSummaries,
                     overloadObservations);
@@ -177,7 +188,11 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 evaluatedMetrics.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED);
                 return false;
             }
-            currentProfileOverrides = profiles.get();
+            retainedProfiles = profiles.get();
+            if (overloadWouldExceedResources(
+                    context, evaluatedMetrics, scalingSummaries, retainedProfiles)) {
+                return false;
+            }
         }
 
         updateRecommendedParallelism(evaluatedMetrics.getVertexMetrics(), scalingSummaries);
@@ -195,9 +210,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                         autoScalerEventHandler);
 
         var memoryTuningEnabled = conf.get(AutoScalerOptions.MEMORY_TUNING_ENABLED);
-        if (throughputOnly
-                ? overloadWouldExceedResources(conf, evaluatedMetrics, scalingSummaries, context)
-                : scalingWouldExceedMaxResources(
+        if (!throughputOnly
+                && scalingWouldExceedMaxResources(
                         memoryTuningEnabled ? configOverrides.newConfigWithOverrides(conf) : conf,
                         jobTopology, evaluatedMetrics, scalingSummaries, context)) {
             return false;
@@ -235,7 +249,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         Map<String, String> requestedProfiles = null;
 
         if (throughputOnly) {
-            requestedProfiles = currentProfileOverrides;
+            requestedProfiles = formatRetainedProfiles(retainedProfiles);
             autoScalerStateStore.storeResourceProfileOverrides(context, requestedProfiles);
             LOG.info("A4S job={} mode=THROUGHPUT_SCALE_UP_RETAINED_PROFILES vertices={} evaluationId={}",
                     context.getJobID(), scalingSummaries.keySet(),
@@ -277,47 +291,101 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     }
 
     private boolean overloadWouldExceedResources(
-            Configuration conf,
+            Context context,
             EvaluatedMetrics evaluated,
             Map<JobVertexID, ScalingSummary> summaries,
-            Context context) {
-        // Native Justin placement creates one slot sharing group per vertex. Include the
-        // unchanged vertices and round TaskManager demand up.
-        long slots = evaluated.getVertexMetrics().entrySet().stream().mapToLong(entry -> {
-            var summary = summaries.get(entry.getKey());
-            return summary == null
-                    ? (int) entry.getValue().get(PARALLELISM).getCurrent()
-                    : summary.getNewParallelism();
-        }).sum();
-        int slotsPerTm = conf.get(TaskManagerOptions.NUM_TASK_SLOTS);
-        if (slotsPerTm <= 0) {
+            Map<JobVertexID, ResourceProfile> profiles) {
+        var snapshot = readLiveWorkers(context);
+        if (snapshot.isEmpty()) {
+            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_WORKER_SNAPSHOT_UNAVAILABLE);
             return true;
         }
-        long requiredTms = (slots + slotsPerTm - 1) / slotsPerTm;
-        var cpu = context.getTaskManagerCpu().orElse(0.);
-        long memory = MemoryTuning.getTotalMemory(conf, context).getBytes();
+        var running = new HashMap<ResourceProfile, Long>();
+        var requested = new HashMap<ResourceProfile, Long>();
+        profiles.forEach((vertex, profile) -> {
+            var summary = summaries.get(vertex);
+            long current =
+                    (int) evaluated.getVertexMetrics().get(vertex).get(PARALLELISM).getCurrent();
+            running.merge(profile, current, Math::addExact);
+            requested.merge(
+                    profile, summary == null ? current : summary.getNewParallelism(), Math::addExact);
+        });
+        var estimate = RetainedProfileResourceAccounting.estimate(
+                context.getJobID(), snapshot.get(), running, requested);
+        if (estimate.isEmpty()) {
+            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_RESOURCE_GEOMETRY_UNSUPPORTED);
+            return true;
+        }
+        var allocation = estimate.get();
+        var conf = context.getConfiguration();
         var cpuQuota = conf.getOptional(CPU_QUOTA);
         var memoryQuota = conf.getOptional(MEMORY_QUOTA);
-        if (requiredTms > Integer.MAX_VALUE
-                || (cpuQuota.isPresent() && (cpu <= 0 || requiredTms * cpu > cpuQuota.get()))
+        if ((cpuQuota.isPresent()
+                        && (!Double.isFinite(cpuQuota.get())
+                                || allocation.cpu.multiply(BigDecimal.valueOf(allocation.requestedWorkers))
+                                        .compareTo(BigDecimal.valueOf(cpuQuota.get())) > 0))
                 || (memoryQuota.isPresent()
-                        && (memory <= 0 || requiredTms > memoryQuota.get().getBytes() / memory))) {
+                        && allocation.requestedWorkers
+                                > memoryQuota.get().getBytes() / allocation.processMemory.getBytes())) {
             evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_RESOURCE_QUOTA);
             return true;
         }
-        if (cpu <= 0 || memory <= 0) {
-            return false;
-        }
-        var used = evaluated.getGlobalMetrics().get(NUM_TASK_SLOTS_USED);
-        if (used == null || !Double.isFinite(used.getCurrent()) || used.getCurrent() <= 0) {
-            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_SLOT_METRICS_UNAVAILABLE);
+        if (!resourceCheck.trySchedule(allocation.currentWorkers, allocation.requestedWorkers,
+                allocation.cpu.doubleValue(), allocation.processMemory)) {
+            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_CLUSTER_RESOURCES_UNAVAILABLE);
             return true;
         }
-        int currentTms = (int) Math.ceil(used.getCurrent() / slotsPerTm);
-        return !resourceCheck.trySchedule(currentTms, (int) requiredTms, cpu, new MemorySize(memory));
+        return false;
     }
 
-    private Optional<Map<String, String>> preserveLiveProfiles(
+    @VisibleForTesting
+    Optional<RetainedProfileResourceAccounting.WorkerSnapshot> readLiveWorkers(Context context) {
+        long timeoutMillis = context.getConfiguration().get(FLINK_CLIENT_TIMEOUT).toMillis();
+        try (var client = context.getRestClusterClient()) {
+            var jobs = client.listJobs().get(timeoutMillis, TimeUnit.MILLISECONDS).stream()
+                    .filter(job -> !job.getJobState().isGloballyTerminalState())
+                    .collect(Collectors.toList());
+            if (jobs.size() != 1 || jobs.get(0).getJobState() != JobStatus.RUNNING
+                    || !jobs.get(0).getJobId().equals(context.getJobID())) {
+                return Optional.empty();
+            }
+            var configured = client.sendRequest(ClusterConfigurationInfoHeaders.getInstance(),
+                            EmptyMessageParameters.getInstance(), EmptyRequestBody.getInstance())
+                    .get(timeoutMillis, TimeUnit.MILLISECONDS);
+            var deployed = Configuration.fromMap(configured.stream().collect(Collectors.toMap(
+                    ConfigurationInfoEntry::getKey, ConfigurationInfoEntry::getValue)));
+            var registered = client.sendRequest(TaskManagersHeaders.getInstance(),
+                            EmptyMessageParameters.getInstance(), EmptyRequestBody.getInstance())
+                    .get(timeoutMillis, TimeUnit.MILLISECONDS).getTaskManagerInfos();
+            var details = registered.stream().map(worker -> {
+                var headers = TaskManagerDetailsHeaders.getInstance();
+                var parameters = headers.getUnresolvedMessageParameters();
+                parameters.taskManagerIdParameter.resolve(worker.getResourceId());
+                return client.sendRequest(headers, parameters, EmptyRequestBody.getInstance())
+                        .thenApply(report -> {
+                            if (!worker.getResourceId().equals(report.getResourceId())
+                                    || !Objects.equals(worker.getTotalResource(), report.getTotalResource())
+                                    || !Objects.equals(worker.getFreeResource(), report.getFreeResource())) {
+                                throw new IllegalStateException("TaskManager changed during snapshot");
+                            }
+                            return report;
+                        });
+            }).collect(Collectors.toList());
+            CompletableFuture.allOf(details.toArray(new CompletableFuture<?>[0]))
+                    .get(timeoutMillis, TimeUnit.MILLISECONDS);
+            List<TaskManagerDetailsInfo> workers =
+                    details.stream().map(CompletableFuture::join).collect(Collectors.toList());
+            return Optional.of(new RetainedProfileResourceAccounting.WorkerSnapshot(deployed, workers));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return Optional.empty();
+        } catch (Exception e) {
+            LOG.debug("Unable to read registered workers for A4S job {}", context.getJobID(), e);
+            return Optional.empty();
+        }
+    }
+
+    private Optional<Map<JobVertexID, ResourceProfile>> preserveLiveProfiles(
             Context context,
             EvaluatedMetrics evaluated,
             Map<JobVertexID, ScalingSummary> summaries,
@@ -340,7 +408,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         if (!vertices.keySet().equals(evaluated.getVertexMetrics().keySet())) {
             return Optional.empty();
         }
-        var overrides = new HashMap<String, String>();
+        var retainedProfiles = new HashMap<JobVertexID, ResourceProfile>();
         long nowMillis = System.currentTimeMillis();
         for (var entry : vertices.entrySet()) {
             var id = entry.getKey();
@@ -371,15 +439,22 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                     return Optional.empty();
                 }
             }
-            // Both existing realizers parse decimal MiB values. Use that representation even
-            // for sizes that MemorySize.toString() would render in GiB.
-            overrides.put(id.toString(), "ResourceProfile{cpuCores=" + profile.getCpuCores().getValue()
-                    + ", taskHeapMemory=" + overrideMemory(memory.get(0))
-                    + ", taskOffHeapMemory=" + overrideMemory(memory.get(1))
-                    + ", managedMemory=" + overrideMemory(memory.get(2))
-                    + ", networkMemory=" + overrideMemory(memory.get(3)) + "}");
+            retainedProfiles.put(id, profile);
         }
-        return Optional.of(overrides);
+        return Optional.of(retainedProfiles);
+    }
+
+    private static Map<String, String> formatRetainedProfiles(
+            Map<JobVertexID, ResourceProfile> profiles) {
+        var overrides = new HashMap<String, String>();
+        // Both existing realizers parse decimal MiB values, even for multi-GiB reservations.
+        profiles.forEach((id, profile) -> overrides.put(id.toString(),
+                "ResourceProfile{cpuCores=" + profile.getCpuCores().getValue()
+                        + ", taskHeapMemory=" + overrideMemory(profile.getTaskHeapMemory())
+                        + ", taskOffHeapMemory=" + overrideMemory(profile.getTaskOffHeapMemory())
+                        + ", managedMemory=" + overrideMemory(profile.getManagedMemory())
+                        + ", networkMemory=" + overrideMemory(profile.getNetworkMemory()) + "}"));
+        return overrides;
     }
 
     private static String overrideMemory(MemorySize size) {

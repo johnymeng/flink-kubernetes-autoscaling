@@ -205,15 +205,32 @@ public class ScalingMetricEvaluator {
             }
 
             if (calibratedCosts == null) {
-                memoryParallelismCurves.put(
-                        vertex,
+                var vertexInfo = topology.get(vertex);
+                int currentParallelism = vertexInfo.getParallelism();
+                int minParallelism = Math.max(1, Math.min(currentParallelism, vertexMinParallelism));
+                int maxParallelism =
+                        Math.min(vertexInfo.getMaxParallelism(),
+                                Math.max(currentParallelism, vertexMaxParallelism));
+                MemoryParallelismCurve curve =
                         MemoryParallelismCurve.fromMissRateCurve(
                                 targetRate,
                                 missLatencySec,
                                 hitLatencySec,
-                                vertexMinParallelism,
-                                vertexMaxParallelism,
-                                missRateCurve));
+                                minParallelism,
+                                maxParallelism,
+                                missRateCurve);
+                if (curve.getPoints().isEmpty()) {
+                    cacheCostFailures.put(vertex, OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED);
+                    if (!onlineCacheCosts) {
+                        var decision = decisions.get(vertex);
+                        decisions.put(vertex, new CacheDecision(configuredPolicy, null,
+                                decision.getObservation(), null, null,
+                                OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED, finite(targetRate),
+                                observedMinBytes, observedMaxBytes, null, fixedCosts, null));
+                    }
+                } else {
+                    memoryParallelismCurves.put(vertex, curve);
+                }
             } else {
                 MemoryParallelismCurve curve =
                         calibratedCurve(

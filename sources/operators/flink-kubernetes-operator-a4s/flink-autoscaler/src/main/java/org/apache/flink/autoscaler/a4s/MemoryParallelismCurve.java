@@ -262,15 +262,12 @@ public class MemoryParallelismCurve {
                     ((parallelism / targetThroughputPerSec) - zeroMissSecPerRecord)
                             / missPenaltySecPerRecord;
 
-            if (calibrated && maximumMissRate < 0) {
+            if (maximumMissRate < 0) {
                 continue;
             }
-            if (!calibrated && maximumMissRate <= 0) {
-                throw new IllegalStateException(
-                        String.format(
-                                "Maximum miss-rate <= 0. parallelism=%d targetThroughput=%f hitLatencySec=%f missLatencySec=%f",
-                                parallelism, targetThroughputPerSec, zeroMissSecPerRecord,
-                                zeroMissSecPerRecord + missPenaltySecPerRecord));
+            // A fixed zero-miss budget requires an observed zero-miss point.
+            if (!calibrated && maximumMissRate == 0 && minimumMissRate != 0) {
+                continue;
             }
 
             // Perhaps any level miss rate is acceptable, so we clamp to 1.0

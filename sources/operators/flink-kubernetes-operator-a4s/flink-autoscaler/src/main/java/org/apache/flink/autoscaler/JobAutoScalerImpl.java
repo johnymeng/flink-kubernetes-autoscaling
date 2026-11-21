@@ -144,7 +144,7 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                     if (!strictCacheObservations || !isActiveOnline(ctx.getConfiguration())) {
                         applyConfigOverrides(ctx);
                     }
-                } else if (enabled && strictCacheObservations && isActiveOnline(ctx.getConfiguration())) {
+                } else if (enabled && strictCacheObservations) {
                     scalingRealizer.preserveAppliedResourceOverrides(ctx);
                 }
             } catch (Exception e) {

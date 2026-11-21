@@ -59,11 +59,13 @@ final class A4SCacheObservationAggregator {
         long latestStart = Long.MIN_VALUE;
         double minRate = Double.POSITIVE_INFINITY;
         double maxRate = 0;
+        double totalLookupRate = 0;
         int commonBins = Integer.MAX_VALUE;
         int totalBins = 0;
         long totalReferences = 0;
         long binBytes = 0;
         CacheObservation first = observations.get(0);
+        List<Double> lookupRates = new ArrayList<>();
         List<Long> denominators = new ArrayList<>();
         try {
             for (CacheObservation observation : observations) {
@@ -96,6 +98,8 @@ final class A4SCacheObservationAggregator {
                 double rate = (double) window.references / window.durationNanos();
                 minRate = Math.min(minRate, rate);
                 maxRate = Math.max(maxRate, rate);
+                lookupRates.add(rate);
+                totalLookupRate += rate;
                 totalBins = Math.addExact(totalBins, histogram.getNumBuckets());
                 if (totalBins > MAX_VERTEX_BUCKETS) {
                     return new Result(Status.OVERSIZE);
@@ -105,6 +109,7 @@ final class A4SCacheObservationAggregator {
                         Math.multiplyExact(
                                 histogram.getBucketSizeScaling(),
                                 histogram.getCacheItemSizeBytes());
+                // Still reject overflow of the batch's exact reference count.
                 totalReferences = Math.addExact(totalReferences, window.references);
                 denominators.add(sampledReferences(histogram));
             }
@@ -127,11 +132,11 @@ final class A4SCacheObservationAggregator {
                     cumulativeHits[index] =
                             Math.addExact(cumulativeHits[index], observation.histogram.getFrequency(bin));
                     double localMissRate = 1 - (double) cumulativeHits[index] / denominators.get(index);
-                    weightedMisses += observation.window.references * localMissRate;
+                    weightedMisses += lookupRates.get(index) * localMissRate;
                 }
                 long localBytes = Math.multiplyExact(bin + 1L, binBytes);
                 long totalBytes = Math.multiplyExact(localBytes, expected.size());
-                points.add(new MissRateCurve.Point(totalBytes, weightedMisses / totalReferences));
+                points.add(new MissRateCurve.Point(totalBytes, weightedMisses / totalLookupRate));
             }
             return new Result(Status.VALID, new MissRateCurve(points));
         } catch (ArithmeticException overflow) {

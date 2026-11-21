@@ -85,16 +85,34 @@ public class MemoryParallelismCurveTest {
     }
 
     @Test
-    void testFromMissRateCurve_negativeMissRateThrowsException() {
+    void testFromMissRateCurve_skipsNegativeMissBudgets() {
         MissRateCurve mrc = new MissRateCurve(List.of(
-                new MissRateCurve.Point(100L, 0.5)
+                new MissRateCurve.Point(100L, 0.0)
             ));
 
-        assertThrows(IllegalStateException.class, () -> MemoryParallelismCurve.fromMissRateCurve(
-                1000.0,  // targetThroughput
-                5e-2,    // missLatencySec
-                5e-3,    // hitLatencySec
-                1, 24, mrc));
+        double demand = Math.nextUp(200_000.0);
+        var curve = MemoryParallelismCurve.fromMissRateCurve(demand, 5e-3, 5e-6, 1, 3, mrc);
+
+        assertThat(curve.getPoints()).extracting(MemoryParallelismCurve.Point::getParallelism)
+                .containsExactly(2, 3);
+    }
+
+    @Test
+    void testFromMissRateCurve_zeroBudgetRequiresAnActualZeroMissPoint() {
+        var positiveMisses = new MissRateCurve(List.of(new MissRateCurve.Point(64L << 20, 0.001)));
+        var zeroMisses = new MissRateCurve(List.of(
+                new MissRateCurve.Point(64L << 20, 0.001),
+                new MissRateCurve.Point(128L << 20, 0.0)));
+
+        var withoutZero = MemoryParallelismCurve.fromMissRateCurve(
+                200_000.0, 5e-3, 5e-6, 1, 2, positiveMisses);
+        assertThat(withoutZero.getMemoryMbForParallelism(1)).isEmpty();
+        assertThat(withoutZero.getMemoryMbForParallelism(2)).contains(64.0);
+
+        var withZero = MemoryParallelismCurve.fromMissRateCurve(
+                200_000.0, 5e-3, 5e-6, 1, 2, zeroMisses);
+        assertThat(withZero.getMemoryMbForParallelism(1)).contains(128.0);
+        assertThat(withZero.hasSupportedCacheSize(1)).isTrue();
     }
 
     @Test

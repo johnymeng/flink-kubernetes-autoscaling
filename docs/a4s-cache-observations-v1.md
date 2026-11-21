@@ -43,10 +43,12 @@ failure and baseline only.
 
 ## Aggregation and quality
 
-For cache *i*, let *Lᵢ* be exact interval references, *Hᵢ* the total sampled references including
-cold misses, and *hᵢ(Cᵢ)* the sampled references with reuse distance up through byte capacity *Cᵢ*.
-The local miss rate is *1 − hᵢ(Cᵢ)/Hᵢ*. The vertex miss rate is the sum of local miss rates weighted
-by *Lᵢ*, divided by total *Lᵢ*. This projection uses equal per-cache capacity *Cᵢ = C/P* for
+For cache *i*, let *Lᵢ* be exact interval references, *Dᵢ* the monotonic window duration, *Hᵢ* the
+total sampled references including complete misses, and *hᵢ(Cᵢ)* the sampled references with reuse
+distance up through byte capacity *Cᵢ*. The local miss rate is *1 − hᵢ(Cᵢ)/Hᵢ*. The vertex miss rate
+is *Σᵢ rᵢ(1 − hᵢ(Cᵢ)/Hᵢ) / Σᵢ rᵢ*, where *rᵢ = Lᵢ/Dᵢ* is the cache's lookup rate. Raw reference
+counts give equivalent weights when the observation durations match.
+This projection uses equal per-cache capacity *Cᵢ = C/P* for
 *P* distinct, exclusive caches with matching actual capacities, sampling rate and bin geometry.
 It uses common support only and requires max/min lookup rate at most 1.25. The cache budgets
 in the observations are native block-cache bytes. Allocation and managed-memory translation
