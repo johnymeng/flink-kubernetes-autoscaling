@@ -900,13 +900,13 @@ class A4SCacheObservationHoldTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"stale-attempt", "stale-snapshot", "pending", "rounded", "overcommit"})
+    @ValueSource(strings = {"stale-attempt", "stale-snapshot", "pending", "pending-topology", "rounded", "overcommit"})
     void unsafePhysicalEvidenceKeepsRecoveryHeld(String defect) throws Exception {
         var replay = new OverloadFixture(160L << 20, Reason.CAPACITY_UNSUPPORTED, 2);
         replay.setExactEvidence(defect);
         replay.assertNoRequest();
 
-        var expected = defect.startsWith("stale")
+        var expected = defect.startsWith("stale") || defect.equals("pending-topology")
                 ? Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED
                 : Reason.OVERLOAD_RESOURCE_GEOMETRY_UNSUPPORTED;
         assertEquals(expected, replay.evaluation().getCacheEvaluation().getHoldReason());
@@ -1295,8 +1295,10 @@ class A4SCacheObservationHoldTest {
                         throw new TimeoutException();
                     }
                     var profile = appliedSlots == null ? resourceProfile(192) : resourceProfile(158);
+                    int requestedJoinParallelism = observedJoinParallelism
+                            + ("pending-topology".equals(exactEvidenceCase) ? 1 : 0);
                     var requested = JustinResourceRequirements.newBuilder()
-                            .setParallelismForJobVertex(join, 1, observedJoinParallelism, profile)
+                            .setParallelismForJobVertex(join, 1, requestedJoinParallelism, profile)
                             .setParallelismForJobVertex(source, 1, edgeParallelism, resourceProfile(158))
                             .setParallelismForJobVertex(sink, 1, edgeParallelism, resourceProfile(158))
                             .build();

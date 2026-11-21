@@ -51,6 +51,7 @@ import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.justin.AppliedSlotSnapshot;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.JustinVertexResourceRequirements;
 import org.apache.flink.runtime.rest.messages.ClusterConfigurationInfoHeaders;
 import org.apache.flink.runtime.rest.messages.ConfigurationInfoEntry;
 import org.apache.flink.runtime.rest.messages.EmptyMessageParameters;
@@ -680,6 +681,10 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             var id = entry.getKey();
             int current = (int) evaluated.getVertexMetrics().get(id).get(PARALLELISM).getCurrent();
             var tasks = appliedByVertex == null ? null : appliedByVertex.get(id);
+            // The applied profile cannot attest that a different requested topology has landed.
+            if (!matchesCurrentParallelism(entry.getValue(), current)) {
+                return Optional.empty();
+            }
             var profile = tasks == null ? currentResourceProfile(requirements.get(), id, current)
                     : RetainedProfileResourceAccounting.verifiedProfile(tasks, current);
             if (profile == null || !profile.getExtendedResources().isEmpty()) {
@@ -823,13 +828,19 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     private static ResourceProfile currentResourceProfile(
             JustinResourceRequirements requirements, JobVertexID id, int parallelism) {
         var live = requirements.getJobVertexParallelisms().get(id);
-        if (live == null || parallelism <= 0 || live.getParallelism().getLowerBound() != 1
-                || live.getParallelism().getUpperBound() != parallelism) {
+        if (!matchesCurrentParallelism(live, parallelism)) {
             return null;
         }
         var profile = live.getResourceProfile();
         return profile.equals(ResourceProfile.UNKNOWN) || profile.equals(ResourceProfile.ANY)
                 ? null : profile;
+    }
+
+    private static boolean matchesCurrentParallelism(
+            @Nullable JustinVertexResourceRequirements requirements, int parallelism) {
+        return requirements != null && parallelism > 0
+                && requirements.getParallelism().getLowerBound() == 1
+                && requirements.getParallelism().getUpperBound() == parallelism;
     }
 
     private boolean resolveA4sManagedMemory(
