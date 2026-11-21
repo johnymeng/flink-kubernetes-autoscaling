@@ -170,6 +170,33 @@ class A4SCacheObservationTransportTest {
     }
 
     @Test
+    void carriesObservedSlotBytesWithoutInferringThemFromTheRequestedProfile() throws Exception {
+        long now = System.currentTimeMillis();
+        CacheObservation base = paired(observation(0, 0, new long[] {7}, now), now, 1, 3);
+        addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, base.toMetricString());
+        CacheObservation old = response(expectedAttempts(0, 0)).getCacheObservations().subtasks.get(0);
+        assertNull(old.endpoint.appliedSlot);
+
+        CacheObservation.Endpoint prior = base.endpoint;
+        CacheObservation.AppliedSlot slot = new CacheObservation.AppliedSlot(
+                "0123456789abcdef0123456789abcdef", (192L << 20) + 37);
+        CacheObservation withReceipt = new CacheObservation(
+                base.version, base.job, base.vertex, base.subtask, base.attempt,
+                base.status, base.window, base.histogram, new CacheObservation.Endpoint(
+                        prior.ownershipGeneration, prior.acquisitionStartNanos, prior.nativeNanos,
+                        prior.acquisitionEndNanos, prior.totalLookups, prior.totalMisses,
+                        prior.cumulativeHistogram, prior.timing, slot));
+        addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, withReceipt.toMetricString());
+        CacheObservation live = response(expectedAttempts(0, 0)).getCacheObservations().subtasks.get(0);
+        assertEquals(base.attempt, live.attempt);
+        assertEquals(base.window.cacheId, live.window.cacheId);
+        assertEquals(base.window.epoch, live.window.epoch);
+        assertEquals(base.window.capacityBytes, live.window.capacityBytes);
+        assertEquals(slot.allocationId, live.endpoint.appliedSlot.allocationId);
+        assertEquals(slot.managedMemoryBytes, live.endpoint.appliedSlot.managedMemoryBytes);
+    }
+
+    @Test
     void preservesPairedTaskDataWhenOnlyPooledLookupRateIsUnsupported() throws Exception {
         long now = System.currentTimeMillis();
         for (int subtask = 0; subtask < 2; subtask++) {

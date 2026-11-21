@@ -383,6 +383,7 @@ public class Task
         this.taskManagerConfig = Preconditions.checkNotNull(taskManagerConfig);
 
         this.metrics = metricGroup;
+        this.metrics.registerAppliedSlot(allocationId.toHexString(), memoryManager.getMemorySize());
 
         this.partitionProducerStateChecker =
                 Preconditions.checkNotNull(partitionProducerStateChecker);

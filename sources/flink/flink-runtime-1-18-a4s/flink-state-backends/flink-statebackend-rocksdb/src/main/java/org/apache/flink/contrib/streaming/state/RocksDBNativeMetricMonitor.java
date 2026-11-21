@@ -25,6 +25,7 @@ import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.View;
 import org.apache.flink.runtime.executiongraph.IOMetrics;
 import org.apache.flink.runtime.metrics.groups.InternalOperatorMetricGroup;
+import org.apache.flink.runtime.metrics.groups.TaskMetricGroup;
 import org.apache.flink.runtime.metrics.scope.ScopeFormat;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SCacheCostSample;
 
@@ -77,6 +78,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
 
     @Nullable private A4SBlockLatencyWindow a4sBlockLatency;
     @Nullable private A4SCacheTelemetry.TimingReader cacheTiming;
+    @Nullable private CacheObservation.AppliedSlot appliedSlot;
 
     public RocksDBNativeMetricMonitor(
             @Nonnull RocksDBNativeMetricOptions options,
@@ -168,6 +170,10 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                     abiVersion >= 3 ? TickerType.valueOf("A4S_BLOCK_LATENCY_COMPACTION_MISS") : null;
             String attempt = operator.getAllVariables().get(ScopeFormat.SCOPE_TASK_ATTEMPT_ID);
             if (attempt != null) {
+                TaskMetricGroup task = (TaskMetricGroup) operator.getTaskMetricGroup();
+                if (attempt.equals(task.executionId().toString())) {
+                    appliedSlot = task.getAppliedSlot();
+                }
                 cacheTiming = (state, wallTime, nativeNanos) -> readCacheCostSample(
                         operator, attempt, histograms, state, wallTime, nativeNanos,
                         coveredHits, coveredMisses, compactionHits, compactionMisses, abiVersion);
@@ -303,7 +309,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             } else {
                 try {
                     return cacheMonitor.metric(
-                            job, vertex, subtask, attempt, System.nanoTime(), cacheTiming);
+                            job, vertex, subtask, attempt, System.nanoTime(), cacheTiming, appliedSlot);
                 } catch (RuntimeException error) {
                     LOG.debug("Could not publish cache observation", error);
                     status = CacheObservation.Status.MALFORMED;

@@ -295,6 +295,8 @@ public class EvaluatedMetrics {
         @Nullable Integer ownerCount;
         @Nullable String population;
         @Nullable String chargePolicy;
+        @Nullable String appliedAllocationId;
+        @Nullable Long appliedManagedMemoryBytes;
         @Nullable Long intervalStartNanos;
         @Nullable Long intervalEndNanos;
         @Nullable Long observedAtMillis;
@@ -303,12 +305,15 @@ public class EvaluatedMetrics {
 
         static ObservationEndpoint from(CacheObservation observation) {
             var window = observation.window;
+            var appliedSlot = observation.endpoint == null ? null : observation.endpoint.appliedSlot;
             return new ObservationEndpoint(observation.subtask, observation.attempt,
                     observation.status, window == null ? null : window.process,
                     window == null ? null : window.cacheId, window == null ? null : window.epoch,
                     window == null ? null : window.sequence, window == null ? null : window.capacityBytes,
                     window == null ? null : window.owners.size(), window == null ? null : window.population,
                     window == null ? null : window.chargePolicy,
+                    appliedSlot == null ? null : appliedSlot.allocationId,
+                    appliedSlot == null ? null : appliedSlot.managedMemoryBytes,
                     window == null ? null : window.startNanos, window == null ? null : window.endNanos,
                     window == null ? null : window.observedAtMillis,
                     window == null ? null : window.references, window == null ? null : window.misses);

@@ -118,9 +118,9 @@ final class A4SCacheTelemetry {
 
     private synchronized String metric(
             long monitor, String job, String vertex, int subtask, String attempt, long nowNanos,
-            @Nullable TimingReader timing) {
+            @Nullable TimingReader timing, @Nullable CacheObservation.AppliedSlot appliedSlot) {
         A4SCacheSnapshots.Publication<Interval> publication =
-                snapshots.poll(monitor, nowNanos, () -> capture(monitor, timing));
+                snapshots.poll(monitor, nowNanos, () -> capture(monitor, timing, appliedSlot));
         Interval interval = publication.value;
         Status status = !compatible ? Status.INCOMPATIBLE
                 : publication.ownershipChanged ? Status.SHARED_CACHE
@@ -165,7 +165,9 @@ final class A4SCacheTelemetry {
                 interval.histogram).toMetricString());
     }
 
-    private Interval capture(long monitor, @Nullable TimingReader timing) {
+    private Interval capture(
+            long monitor, @Nullable TimingReader timing,
+            @Nullable CacheObservation.AppliedSlot appliedSlot) {
         long start = System.nanoTime();
         Interval interval = readInterval();
         long nativeNanos = System.nanoTime();
@@ -185,7 +187,7 @@ final class A4SCacheTelemetry {
                     new StackDistanceHistogram(
                             Arrays.copyOfRange(state, SNAPSHOT_HEADER, state.length),
                             state[8], 1, binItems, 4096),
-                    counters));
+                    counters, appliedSlot));
     }
 
     private Interval readInterval() {
@@ -440,12 +442,12 @@ final class A4SCacheTelemetry {
         }
 
         String metric(String job, String vertex, int subtask, String attempt, long nowNanos) {
-            return metric(job, vertex, subtask, attempt, nowNanos, null);
+            return metric(job, vertex, subtask, attempt, nowNanos, null, null);
         }
 
         String metric(String job, String vertex, int subtask, String attempt, long nowNanos,
-                @Nullable TimingReader timing) {
-            return publisher.metric(owner, job, vertex, subtask, attempt, nowNanos, timing);
+                @Nullable TimingReader timing, @Nullable CacheObservation.AppliedSlot appliedSlot) {
+            return publisher.metric(owner, job, vertex, subtask, attempt, nowNanos, timing, appliedSlot);
         }
 
         @Override

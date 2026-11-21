@@ -18,6 +18,7 @@
 
 package org.apache.flink.runtime.metrics.groups;
 
+import org.apache.flink.a4s.core.CacheObservation.AppliedSlot;
 import org.apache.flink.annotation.Internal;
 import org.apache.flink.metrics.CharacterFilter;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
@@ -48,6 +49,7 @@ public class TaskMetricGroup extends ComponentMetricGroup<TaskManagerJobMetricGr
     static final int METRICS_OPERATOR_NAME_MAX_LENGTH = 80;
 
     private final TaskIOMetricGroup ioMetrics;
+    @Nullable private volatile AppliedSlot appliedSlot;
 
     /**
      * The execution Id uniquely identifying the executed task represented by this metrics group.
@@ -97,6 +99,15 @@ public class TaskMetricGroup extends ComponentMetricGroup<TaskManagerJobMetricGr
 
     public final TaskManagerJobMetricGroup parent() {
         return parent;
+    }
+
+    public void registerAppliedSlot(String allocationId, long managedMemoryBytes) {
+        appliedSlot = new AppliedSlot(allocationId, managedMemoryBytes);
+    }
+
+    @Nullable
+    public AppliedSlot getAppliedSlot() {
+        return appliedSlot;
     }
 
     public ExecutionAttemptID executionId() {

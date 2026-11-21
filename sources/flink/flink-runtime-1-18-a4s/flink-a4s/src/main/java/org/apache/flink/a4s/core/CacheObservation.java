@@ -150,6 +150,23 @@ public final class CacheObservation {
                 : new CacheObservation(version, job, vertex, subtask, attempt, status, window, histogram);
     }
 
+    /** Direct TaskExecutor evidence from the active attempt's physical slot memory manager. */
+    public static final class AppliedSlot {
+        public final String allocationId;
+        public final long managedMemoryBytes;
+
+        @JsonCreator
+        public AppliedSlot(
+                @JsonProperty("allocationId") String allocationId,
+                @JsonProperty("managedMemoryBytes") long managedMemoryBytes) {
+            this.allocationId = Objects.requireNonNull(allocationId);
+            if (!allocationId.matches("[0-9a-f]{32}") || managedMemoryBytes < 0) {
+                throw new IllegalArgumentException("Invalid observed slot allocation");
+            }
+            this.managedMemoryBytes = managedMemoryBytes;
+        }
+    }
+
     /** Cumulative cache data and the task/DB read acquired at the same boundary. */
     public static final class Endpoint {
         public final long ownershipGeneration;
@@ -160,6 +177,9 @@ public final class CacheObservation {
         public final long totalMisses;
         public final StackDistanceHistogram cumulativeHistogram;
         public final String timing;
+        @JsonProperty("appliedSlot")
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        @Nullable public final AppliedSlot appliedSlot;
 
         @JsonCreator
         public Endpoint(
@@ -171,6 +191,15 @@ public final class CacheObservation {
                 @JsonProperty("totalMisses") long totalMisses,
                 @JsonProperty("cumulativeHistogram") StackDistanceHistogram cumulativeHistogram,
                 @JsonProperty("timing") String timing) {
+            this(ownershipGeneration, acquisitionStartNanos, nativeNanos, acquisitionEndNanos,
+                    totalLookups, totalMisses, cumulativeHistogram, timing, null);
+        }
+
+        public Endpoint(
+                long ownershipGeneration, long acquisitionStartNanos, long nativeNanos,
+                long acquisitionEndNanos, long totalLookups, long totalMisses,
+                StackDistanceHistogram cumulativeHistogram, String timing,
+                @Nullable AppliedSlot appliedSlot) {
             this.ownershipGeneration = ownershipGeneration;
             this.acquisitionStartNanos = acquisitionStartNanos;
             this.nativeNanos = nativeNanos;
@@ -179,6 +208,7 @@ public final class CacheObservation {
             this.totalMisses = totalMisses;
             this.cumulativeHistogram = Objects.requireNonNull(cumulativeHistogram);
             this.timing = Objects.requireNonNull(timing);
+            this.appliedSlot = appliedSlot;
         }
 
         public boolean withinAcquisitionBound() {
