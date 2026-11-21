@@ -31,6 +31,7 @@ import lombok.EqualsAndHashCode;
 import lombok.NoArgsConstructor;
 import lombok.ToString;
 import lombok.Value;
+import lombok.With;
 
 import javax.annotation.Nullable;
 
@@ -130,11 +131,11 @@ public class EvaluatedMetrics {
     @Value
     public static class CacheDecision {
         CacheMode mode;
-        @Nullable CacheMode selectedCostPolicy;
+        @With @Nullable CacheMode selectedCostPolicy;
         ObservationEvidence observation;
         @Nullable ObservationEvidence fitStartObservation;
         @Nullable OnlineCacheCost.FitResult fit;
-        @Nullable OnlineCacheCost.Reason reason;
+        @With @Nullable OnlineCacheCost.Reason reason;
         @Nullable Double demandRecordsPerSecond;
         @Nullable Long observedCurveMinBytes;
         @Nullable Long observedCurveMaxBytes;

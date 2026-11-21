@@ -256,6 +256,14 @@ public class ScalingMetricEvaluatorTest {
         assertEquals(10_000, overloadDecision.getDemandRecordsPerSecond(), 1e-8);
         assertNotEquals(online.getCacheEvaluation().getId(), overloaded.getCacheEvaluation().getId());
 
+        var latest = snapshots.get(snapshots.lastKey());
+        var timing = latest.getCacheCostSamples();
+        latest.setCacheCostSamples(Map.of());
+        var missingTiming = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.MISSING_TIMING, missingTiming.getCacheCostFailures().get(vertex));
+        assertEquals(online.getVertexMetrics(), missingTiming.getVertexMetrics());
+        latest.setCacheCostSamples(timing);
+
         snapshots.get(snapshots.lastKey()).getCacheCostSamples().get(vertex).get(0)
                 .setAttempt("restarted");
         var invalid = evaluator.evaluate(config, history, Duration.ZERO);
@@ -375,7 +383,7 @@ public class ScalingMetricEvaluatorTest {
             metrics.setCacheCostSamples(Map.of(vertex, samples));
             snapshots.put(Instant.ofEpochSecond(60L * i), metrics);
         }
-        return history;
+        return new CollectedMetricHistory(history.getJobTopology(), snapshots, Instant.EPOCH);
     }
 
     private static CacheObservationBatch pair(CacheObservationBatch batch, List<CacheCostSample> samples) {
@@ -538,7 +546,7 @@ public class ScalingMetricEvaluatorTest {
     }
 
     @Test
-    void abortsEvaluationWhenEveryCalibratedParallelismIsInfeasible() {
+    void retainsThroughputMetricsWhenEveryCalibratedParallelismIsInfeasible() {
         var vertex = new JobVertexID();
         var config =
                 Configuration.fromMap(
@@ -549,9 +557,12 @@ public class ScalingMetricEvaluatorTest {
                                 "2"));
 
         var history = cacheCostHistory(vertex);
-        assertThrows(
-                IllegalStateException.class,
-                () -> evaluator.evaluate(config, history, Duration.ZERO));
+        var result = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED,
+                result.getCacheCostFailures().get(vertex));
+        assertTrue(result.getVertexMetrics().containsKey(vertex));
+        assertFalse(result.getMemoryParallelismCurves().containsKey(vertex));
+        assertNull(result.getCacheEvaluation().getVertices().get(vertex).getSelectedCostPolicy());
     }
 
     @Test

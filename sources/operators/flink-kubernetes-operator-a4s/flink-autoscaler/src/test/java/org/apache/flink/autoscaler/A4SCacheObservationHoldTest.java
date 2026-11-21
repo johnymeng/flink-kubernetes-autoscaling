@@ -22,6 +22,7 @@ import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.autoscaler.a4s.OnlineCacheCost.Reason;
+import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
@@ -38,6 +39,7 @@ import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.ShipStrategy;
 import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.configuration.ClusterOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.DeploymentOptions;
@@ -73,6 +75,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -288,9 +291,9 @@ class A4SCacheObservationHoldTest {
                     org.apache.flink.configuration.Configuration conf,
                     CollectedMetricHistory metrics, Duration restartTime) {
                 return new EvaluatedMetrics(
-                        Map.of(vertex, new HashMap<>(Map.of(
-                                ScalingMetric.PARALLELISM, EvaluatedScalingMetric.of(1)))),
-                        Map.of());
+                        Map.of(vertex, OverloadFixture.balancedMetrics(1)), healthyGlobalMetrics(),
+                        Map.of(vertex, MemoryParallelismCurve.builder().targetThroughput(1000)
+                                .addPoint(1, 1).build()));
             }
         };
         var requests = new AtomicInteger();
@@ -527,14 +530,193 @@ class A4SCacheObservationHoldTest {
     }
 
     @Test
-    void anUnqualifiedFitOrUnsupportedCurveCannotUseTheOverloadPath() throws Exception {
-        for (var reason : List.of(Reason.MISSING_HOLDOUT, Reason.CAPACITY_UNSUPPORTED)) {
+    void unsupportedProjectionAndMissingTimingDoNotVetoOrdinaryThroughputScaleUp() throws Exception {
+        for (var reason : List.of(Reason.CAPACITY_UNSUPPORTED, Reason.MISSING_TIMING)) {
             var replay = new OverloadFixture(160L << 20, reason);
             replay.autoscaler.scale(replay.context);
 
-            assertEquals(0, replay.profileReads.get());
-            assertEquals(0, replay.requests.get());
+            assertEquals(1, replay.requests.get(), reason.name());
+            assertEquals(1, replay.profileReads.get());
+            assertTrue(Integer.parseInt(replay.stateStore.getParallelismOverrides(replay.context)
+                    .get(replay.join.toString())) > 1);
+            assertEquals(reason, replay.evaluation().getCacheCostFailures().get(replay.join));
+            assertEquals(CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES,
+                    replay.evaluation().getCacheEvaluation().getAction());
         }
+    }
+
+    @Test
+    void aQualifiedSameParallelismCacheProjectionDoesNotVetoThroughputRecovery() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.QUALIFIED);
+        replay.autoscaler.scale(replay.context);
+
+        assertTrue(replay.evaluation().getMemoryParallelismCurves().containsKey(replay.join));
+        assertEquals(1, replay.requests.get());
+        assertEquals(CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES,
+                replay.evaluation().getCacheEvaluation().getAction());
+    }
+
+    @Test
+    void missingCurveCanRecoverUsingASeparateCurrentCapacityObservation() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.MISSING_OBSERVATIONS);
+        replay.curveAvailable = false;
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals(CacheObservation.Status.INCOMPLETE,
+                replay.evaluation().getCacheEvaluation().getObservationHolds().get(replay.join));
+        assertEquals(1, replay.requests.get());
+    }
+
+    @Test
+    void rateSkewWithValidIndividualCapacityDoesNotBlockRecovery() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.MISSING_OBSERVATIONS);
+        replay.batchStatus = CacheObservation.Status.AGGREGATE_RATE_SKEW;
+        replay.curveAvailable = false;
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals(CacheObservation.Status.INCOMPLETE,
+                replay.evaluation().getCacheEvaluation().getObservationHolds().get(replay.join));
+        assertEquals(1, replay.requests.get());
+    }
+
+    @Test
+    void throughputRecoveryDoesNotRunOrClearMemoryTuningInShadowMode() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.MISSING_OBSERVATIONS);
+        replay.curveAvailable = false;
+        var conf = replay.context.getConfiguration();
+        conf.set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW, true);
+        conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, true);
+        var stored = new ConfigChanges().addOverride(
+                TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(1024));
+        replay.stateStore.storeConfigChanges(replay.context, stored);
+
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals(1, replay.requests.get());
+        assertEquals(0, replay.configRealizations.get());
+        assertEquals(stored.getOverrides(), replay.stateStore.getConfigChanges(replay.context).getOverrides());
+    }
+
+    @Test
+    void invalidThroughputDataAndUncollectedWindowsHold() throws Exception {
+        for (double invalid : List.of(Double.NaN, Double.POSITIVE_INFINITY, 0., -1.)) {
+            var replay = new OverloadFixture(160L << 20, Reason.INSUFFICIENT_CURRENT_PARALLELISM);
+            replay.joinMetrics.put(ScalingMetric.TRUE_PROCESSING_RATE, EvaluatedScalingMetric.avg(invalid));
+            replay.assertNoRequest();
+            assertEquals(0, replay.profileReads.get());
+        }
+
+        var invalidDemand = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        invalidDemand.joinMetrics.put(ScalingMetric.TARGET_DATA_RATE,
+                EvaluatedScalingMetric.avg(Double.POSITIVE_INFINITY));
+        invalidDemand.assertNoRequest();
+        assertEquals(0, invalidDemand.profileReads.get());
+
+        var warming = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        warming.fullyCollected = false;
+        warming.assertNoRequest();
+        assertEquals(0, warming.profileReads.get());
+        assertEquals(Reason.INSUFFICIENT_HISTORY, warming.evaluation().getCacheEvaluation().getHoldReason());
+    }
+
+    @Test
+    void recoveryRespectsExecutionExclusionsAndParallelismLimits() throws Exception {
+        var disabled = new OverloadFixture(160L << 20, Reason.INSUFFICIENT_CURRENT_PARALLELISM);
+        disabled.context.getConfiguration().set(AutoScalerOptions.SCALING_ENABLED, false);
+        disabled.assertNoRequest();
+
+        var excludedTime = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        excludedTime.context.getConfiguration().set(AutoScalerOptions.EXCLUDED_PERIODS, List.of("* * * * * ?"));
+        excludedTime.assertNoRequest();
+
+        var excluded = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        excluded.context.getConfiguration()
+                .set(AutoScalerOptions.VERTEX_EXCLUDE_IDS, List.of(excluded.join.toHexString()));
+        excluded.assertNoRequest();
+
+        var configuredLimit = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        configuredLimit.context.getConfiguration().set(AutoScalerOptions.VERTEX_MAX_PARALLELISM, 1);
+        configuredLimit.assertNoRequest();
+
+        var vertexLimit = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        vertexLimit.joinMetrics.put(ScalingMetric.MAX_PARALLELISM, EvaluatedScalingMetric.of(1));
+        vertexLimit.assertNoRequest();
+
+        var sourceLimit = new OverloadFixture(160L << 20, Reason.MISSING_TIMING, 2);
+        sourceLimit.joinMetrics.putAll(OverloadFixture.balancedMetrics(1));
+        sourceLimit.sourceMetrics.putAll(OverloadFixture.overloadedMetrics(2));
+        sourceLimit.sourceMetrics.put(ScalingMetric.NUM_SOURCE_PARTITIONS, EvaluatedScalingMetric.of(2));
+        sourceLimit.assertNoRequest();
+    }
+
+    @Test
+    void recoveryReusesOrdinaryScaleFactorAndSourcePartitionRules() throws Exception {
+        var factorLimit = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        factorLimit.context.getConfiguration().set(AutoScalerOptions.MAX_SCALE_UP_FACTOR, 1.);
+        factorLimit.autoscaler.scale(factorLimit.context);
+        assertEquals("2", factorLimit.stateStore.getParallelismOverrides(factorLimit.context)
+                .get(factorLimit.join.toString()));
+
+        var sourceLimit = new OverloadFixture(160L << 20, Reason.MISSING_TIMING, 2);
+        sourceLimit.joinMetrics.putAll(OverloadFixture.balancedMetrics(1));
+        sourceLimit.sourceMetrics.putAll(OverloadFixture.overloadedMetrics(2));
+        sourceLimit.sourceMetrics.put(ScalingMetric.NUM_SOURCE_PARTITIONS, EvaluatedScalingMetric.of(4));
+        sourceLimit.autoscaler.scale(sourceLimit.context);
+        assertEquals(Map.of(sourceLimit.join.toString(), "1", sourceLimit.source.toString(), "4",
+                        sourceLimit.sink.toString(), "2"),
+                sourceLimit.stateStore.getParallelismOverrides(sourceLimit.context));
+    }
+
+    @Test
+    void missingProfileOrNativeCorroborationProducesSpecificMemoryHold() throws Exception {
+        var withoutProfile = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        withoutProfile.profileUnavailable = true;
+        withoutProfile.assertNoRequest();
+        assertEquals(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED,
+                withoutProfile.evaluation().getCacheEvaluation().getHoldReason());
+
+        var withoutNativeProof = new OverloadFixture(160L << 20, Reason.MISSING_OBSERVATIONS);
+        withoutNativeProof.observationAvailable = false;
+        withoutNativeProof.curveAvailable = false;
+        withoutNativeProof.assertNoRequest();
+        assertEquals(1, withoutNativeProof.profileReads.get());
+        assertEquals(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED,
+                withoutNativeProof.evaluation().getCacheEvaluation().getHoldReason());
+    }
+
+    @Test
+    void recoveryVerifiesReappliedProfilesEvenForUnchangedParallelism() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.MISSING_TIMING, 2);
+        replay.context.getConfiguration().set(AutoScalerOptions.A4S_CACHE_METRICS_EXEMPT_VERTICES, List.of(replay.sink.toString()));
+        replay.sourceCacheBytes = 130L << 20;
+        replay.assertNoRequest();
+        assertEquals(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED,
+                replay.evaluation().getCacheEvaluation().getHoldReason());
+
+        // The unchanged source's 158 MiB profile must also match its measured caches.
+        replay.sourceCacheBytes = (long) ((3 - .5) * (158L << 20) / 3);
+        replay.autoscaler.scale(replay.context);
+        assertEquals(1, replay.requests.get());
+        assertEquals("2", replay.stateStore.getParallelismOverrides(replay.context)
+                .get(replay.source.toString()));
+    }
+
+    @Test
+    void observedTopologyTransitionDropsThePreviousEvaluationBeforeWarmup() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.QUALIFIED);
+        replay.autoscaler.scale(replay.context);
+        assertEquals(1, replay.evaluation().getVertexMetrics().get(replay.join)
+                .get(ScalingMetric.PARALLELISM).getCurrent());
+        assertTrue(replay.evaluation().getMemoryParallelismCurves().containsKey(replay.join));
+
+        replay.observedJoinParallelism = 4;
+        replay.fullyCollected = false;
+        replay.observationAvailable = false;
+        replay.curveAvailable = false;
+        replay.autoscaler.scale(replay.context);
+
+        assertNull(replay.evaluation());
+        assertEquals(1, replay.requests.get());
     }
 
     private static final class OverloadFixture {
@@ -553,13 +735,28 @@ class A4SCacheObservationHoldTest {
         private MemorySize scheduleMemory;
         private Optional<RetainedProfileResourceAccounting.WorkerSnapshot> workers =
                 Optional.of(workerSnapshot(1, 384));
+        private final AtomicInteger configRealizations = new AtomicInteger();
+        private final Map<ScalingMetric, EvaluatedScalingMetric> joinMetrics = overloadedMetrics(1);
+        private final Map<ScalingMetric, EvaluatedScalingMetric> sourceMetrics;
         private final JobAutoScalerImpl<JobID, JobAutoScalerContext<JobID>> autoscaler;
+        private boolean fullyCollected = true;
+        private boolean observationAvailable = true;
+        private boolean curveAvailable = true;
+        private CacheObservation.Status batchStatus = CacheObservation.Status.VALID;
+        private boolean profileUnavailable;
+        private long sourceCacheBytes;
+        private int observedJoinParallelism = 1;
 
         private OverloadFixture(long nativeCacheBytes, Reason reason) {
             this(nativeCacheBytes, reason, 1);
         }
 
         private OverloadFixture(long nativeCacheBytes, Reason reason, int edgeParallelism) {
+            sourceMetrics = balancedMetrics(edgeParallelism);
+            if (edgeParallelism == 2) {
+                workers = Optional.of(observedWorkerSnapshot(
+                        "embedded", "flink-taskmanager-1-1", 570215624L));
+            }
             var conf = context.getConfiguration();
             conf.set(AutoScalerOptions.AUTOSCALER_ENABLED, true);
             conf.set(AutoScalerOptions.SCALING_ENABLED, true);
@@ -584,15 +781,39 @@ class A4SCacheObservationHoldTest {
                                     CacheObservation.QUICK_MRC, CacheObservation.FIXED_4K,
                                     CacheObservation.CACHE_POLICY, .02, nativeCacheBytes,
                                     1, 10_000_000_001L, System.currentTimeMillis(), 1000, 250), null);
-                    latest.setCacheObservations(Map.of(join, new CacheObservationBatch(
-                            CacheObservation.VERSION, CacheObservation.Status.VALID,
-                            1, 32, 0, List.of(observation))));
-                    latest.setMissRateCurves(Map.of(join, new MissRateCurve(List.of(
-                            new MissRateCurve.Point(nativeCacheBytes, .25)))));
-                    var history = new CollectedMetricHistory(topology, new TreeMap<>(Map.of(
+                    var batches = new HashMap<JobVertexID, CacheObservationBatch>();
+                    if (observationAvailable) {
+                        batches.put(join, new CacheObservationBatch(
+                                CacheObservation.VERSION, batchStatus,
+                                1, 32, 0, List.of(observation)));
+                    }
+                    if (sourceCacheBytes > 0) {
+                        batches.put(source, new CacheObservationBatch(
+                                CacheObservation.VERSION, CacheObservation.Status.VALID, 2, 64, 0,
+                                List.of(sourceObservation(ctx, 0), sourceObservation(ctx, 1))));
+                    }
+                    latest.setCacheObservations(batches);
+                    if (curveAvailable) {
+                        latest.setMissRateCurves(Map.of(join, new MissRateCurve(List.of(
+                                new MissRateCurve.Point(nativeCacheBytes, .25)))));
+                    }
+                    var observedTopology = new JobTopology(new VertexInfo(source, Map.of(), edgeParallelism, 24),
+                            new VertexInfo(join, Map.of(source, ShipStrategy.HASH),
+                                    observedJoinParallelism, 24),
+                            new VertexInfo(sink, Map.of(join, ShipStrategy.HASH), edgeParallelism, 24));
+                    var history = new CollectedMetricHistory(observedTopology, new TreeMap<>(Map.of(
                             Instant.EPOCH, new CollectedMetrics(), Instant.now(), latest)), Instant.EPOCH);
-                    history.setFullyCollected(true);
+                    history.setFullyCollected(fullyCollected);
                     return history;
+                }
+
+                private CacheObservation sourceObservation(JobAutoScalerContext<JobID> ctx, int subtask) {
+                    return new CacheObservation(CacheObservation.VERSION, ctx.getJobID().toString(),
+                            source.toString(), subtask, "source-attempt-" + subtask, CacheObservation.Status.VALID,
+                            new CacheObservation.Window("process", 2 + subtask, 0, 2, List.of(1L),
+                                    CacheObservation.QUICK_MRC, CacheObservation.FIXED_4K,
+                                    CacheObservation.CACHE_POLICY, .02, sourceCacheBytes,
+                                    1, 10_000_000_001L, System.currentTimeMillis(), 1000, 250), null);
                 }
             };
             var evaluator = new ScalingMetricEvaluator() {
@@ -600,14 +821,18 @@ class A4SCacheObservationHoldTest {
                 public EvaluatedMetrics evaluate(
                         org.apache.flink.configuration.Configuration cfg,
                         CollectedMetricHistory metrics, Duration restartTime) {
+                    var curves = reason == Reason.QUALIFIED
+                            ? Map.of(join, MemoryParallelismCurve.builder().targetThroughput(30_000)
+                                    .addPoint(1, 160).build())
+                            : Map.<JobVertexID, MemoryParallelismCurve>of();
                     return new EvaluatedMetrics(
-                            Map.of(join, overloadedMetrics(1), source, overloadedMetrics(edgeParallelism),
-                                    sink, overloadedMetrics(edgeParallelism)),
+                            Map.of(join, joinMetrics, source, sourceMetrics,
+                                    sink, balancedMetrics(edgeParallelism)),
                             Map.of(ScalingMetric.GC_PRESSURE, EvaluatedScalingMetric.of(0),
                                     ScalingMetric.HEAP_MAX_USAGE_RATIO, EvaluatedScalingMetric.avg(.4),
                                     ScalingMetric.NUM_TASK_SLOTS_USED,
                                     EvaluatedScalingMetric.of(2 * edgeParallelism + 1)),
-                            Map.of(), Map.of(), Map.of(join, reason));
+                            curves, Map.of(), reason == Reason.QUALIFIED ? Map.of() : Map.of(join, reason));
                 }
             };
             var events = new TestingEventCollector<JobID, JobAutoScalerContext<JobID>>();
@@ -621,8 +846,11 @@ class A4SCacheObservationHoldTest {
                     events, stateStore, resourceCheck) {
                 @Override
                 Optional<JustinResourceRequirements> readLiveResourceRequirements(
-                        JobAutoScalerContext<JobID> ctx) {
+                        JobAutoScalerContext<JobID> ctx) throws TimeoutException {
                     profileReads.incrementAndGet();
+                    if (profileUnavailable) {
+                        throw new TimeoutException();
+                    }
                     return Optional.of(JustinResourceRequirements.newBuilder()
                             .setParallelismForJobVertex(join, 1, 1, resourceProfile(192))
                             .setParallelismForJobVertex(source, 1, edgeParallelism, resourceProfile(158))
@@ -647,6 +875,11 @@ class A4SCacheObservationHoldTest {
                         JobAutoScalerContext<JobID> ctx, Map<String, String> p,
                         Map<String, String> profiles) {
                     requests.incrementAndGet();
+                }
+
+                @Override
+                public void realizeConfigOverrides(JobAutoScalerContext<JobID> ctx, ConfigChanges changes) {
+                    configRealizations.incrementAndGet();
                 }
             };
             autoscaler = new JobAutoScalerImpl<>(
@@ -748,10 +981,32 @@ class A4SCacheObservationHoldTest {
                     ScalingMetric.SCALE_DOWN_RATE_THRESHOLD, EvaluatedScalingMetric.of(80_000)));
         }
 
+        private static Map<ScalingMetric, EvaluatedScalingMetric> balancedMetrics(int parallelism) {
+            var metrics = overloadedMetrics(parallelism);
+            metrics.put(ScalingMetric.SCALE_UP_RATE_THRESHOLD, EvaluatedScalingMetric.of(20_000));
+            return metrics;
+        }
+
+        private EvaluatedMetrics evaluation() {
+            return autoscaler.lastEvaluatedMetrics.get(context.getJobKey());
+        }
+
+        private void assertNoRequest() throws Exception {
+            autoscaler.scale(context);
+            assertEquals(0, requests.get());
+            assertTrue(stateStore.getParallelismOverrides(context).isEmpty());
+            assertTrue(stateStore.getResourceProfileOverrides(context).isEmpty());
+        }
+
         private static ResourceProfile resourceProfile(int managedMiB) {
             return ResourceProfile.newBuilder().setCpuCores(1).setTaskHeapMemoryMB(134)
                     .setTaskOffHeapMemoryMB(0).setManagedMemoryMB(managedMiB)
                     .setNetworkMemoryMB(39).build();
         }
+    }
+
+    private static Map<ScalingMetric, EvaluatedScalingMetric> healthyGlobalMetrics() {
+        return Map.of(ScalingMetric.GC_PRESSURE, EvaluatedScalingMetric.of(0),
+                ScalingMetric.HEAP_MAX_USAGE_RATIO, EvaluatedScalingMetric.avg(.4));
     }
 }

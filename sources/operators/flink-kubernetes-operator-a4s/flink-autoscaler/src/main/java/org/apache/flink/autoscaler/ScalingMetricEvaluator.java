@@ -81,6 +81,9 @@ public class ScalingMetricEvaluator {
         var memoryParallelismCurves = new HashMap<JobVertexID, MemoryParallelismCurve>();
         var cacheCostFailures = new HashMap<JobVertexID, OnlineCacheCost.Reason>();
         var metricsHistory = collectedMetrics.getMetricHistory();
+        var observedRunningSince = collectedMetrics.getJobRunningTs();
+        var fitHistory = metricsHistory.firstKey().isBefore(observedRunningSince)
+                ? metricsHistory.tailMap(observedRunningSince) : metricsHistory;
         var topology = collectedMetrics.getJobTopology();
         CollectedMetrics latestCollectedMetrics = metricsHistory.get(metricsHistory.lastKey());
         Map<JobVertexID, MissRateCurve> collectedMissRateCurves =
@@ -158,7 +161,7 @@ public class ScalingMetricEvaluator {
             CacheMode configuredPolicy =
                     calibratedCosts == null ? CacheMode.LEGACY_FIXED : CacheMode.OFFLINE_CALIBRATED;
             if (onlineCacheCosts) {
-                var fit = selectOnlineFit(metricsHistory, vertex, parallelism);
+                var fit = selectOnlineFit(fitHistory, vertex, parallelism);
                 OnlineCacheCost.Reason reason = fit.getReason();
                 Double fixedBaseline = shadow
                                 && conf.get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_USE_FIXED_BASELINE)
@@ -219,44 +222,24 @@ public class ScalingMetricEvaluator {
                 continue;
             }
 
-            if (calibratedCosts == null) {
-                var vertexInfo = topology.get(vertex);
-                int currentParallelism = vertexInfo.getParallelism();
-                int minParallelism = Math.max(1, Math.min(currentParallelism, vertexMinParallelism));
-                int maxParallelism =
-                        Math.min(vertexInfo.getMaxParallelism(),
-                                Math.max(currentParallelism, vertexMaxParallelism));
-                MemoryParallelismCurve curve =
-                        MemoryParallelismCurve.fromMissRateCurve(
-                                targetRate,
-                                missLatencySec,
-                                hitLatencySec,
-                                minParallelism,
-                                maxParallelism,
-                                missRateCurve);
-                if (curve.getPoints().isEmpty()) {
-                    cacheCostFailures.put(vertex, OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED);
-                    if (!onlineCacheCosts) {
-                        var decision = decisions.get(vertex);
-                        decisions.put(vertex, new CacheDecision(configuredPolicy, null,
-                                decision.getObservation(), null, null,
-                                OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED, finite(targetRate),
-                                observedMinBytes, observedMaxBytes, null, fixedCosts, null));
-                    }
-                } else {
-                    memoryParallelismCurves.put(vertex, curve);
-                }
+            var vertexInfo = topology.get(vertex);
+            int currentParallelism = vertexInfo.getParallelism();
+            int minParallelism = Math.max(1, Math.min(currentParallelism, vertexMinParallelism));
+            int maxParallelism = Math.min(vertexInfo.getMaxParallelism(),
+                    Math.max(currentParallelism, vertexMaxParallelism));
+            MemoryParallelismCurve configuredCurve = calibratedCosts == null
+                    ? MemoryParallelismCurve.fromMissRateCurve(
+                            targetRate, missLatencySec, hitLatencySec, minParallelism,
+                            maxParallelism, missRateCurve)
+                    : calibratedCurve(vertex, calibratedCosts, targetRate, minParallelism,
+                            maxParallelism, missRateCurve);
+            if (configuredCurve == null || configuredCurve.getPoints().isEmpty()) {
+                cacheCostFailures.put(vertex, OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED);
+                decisions.computeIfPresent(vertex, (id, decision) -> decision
+                        .withSelectedCostPolicy(null)
+                        .withReason(OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED));
             } else {
-                MemoryParallelismCurve curve =
-                        calibratedCurve(
-                                vertex,
-                                calibratedCosts,
-                                targetRate,
-                                vertexMinParallelism,
-                                vertexMaxParallelism,
-                                missRateCurve);
-                memoryParallelismCurves.put(
-                        vertex, requireFeasibleCurve(vertex, targetRate, curve));
+                memoryParallelismCurves.put(vertex, configuredCurve);
             }
         }
 
@@ -310,19 +293,12 @@ public class ScalingMetricEvaluator {
         return decision;
     }
 
-    private static MemoryParallelismCurve requireFeasibleCurve(
-            JobVertexID vertex, double targetRate, MemoryParallelismCurve curve) {
-        if (curve.getPoints().isEmpty()) {
-            throw new IllegalStateException(
-                    "No feasible calibrated A4S curve for vertex "
-                            + vertex + " at " + targetRate + " records/s");
-        }
-        return curve;
-    }
-
     @VisibleForTesting
     static OnlineCacheCost.FitResult selectOnlineFit(
             SortedMap<Instant, CollectedMetrics> history, JobVertexID vertex, int parallelism) {
+        if (history.isEmpty()) {
+            return OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.INSUFFICIENT_HISTORY);
+        }
         Instant end = history.lastKey();
         var current = cacheCostSamples(history.get(end), vertex);
         if (current.size() != parallelism) {
@@ -386,6 +362,12 @@ public class ScalingMetricEvaluator {
             SortedMap<Instant, CollectedMetrics> history, Instant end) {
         Instant earliest = end.minus(MAX_CACHE_COST_WINDOW);
         Instant mostRecent = end.minus(MIN_CACHE_COST_WINDOW);
+        if (earliest.isBefore(history.firstKey())) {
+            earliest = history.firstKey();
+        }
+        if (earliest.isAfter(mostRecent)) {
+            return List.of();
+        }
         List<Instant> candidates = new ArrayList<>();
         for (Instant timestamp : history.subMap(earliest, end).keySet()) {
             if (timestamp.isAfter(mostRecent)) {
@@ -397,7 +379,8 @@ public class ScalingMetricEvaluator {
     }
 
     private static OnlineCacheCost.FitResult fitBetween(
-            SortedMap<Instant, CollectedMetrics> history, JobVertexID vertex, Instant start, Instant end) {
+            SortedMap<Instant, CollectedMetrics> history, JobVertexID vertex, Instant start,
+            Instant end) {
         var before = history.get(start);
         var after = history.get(end);
         var startBatch = cacheObservation(before, vertex);

@@ -55,6 +55,7 @@ import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_EN
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.JUSTIN_ENABLED;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.initRecommendedParallelism;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.resetRecommendedParallelism;
+import static org.apache.flink.autoscaler.metrics.ScalingMetric.PARALLELISM;
 import static org.apache.flink.autoscaler.metrics.ScalingHistoryUtils.getTrimmedScalingHistory;
 import static org.apache.flink.autoscaler.metrics.ScalingHistoryUtils.getTrimmedScalingTracking;
 
@@ -105,6 +106,7 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 ctx.getConfiguration().get(JUSTIN_ENABLED)
                         && ctx.getConfiguration().get(AutoScalerOptions.A4S_ENABLED);
         boolean applyOverrides = !strictCacheObservations;
+        CacheAction action = CacheAction.POLICY_HOLD;
         boolean enabled = ctx.getConfiguration().getBoolean(AUTOSCALER_ENABLED);
         try {
             if (!enabled) {
@@ -120,9 +122,12 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 return;
             }
 
-            boolean cacheObservationsReady = runScalingLogic(ctx, autoscalerMetrics, strictCacheObservations);
+            var evaluatedAction = runScalingLogic(ctx, autoscalerMetrics, strictCacheObservations);
             stateStore.flush(ctx);
-            applyOverrides |= cacheObservationsReady;
+            action = evaluatedAction;
+            applyOverrides |= action == CacheAction.POLICY_REQUEST
+                    || action == CacheAction.POLICY_NO_CHANGE
+                    || action == CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES;
         } catch (NotReadyException e) {
             LOG.debug("Not ready for scaling", e);
             if (strictCacheObservations
@@ -141,7 +146,8 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                     } else {
                         applyParallelismOverrides(ctx);
                     }
-                    if (!strictCacheObservations || !isActiveOnline(ctx.getConfiguration())) {
+                    if (action != CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES
+                            && (!strictCacheObservations || !isActiveOnline(ctx.getConfiguration()))) {
                         applyConfigOverrides(ctx);
                     }
                 } else if (enabled && strictCacheObservations) {
@@ -233,25 +239,36 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         scalingRealizer.realizeConfigOverrides(ctx, configChanges);
     }
 
-    private boolean runScalingLogic(
+    private CacheAction runScalingLogic(
             Context ctx, AutoscalerFlinkMetrics autoscalerMetrics, boolean strictCacheObservations)
             throws Exception {
 
-        var justinEnabled = ctx.getConfiguration().getBoolean(JUSTIN_ENABLED);
-
         var collectedMetrics = metricsCollector.updateMetrics(ctx, stateStore);
         var jobTopology = collectedMetrics.getJobTopology();
+        boolean activeOnline = strictCacheObservations && isActiveOnline(ctx.getConfiguration());
+
+        // A request does not change the model's topology. Invalidate it when Flink reports the change.
+        if (activeOnline) {
+            lastEvaluatedMetrics.computeIfPresent(ctx.getJobKey(), (job, previous) -> {
+                var vertices = previous.getVertexMetrics();
+                return vertices.keySet().equals(jobTopology.getVertexInfos().keySet())
+                                && vertices.entrySet().stream().allMatch(entry ->
+                                        entry.getValue().get(PARALLELISM).getCurrent()
+                                                == jobTopology.get(entry.getKey()).getParallelism())
+                        ? previous : null;
+            });
+        }
 
         var observationHolds = strictCacheObservations
                 ? invalidCacheObservations(ctx, collectedMetrics) : Map.<JobVertexID, Status>of();
-        if (!observationHolds.isEmpty()) {
+        if (!observationHolds.isEmpty() && !collectedMetrics.isFullyCollected()) {
             lastEvaluatedMetrics.remove(ctx.getJobKey());
             var decision = ScalingMetricEvaluator.observationHold(collectedMetrics, observationHolds);
             if (collectedMetrics.getMetricHistory().isEmpty()) {
                 decision.setHoldReason(Reason.INSUFFICIENT_HISTORY);
             }
             reportCacheDecision(ctx, decision, CacheAction.POLICY_HOLD);
-            return false;
+            return CacheAction.POLICY_HOLD;
         }
 
         var now = clock.instant();
@@ -274,7 +291,7 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 decision.setHoldReason(Reason.INSUFFICIENT_HISTORY);
                 reportCacheDecision(ctx, decision, CacheAction.POLICY_HOLD);
             }
-            return false;
+            return CacheAction.POLICY_HOLD;
         }
         LOG.debug("Collected metrics: {}", collectedMetrics);
 
@@ -299,42 +316,37 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 cacheDecision.setHoldReason(Reason.INSUFFICIENT_HISTORY);
                 reportCacheDecision(ctx, cacheDecision, CacheAction.POLICY_HOLD);
             }
-            return false;
+            return CacheAction.POLICY_HOLD;
         }
 
-        boolean activeOnline = strictCacheObservations && isActiveOnline(ctx.getConfiguration());
-        var failures = evaluatedMetrics.getCacheCostFailures();
-        boolean scaleUpForInsufficientCapacity = activeOnline
-                && !failures.isEmpty()
-                && failures.values().stream().allMatch(
-                        reason -> reason == Reason.INSUFFICIENT_CURRENT_PARALLELISM);
         if (strictCacheObservations) {
             observationHolds = invalidCacheObservations(ctx, collectedMetrics);
-            if (!observationHolds.isEmpty() || (!failures.isEmpty() && !scaleUpForInsufficientCapacity)) {
-                cacheDecision.getObservationHolds().putAll(observationHolds);
-                resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
-                reportCacheDecision(ctx, cacheDecision, CacheAction.POLICY_HOLD);
-                return false;
-            }
+            cacheDecision.getObservationHolds().putAll(observationHolds);
         }
-
-        if (activeOnline && !scaleUpForInsufficientCapacity) {
-            resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
-            reportCacheDecision(ctx, cacheDecision, CacheAction.ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE);
-            return false;
-        }
+        boolean throughputRecovery = strictCacheObservations
+                && (activeOnline || !observationHolds.isEmpty()
+                        || !evaluatedMetrics.getCacheCostFailures().isEmpty());
 
         var delayedScaleDown = stateStore.getDelayedScaleDown(ctx);
+        CacheAction action;
         boolean parallelismChanged;
-        if (scaleUpForInsufficientCapacity) {
+        if (throughputRecovery) {
             var history = collectedMetrics.getMetricHistory();
-            parallelismChanged = scalingExecutor.scaleUpWithCurrentProfiles(
+            action = scalingExecutor.scaleUpWithCurrentProfiles(
                     ctx, evaluatedMetrics, history.get(history.lastKey()).getCacheObservations(),
                     scalingHistory, scalingTracking, now, jobTopology, delayedScaleDown);
+            parallelismChanged = action == CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES;
+            if (action == CacheAction.POLICY_NO_CHANGE) {
+                resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
+                action = activeOnline && observationHolds.isEmpty()
+                                && evaluatedMetrics.getCacheCostFailures().isEmpty()
+                        ? CacheAction.ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE : CacheAction.POLICY_HOLD;
+            }
         } else {
             parallelismChanged = scalingExecutor.scaleResource(
                     ctx, evaluatedMetrics, scalingHistory, scalingTracking, now, jobTopology,
                     delayedScaleDown);
+            action = parallelismChanged ? CacheAction.POLICY_REQUEST : CacheAction.POLICY_NO_CHANGE;
         }
 
         if (delayedScaleDown.isUpdated()) {
@@ -347,16 +359,9 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             autoscalerMetrics.incrementBalanced();
         }
         if (reportCachePolicy) {
-            CacheAction action;
-            if (scaleUpForInsufficientCapacity) {
-                action = parallelismChanged ? CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES
-                        : CacheAction.POLICY_HOLD;
-            } else {
-                action = parallelismChanged ? CacheAction.POLICY_REQUEST : CacheAction.POLICY_NO_CHANGE;
-            }
             reportCacheDecision(ctx, cacheDecision, action);
         }
-        return !scaleUpForInsufficientCapacity || parallelismChanged;
+        return action;
     }
 
     private static boolean isActiveOnline(Configuration conf) {
