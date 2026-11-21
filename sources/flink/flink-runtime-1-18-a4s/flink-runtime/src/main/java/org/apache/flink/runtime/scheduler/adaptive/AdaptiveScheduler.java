@@ -287,6 +287,13 @@ public class AdaptiveScheduler
                             .orElse(vertexParallelismStore);
         }
 
+        this.justinResourceRequirements = recoverJustinRequirements(vertexParallelismStore);
+        if (justinResourceRequirements != null) {
+            vertexParallelismStore = DefaultVertexParallelismStore.applyJustinResourceRequirements(
+                    vertexParallelismStore, justinResourceRequirements).orElseThrow(
+                            () -> new IllegalStateException("Missing restored Justin parallelism"));
+            applyJustinSlotSharingGroups(vertexParallelismStore);
+        }
         this.initialParallelismStore = vertexParallelismStore;
         this.jobInformation = new JobGraphJobInformation(jobGraph, vertexParallelismStore);
 
@@ -346,6 +353,46 @@ public class AdaptiveScheduler
         this.jobManagerJobMetricGroup = jobManagerJobMetricGroup;
         this.slotIdleTimeout =
                 Duration.ofMillis(configuration.get(JobManagerOptions.SLOT_IDLE_TIMEOUT));
+    }
+
+    @Nullable
+    private JustinResourceRequirements recoverJustinRequirements(VertexParallelismStore initial)
+            throws JobExecutionException {
+        final JustinResourceRequirements stored;
+        try {
+            stored = JustinResourceRequirements.readFromJobGraph(jobGraph).orElse(null);
+        } catch (IOException e) {
+            throw new JobExecutionException(jobGraph.getJobID(), "Could not read persisted Justin requirements", e);
+        }
+        if (stored == null) {
+            return null;
+        }
+        if (executionMode == SchedulerExecutionMode.REACTIVE) {
+            throw new JobExecutionException(jobGraph.getJobID(),
+                    "Cannot restore persisted Justin requirements in reactive mode.");
+        }
+        final Map<JobVertexID, Integer> maxima = new HashMap<>();
+        for (JobVertex vertex : jobGraph.getVertices()) {
+            maxima.put(vertex.getID(), initial.getParallelismInfo(vertex.getID()).getMaxParallelism());
+        }
+        final List<String> errors = JustinResourceRequirements.validate(stored, maxima);
+        if (!errors.isEmpty()) {
+            throw new JobExecutionException(jobGraph.getJobID(),
+                    "Invalid persisted Justin requirements: " + String.join("; ", errors));
+        }
+        final JustinResourceRequirements.Builder recovered = JustinResourceRequirements.newBuilder();
+        for (JobVertexID vertex : stored.getJobVertices()) {
+            final ResourceProfile profile = stored.getResourceProfile(vertex);
+            if (profile == null) {
+                throw new JobExecutionException(jobGraph.getJobID(),
+                        "Missing persisted Justin resource profile for vertex " + vertex);
+            }
+            final int lower = stored.getParallelism(vertex).getLowerBound();
+            final int upper = stored.getParallelism(vertex).getUpperBound();
+            recovered.setParallelismForJobVertex(
+                    vertex, lower == -1 ? 1 : lower, upper == -1 ? maxima.get(vertex) : upper, profile);
+        }
+        return recovered.build();
     }
 
     private static void assertPreconditions(JobGraph jobGraph) throws RuntimeException {
@@ -927,6 +974,14 @@ public class AdaptiveScheduler
     }
 
     private void updateJustinGraphJobInformation(VertexParallelismStore vertexParallelismStore) {
+        applyJustinSlotSharingGroups(vertexParallelismStore);
+        this.jobInformation = new JobGraphJobInformation(jobGraph, vertexParallelismStore);
+        jobInformation
+                .getSlotSharingGroups()
+                .forEach(ssg -> LOG.info(ssg + "  " + ssg.getResourceProfile()));
+    }
+
+    private void applyJustinSlotSharingGroups(VertexParallelismStore vertexParallelismStore) {
         for (JobVertex v : jobGraph.getVertices()) {
             SlotSharingGroup ssg = new SlotSharingGroup();
             JustinVertexParallelismInfo justinVertexParallelismInfo =
@@ -935,10 +990,6 @@ public class AdaptiveScheduler
             ssg.setResourceProfile(justinVertexParallelismInfo.getResourceProfile());
             v.setSlotSharingGroup(ssg);
         }
-        this.jobInformation = new JobGraphJobInformation(jobGraph, vertexParallelismStore);
-        jobInformation
-                .getSlotSharingGroups()
-                .forEach(ssg -> LOG.info(ssg + "  " + ssg.getResourceProfile()));
     }
 
     // ----------------------------------------------------------------

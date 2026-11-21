@@ -22,6 +22,8 @@ import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.configuration.SchedulerExecutionMode;
 import org.apache.flink.core.execution.SavepointFormatType;
@@ -65,6 +67,7 @@ import org.apache.flink.runtime.jobgraph.IntermediateDataSetID;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertex;
+import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertexResourceRequirements;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
@@ -694,6 +697,38 @@ public class AdaptiveSchedulerTest {
         scheduler.startScheduling();
 
         assertThat(scheduler.getState()).isInstanceOf(WaitingForResources.class);
+    }
+
+    @Test
+    void restoresPersistedJustinSlotDemandBeforeScheduling() throws Exception {
+        final JobVertex vertex = new JobVertex("restored-join");
+        vertex.setMaxParallelism(4);
+        vertex.setParallelism(1);
+        final JobGraph original = streamingJobGraph(vertex);
+        final int restoredParallelism = 2;
+        final ResourceProfile retained =
+                ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(192).build();
+        JustinResourceRequirements.writeToJobGraph(
+                original,
+                JustinResourceRequirements.newBuilder()
+                        .setParallelismForJobVertex(vertex.getID(), 1, restoredParallelism, retained)
+                        .build());
+        final JobGraph recovered = org.apache.flink.util.InstantiationUtil.clone(original);
+        final DefaultDeclarativeSlotPool pool = createDeclarativeSlotPool(recovered.getJobID());
+        final Configuration conf = new Configuration()
+                .set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(2220));
+        conf.setBoolean("pipeline.jobvertex-resourceprofile-overrides-on-submit.enabled", false);
+        final AdaptiveScheduler scheduler = new AdaptiveSchedulerBuilder(
+                recovered, mainThreadExecutor, EXECUTOR_RESOURCE.getExecutor())
+                .setJobMasterConfiguration(conf)
+                .setDeclarativeSlotPool(pool)
+                .build();
+
+        assertThat(scheduler.requestJustinResourceRequirements().getResourceProfile(vertex.getID()))
+                .isEqualTo(retained);
+        scheduler.startScheduling();
+        assertThat(pool.getResourceRequirements())
+                .containsExactly(ResourceRequirement.create(retained, restoredParallelism));
     }
 
     @Test
