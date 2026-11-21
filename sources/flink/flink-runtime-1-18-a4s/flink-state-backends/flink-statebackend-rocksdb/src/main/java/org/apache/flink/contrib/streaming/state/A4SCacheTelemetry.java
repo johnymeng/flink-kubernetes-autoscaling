@@ -156,6 +156,9 @@ final class A4SCacheTelemetry {
         }
         CacheObservation.Endpoint endpoint =
                 window != null && status == Status.VALID ? interval.endpoint : null;
+        if (endpoint != null && !writeBufferCompatible) {
+            endpoint = endpoint.withoutWriteBufferBudget();
+        }
         String wire = A4SHistogramMetricCodec.encode(
                 new CacheObservation(
                         endpoint == null ? CacheObservation.VERSION : CacheObservation.ALIGNED_VERSION,
@@ -417,6 +420,8 @@ final class A4SCacheTelemetry {
             if (source != null) {
                 A4SCacheTelemetry publisher = live.get(source.cacheId);
                 synchronized (publisher) {
+                    // The physical resource owner is disposing its native manager.
+                    publisher.writeBufferCompatible = false;
                     removeSource(publisher, source);
                 }
             }

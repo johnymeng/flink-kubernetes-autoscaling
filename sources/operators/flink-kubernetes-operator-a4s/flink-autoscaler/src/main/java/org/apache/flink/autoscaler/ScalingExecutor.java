@@ -656,6 +656,26 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         if (appliedSlots != null && appliedByVertex == null) {
             return Optional.empty();
         }
+        var cacheFreeVertices = vertices.keySet().stream().filter(id -> {
+            var batch = observations.get(id);
+            return cacheExempt.contains(id.toHexString()) && configuredFloor(conf, id) == null
+                    && (batch == null || (batch.status == CacheObservation.Status.ABSENT
+                            && batch.subtasks.isEmpty()));
+        }).collect(Collectors.toSet());
+        var sharedAllocations = new HashSet<String>();
+        if (appliedByVertex != null) {
+            var usedAllocations = new HashSet<String>();
+            var cacheUsers = new HashSet<String>();
+            for (var task : appliedSlots.tasks) {
+                if (!usedAllocations.add(task.allocation)) {
+                    sharedAllocations.add(task.allocation);
+                }
+                if (!cacheFreeVertices.contains(JobVertexID.fromHexString(task.vertex))
+                        && !cacheUsers.add(task.allocation)) {
+                    return Optional.empty();
+                }
+            }
+        }
         for (var entry : vertices.entrySet()) {
             var id = entry.getKey();
             int current = (int) evaluated.getVertexMetrics().get(id).get(PARALLELISM).getCurrent();
@@ -666,15 +686,14 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 return Optional.empty();
             }
             observedProfiles.put(id, profile);
-            if (frozen.contains(id)) {
+            boolean cacheFree = cacheFreeVertices.contains(id);
+            boolean sharedCacheBudget = !cacheFree && tasks != null
+                    && tasks.values().stream().anyMatch(task -> sharedAllocations.contains(task.allocation));
+            if (frozen.contains(id) && !sharedCacheBudget) {
                 overrides.put(id, profile);
                 continue;
             }
             var batch = observations.get(id);
-            boolean cacheFree = cacheExempt.contains(id.toHexString())
-                    && configuredFloor(conf, id) == null
-                    && (batch == null || (batch.status == CacheObservation.Status.ABSENT
-                            && batch.subtasks.isEmpty()));
             long managedBytes = profile.getManagedMemory().getBytes();
             if (cacheFree && (managedBytes % BYTES_PER_MIB != 0
                     || profile.getManagedMemory().getMebiBytes() > Integer.MAX_VALUE)) {
@@ -683,11 +702,25 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             if (tasks != null && !RetainedProfileResourceAccounting.matchesCacheAttempts(tasks, batch)) {
                 return Optional.empty();
             }
-            Long trustedManagedBytes = cacheFree || corroboratesManagedBudget(
+            boolean corroborated = corroboratesManagedBudget(
                     context.getJobID(), id, current, managedBytes, ratio, batch, nowMillis)
-                    ? managedBytes : null;
-            var decision = resolveManagedMemory(conf, id, !cacheFree, null, trustedManagedBytes, true);
+                    && (!sharedCacheBudget || matchesSharedWriteBudget(
+                            tasks, batch, sharedAllocations, writeBufferManagerBytes(managedBytes, ratio)));
+            Long trustedManagedBytes = cacheFree || corroborated ? managedBytes : null;
+            // A resolved floor can permit recovery without cache timing. Use the full
+            // physical profile as the proposal so the transition keeps its managed budget.
+            Double proposal = sharedCacheBudget && !corroborated
+                    ? (double) managedBytes / BYTES_PER_MIB : null;
+            var decision = resolveManagedMemory(conf, id, !cacheFree, proposal, trustedManagedBytes, true);
             if (!recordManagedMemoryDecision(evaluated, id, decision)) {
+                return Optional.empty();
+            }
+            // A verified physical slot is a conservative basis for a new dedicated slot.
+            // It is not the amount each task used while sharing that physical slot.
+            if ((frozen.contains(id) && decision.getFinalManagedBytes() != managedBytes)
+                    || (sharedCacheBudget && !corroborated
+                            && decision.getFinalManagedBytes() < managedBytes)) {
+                evaluated.getCacheEvaluation().setHoldReason(Reason.MEMORY_BUDGET_INFEASIBLE);
                 return Optional.empty();
             }
             overrides.put(id, ResourceProfile.newBuilder()
@@ -710,6 +743,23 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             this.profiles = profiles;
             this.appliedSlots = appliedSlots;
         }
+    }
+
+    private static boolean matchesSharedWriteBudget(
+            Map<Integer, AppliedSlotSnapshot.Task> tasks, CacheObservationBatch batch,
+            Set<String> sharedAllocations, long expectedBytes) {
+        for (var observation : batch.subtasks) {
+            if (sharedAllocations.contains(tasks.get(observation.subtask).allocation)) {
+                var endpoint = observation.endpoint;
+                if (endpoint == null || endpoint.appliedSlot == null
+                        || endpoint.writeBufferBudget == null
+                        || !endpoint.writeBufferBudget.supportsReadback()
+                        || endpoint.writeBufferBudget.bytes != expectedBytes) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static boolean corroboratesManagedBudget(

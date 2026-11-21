@@ -20,6 +20,7 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.a4s.core.CacheObservation;
 import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.autoscaler.a4s.OnlineCacheCost.Reason;
 import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
@@ -911,6 +912,28 @@ class A4SCacheObservationHoldTest {
         assertEquals(expected, replay.evaluation().getCacheEvaluation().getHoldReason());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"missing-wbm", "wrong-wbm", "unknown-wbm", "multiple-cache-users"})
+    void cannotInferAnExclusiveWriteBudgetFromSharedPhysicalGeometry(String defect) throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.CAPACITY_UNSUPPORTED, 2);
+        replay.setExactEvidence(defect);
+        replay.assertNoRequest();
+        assertEquals(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED,
+                replay.evaluation().getCacheEvaluation().getHoldReason());
+    }
+
+    @Test
+    void resolvedFloorPermitsSharedSlotRecoveryWithoutNativeWriteTiming() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.MISSING_TIMING, 2);
+        replay.setExactEvidence("missing-wbm");
+        replay.setManagedFloor("128");
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals(1, replay.requests.get());
+        assertThat(replay.realizedProfiles.get(replay.join.toHexString()))
+                .contains("managedMemory=192.000mb (201326592 bytes)");
+    }
+
     @Test
     void overloadRejectsUnrepresentableRequestedSlotCount() {
         var profile = OverloadFixture.resourceProfile(192);
@@ -1136,6 +1159,7 @@ class A4SCacheObservationHoldTest {
         private CacheObservation.Status batchStatus = CacheObservation.Status.VALID;
         private boolean profileUnavailable;
         private AppliedSlotSnapshot appliedSlots;
+        private String exactEvidenceCase;
         private long sourceCacheBytes;
         private int observedJoinParallelism = 1;
         private int joinCurveParallelism = 1;
@@ -1187,6 +1211,7 @@ class A4SCacheObservationHoldTest {
                                                 CacheObservation.CACHE_POLICY, .02, nativeCacheBytes,
                                                 1, 10_000_000_001L, System.currentTimeMillis(), 1000, 250),
                                         null))
+                                .map(row -> appliedSlots == null ? row : withObservedWriteBudget(row))
                                 .collect(java.util.stream.Collectors.toList());
                         batches.put(join, new CacheObservationBatch(
                                 CacheObservation.VERSION, batchStatus,
@@ -1375,6 +1400,11 @@ class A4SCacheObservationHoldTest {
         }
 
         private void setExactEvidence(String defect) {
+            exactEvidenceCase = defect;
+            if (defect.equals("multiple-cache-users")) {
+                context.getConfiguration().set(AutoScalerOptions.A4S_CACHE_METRICS_EXEMPT_VERTICES,
+                        List.of(source.toString()));
+            }
             var firstId = new ResourceID("flink-taskmanager-1-1");
             var secondId = new ResourceID("flink-taskmanager-1-2");
             var profile = ResourceProfile.newBuilder().setCpuCores(1)
@@ -1415,6 +1445,23 @@ class A4SCacheObservationHoldTest {
                     List.of(new SlotInfo(context.getJobID(), profile, slotId(5))));
             workers = Optional.of(new RetainedProfileResourceAccounting.WorkerSnapshot(
                     deployed, List.of(first, second)));
+        }
+
+        private CacheObservation withObservedWriteBudget(CacheObservation row) {
+            var task = appliedSlots.tasks.stream().filter(candidate ->
+                    row.vertex.equals(candidate.vertex) && row.subtask == candidate.subtask)
+                    .findFirst().orElseThrow();
+            var exactSlot = new CacheObservation.AppliedSlot(
+                    task.allocation, task.profile.getManagedMemory().getBytes());
+            var readback = exactEvidenceCase.equals("missing-wbm") ? null
+                    : new CacheObservation.WriteBufferBudget(
+                            exactEvidenceCase.equals("unknown-wbm") ? 2 : 1,
+                            exactEvidenceCase.equals("wrong-wbm") ? 48L << 20 : 64L << 20);
+            var endpoint = new CacheObservation.Endpoint(1, row.window.endNanos, row.window.endNanos,
+                    row.window.endNanos, 1000, 250, new StackDistanceHistogram(
+                            new long[] {750}, 250, 1, 1, 4096), "unused", exactSlot, readback);
+            return new CacheObservation(CacheObservation.ALIGNED_VERSION, row.job, row.vertex,
+                    row.subtask, row.attempt, row.status, row.window, null, endpoint);
         }
 
         private static String slotId(int index) {

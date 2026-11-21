@@ -243,6 +243,12 @@ public final class CacheObservation {
             this.writeBufferBudget = writeBufferBudget;
         }
 
+        public Endpoint withoutWriteBufferBudget() {
+            return writeBufferBudget == null ? this : new Endpoint(
+                    ownershipGeneration, acquisitionStartNanos, nativeNanos, acquisitionEndNanos,
+                    totalLookups, totalMisses, cumulativeHistogram, timing, appliedSlot, null);
+        }
+
         public boolean withinAcquisitionBound() {
             long before = nativeNanos - acquisitionStartNanos;
             long after = acquisitionEndNanos - nativeNanos;
