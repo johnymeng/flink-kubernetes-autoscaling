@@ -22,26 +22,34 @@ import org.apache.flink.a4s.core.CacheObservation.Status;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.a4s.OnlineCacheCost;
 import org.apache.flink.autoscaler.a4s.OnlineCacheCost.Reason;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.AutoScalerEventHandler;
 import org.apache.flink.autoscaler.exceptions.NotReadyException;
 import org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.CacheAction;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.CacheEvaluation;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.PipelineOptions;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.util.Preconditions;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.JUSTIN_ENABLED;
@@ -55,6 +63,7 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         implements JobAutoScaler<KEY, Context> {
 
     private static final Logger LOG = LoggerFactory.getLogger(JobAutoScalerImpl.class);
+    private static final Duration CACHE_DECISION_LOG_INTERVAL = Duration.ofSeconds(10);
 
     @VisibleForTesting protected static final String AUTOSCALER_ERROR = "AutoscalerError";
 
@@ -64,6 +73,7 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
     private final AutoScalerEventHandler<KEY, Context> eventHandler;
     private ScalingRealizer<KEY, Context> scalingRealizer;
     private final AutoScalerStateStore<KEY, Context> stateStore;
+    private final Map<KEY, Instant> lastCacheDecisionLog = new ConcurrentHashMap<>();
 
     private Clock clock = Clock.systemDefaultZone();
 
@@ -115,6 +125,12 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             applyOverrides |= cacheObservationsReady;
         } catch (NotReadyException e) {
             LOG.debug("Not ready for scaling", e);
+            if (strictCacheObservations
+                    || ctx.getConfiguration().get(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)) {
+                var decision = new CacheEvaluation();
+                decision.setHoldReason(Reason.INSUFFICIENT_HISTORY);
+                reportCacheDecision(ctx, decision, CacheAction.POLICY_HOLD);
+            }
         } catch (Throwable e) {
             onError(ctx, autoscalerMetrics, e);
         } finally {
@@ -143,6 +159,7 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         LOG.info("Cleaning up autoscaling meta data");
         metricsCollector.cleanup(jobKey);
         lastEvaluatedMetrics.remove(jobKey);
+        lastCacheDecisionLog.remove(jobKey);
         flinkMetrics.remove(jobKey);
         stateStore.removeInfoFromCache(jobKey);
     }
@@ -225,8 +242,15 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         var collectedMetrics = metricsCollector.updateMetrics(ctx, stateStore);
         var jobTopology = collectedMetrics.getJobTopology();
 
-        if (strictCacheObservations && !checkCacheObservations(ctx, collectedMetrics)) {
+        var observationHolds = strictCacheObservations
+                ? invalidCacheObservations(ctx, collectedMetrics) : Map.<JobVertexID, Status>of();
+        if (!observationHolds.isEmpty()) {
             lastEvaluatedMetrics.remove(ctx.getJobKey());
+            var decision = ScalingMetricEvaluator.observationHold(collectedMetrics, observationHolds);
+            if (collectedMetrics.getMetricHistory().isEmpty()) {
+                decision.setHoldReason(Reason.INSUFFICIENT_HISTORY);
+            }
+            reportCacheDecision(ctx, decision, CacheAction.POLICY_HOLD);
             return false;
         }
 
@@ -244,6 +268,12 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         // We require at least 2 metric collections for evaluation as required by rate computations
         // from accumulated metrics
         if (collectedMetrics.getMetricHistory().size() < 2) {
+            if (strictCacheObservations || ctx.getConfiguration().get(
+                    AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED)) {
+                var decision = ScalingMetricEvaluator.observationHold(collectedMetrics, Map.of());
+                decision.setHoldReason(Reason.INSUFFICIENT_HISTORY);
+                reportCacheDecision(ctx, decision, CacheAction.POLICY_HOLD);
+            }
             return false;
         }
         LOG.debug("Collected metrics: {}", collectedMetrics);
@@ -252,6 +282,8 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         var restartTime = scalingTracking.getMaxRestartTimeOrDefault(ctx.getConfiguration());
         var evaluatedMetrics =
                 evaluator.evaluate(ctx.getConfiguration(), collectedMetrics, restartTime);
+        var cacheDecision = evaluatedMetrics.getCacheEvaluation();
+        boolean reportCachePolicy = strictCacheObservations || !cacheDecision.getVertices().isEmpty();
         LOG.debug("Evaluated metrics: {}", evaluatedMetrics);
         lastEvaluatedMetrics.put(ctx.getJobKey(), evaluatedMetrics);
 
@@ -263,6 +295,10 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         if (!collectedMetrics.isFullyCollected()) {
             // We have done an upfront evaluation, but we are not ready for scaling.
             resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
+            if (reportCachePolicy) {
+                cacheDecision.setHoldReason(Reason.INSUFFICIENT_HISTORY);
+                reportCacheDecision(ctx, cacheDecision, CacheAction.POLICY_HOLD);
+            }
             return false;
         }
 
@@ -272,16 +308,19 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 && !failures.isEmpty()
                 && failures.values().stream().allMatch(
                         reason -> reason == Reason.INSUFFICIENT_CURRENT_PARALLELISM);
-        if (strictCacheObservations
-                && (!checkCacheObservations(ctx, collectedMetrics)
-                        || (!failures.isEmpty() && !scaleUpForInsufficientCapacity))) {
-            resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
-            return false;
+        if (strictCacheObservations) {
+            observationHolds = invalidCacheObservations(ctx, collectedMetrics);
+            if (!observationHolds.isEmpty() || (!failures.isEmpty() && !scaleUpForInsufficientCapacity)) {
+                cacheDecision.getObservationHolds().putAll(observationHolds);
+                resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
+                reportCacheDecision(ctx, cacheDecision, CacheAction.POLICY_HOLD);
+                return false;
+            }
         }
 
         if (activeOnline && !scaleUpForInsufficientCapacity) {
-            LOG.info("A4S hold job={} reason=ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE", ctx.getJobID());
             resetRecommendedParallelism(evaluatedMetrics.getVertexMetrics());
+            reportCacheDecision(ctx, cacheDecision, CacheAction.ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE);
             return false;
         }
 
@@ -307,6 +346,16 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         } else {
             autoscalerMetrics.incrementBalanced();
         }
+        if (reportCachePolicy) {
+            CacheAction action;
+            if (scaleUpForInsufficientCapacity) {
+                action = parallelismChanged ? CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES
+                        : CacheAction.POLICY_HOLD;
+            } else {
+                action = parallelismChanged ? CacheAction.POLICY_REQUEST : CacheAction.POLICY_NO_CHANGE;
+            }
+            reportCacheDecision(ctx, cacheDecision, action);
+        }
         return !scaleUpForInsufficientCapacity || parallelismChanged;
     }
 
@@ -317,11 +366,16 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
 
     @VisibleForTesting
     boolean checkCacheObservations(Context ctx, CollectedMetricHistory history) {
+        return invalidCacheObservations(ctx, history).isEmpty();
+    }
+
+    private Map<JobVertexID, Status> invalidCacheObservations(
+            Context ctx, CollectedMetricHistory history) {
         var exemptVertices = ctx.getConfiguration().get(AutoScalerOptions.A4S_CACHE_METRICS_EXEMPT_VERTICES);
         var metrics = history.getMetricHistory();
         var latest = metrics.isEmpty() ? null : metrics.get(metrics.lastKey());
         var batches = latest == null ? null : latest.getCacheObservations();
-        boolean ready = true;
+        var failures = new LinkedHashMap<JobVertexID, Status>();
         long nowMillis = clock.millis();
         for (var vertex : history.getJobTopology().getVerticesInTopologicalOrder()) {
             if (history.getJobTopology().getFinishedVertices().contains(vertex)
@@ -329,15 +383,10 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 continue;
             }
             var batch = batches == null ? null : batches.get(vertex);
-            var status = batch == null
-                    ? Status.ABSENT
-                    : batch.version != CacheObservation.VERSION
-                            ? Status.UNSUPPORTED_VERSION
-                            : batch.status;
+            var status = OnlineCacheCost.observationStatus(
+                    batch, history.getJobTopology().get(vertex).getParallelism());
             if (status == Status.VALID
-                    && (batch.expectedSubtasks != history.getJobTopology().get(vertex).getParallelism()
-                            || batch.subtasks.size() != batch.expectedSubtasks
-                            || latest.getMissRateCurves() == null
+                    && (latest.getMissRateCurves() == null
                             || latest.getMissRateCurves().get(vertex) == null
                             || latest.getMissRateCurves().get(vertex).getPoints().isEmpty())) {
                 status = Status.INCOMPLETE;
@@ -348,11 +397,62 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 status = Status.STALE;
             }
             if (status != Status.VALID) {
-                LOG.info("A4S hold job={} vertex={} reason={}", ctx.getJobID(), vertex, status);
-                ready = false;
+                failures.put(vertex, status);
             }
         }
-        return ready;
+        return failures;
+    }
+
+    @VisibleForTesting
+    void reportCacheDecision(Context ctx, CacheEvaluation decision, CacheAction action) {
+        decision.setAction(action);
+        decision.setCachePlacementEnabled(ctx.getConfiguration().get(JUSTIN_ENABLED)
+                && ctx.getConfiguration().get(AutoScalerOptions.A4S_ENABLED));
+        if (!LOG.isInfoEnabled()) {
+            return;
+        }
+        boolean request = action == CacheAction.POLICY_REQUEST
+                || action == CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES;
+        var now = clock.instant();
+        var log = new AtomicBoolean();
+        lastCacheDecisionLog.compute(ctx.getJobKey(), (job, last) -> {
+            if (request || last == null || !now.isBefore(last.plus(CACHE_DECISION_LOG_INTERVAL))) {
+                log.set(true);
+                return now;
+            }
+            return last;
+        });
+        if (!log.get()) {
+            return;
+        }
+        LOG.info("A4S cache decision job={} evaluationId={} action={} cachePlacementEnabled={} holdReason={} "
+                        + "observationHolds={} requestedParallelismOverrides={} "
+                        + "requestedResourceProfileOverrides={} appliedOverrides=unavailable",
+                ctx.getJobID(), decision.getId(), action, decision.isCachePlacementEnabled(),
+                decision.getHoldReason(),
+                decision.getObservationHolds(), decision.getRequestedParallelismOverrides(),
+                decision.getRequestedResourceProfileOverrides());
+        decision.getObservationHolds().forEach((vertex, status) ->
+                LOG.info("A4S hold job={} vertex={} reason={} evaluationId={}",
+                        ctx.getJobID(), vertex, status, decision.getId()));
+        if (action == CacheAction.ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE) {
+            LOG.info("A4S hold job={} reason={} evaluationId={}", ctx.getJobID(), action, decision.getId());
+        } else if (decision.getHoldReason() != null) {
+            LOG.info("A4S hold job={} reason={} evaluationId={}",
+                    ctx.getJobID(), decision.getHoldReason(), decision.getId());
+        }
+        decision.getVertices().forEach((vertex, outcome) -> {
+            var fit = outcome.getFit();
+            var holdout = fit == null ? null : fit.getHoldout();
+            if (holdout != null && holdout.getMaxActualMissRelativeError() != null) {
+                LOG.info("A4S cache cost holdout vertex={} maxActualMissRelativeError={} "
+                                + "fitEndMillis={} holdoutEndMillis={} evaluationId={}",
+                        vertex, holdout.getMaxActualMissRelativeError(), holdout.getFitEndMillis(),
+                        fit.getFit().getWindowEndMillis(), decision.getId());
+            }
+            LOG.info("A4S cache cost vertex={} mode={} reason={} evaluationId={} {}",
+                    vertex, outcome.getMode(), outcome.getReason(), decision.getId(), outcome.toLogString());
+        });
     }
 
     private void onError(Context ctx, AutoscalerFlinkMetrics autoscalerMetrics, Throwable e) {

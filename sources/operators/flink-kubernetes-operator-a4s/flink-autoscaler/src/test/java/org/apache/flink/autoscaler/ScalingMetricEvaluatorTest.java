@@ -17,6 +17,8 @@
 
 package org.apache.flink.autoscaler;
 
+import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.autoscaler.a4s.A4S;
@@ -25,6 +27,7 @@ import org.apache.flink.autoscaler.a4s.QuickMrcOnlineCacheCostTest;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.CacheMode;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.MetricAggregator;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
@@ -51,6 +54,8 @@ import static org.apache.flink.autoscaler.config.AutoScalerOptions.TARGET_UTILIZ
 import static org.apache.flink.autoscaler.topology.ShipStrategy.REBALANCE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -77,6 +82,13 @@ public class ScalingMetricEvaluatorTest {
         assertTrue(calibratedCurve.getMemoryMbForParallelism(1).isEmpty());
         assertEquals(100.0, calibratedCurve.getMemoryMbForParallelism(2).orElseThrow());
         assertEquals(baseline.getVertexMetrics(), calibrated.getVertexMetrics());
+        var fixed = baseline.getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(CacheMode.LEGACY_FIXED, fixed.getSelectedCostPolicy());
+        assertEquals(5e-6, fixed.getFixedCosts().getHitSecondsPerAccess());
+        assertEquals(5e-3, fixed.getFixedCosts().getTotalMissSecondsPerAccess());
+        assertEquals(4_995e-6, fixed.getFixedCosts().getIncrementalMissSecondsPerAccess(), 1e-12);
+        assertEquals(CacheMode.OFFLINE_CALIBRATED,
+                calibrated.getCacheEvaluation().getVertices().get(vertex).getSelectedCostPolicy());
 
         // The first feasible parallelism needs 100 MiB. With 50 MiB available, retry
         // starts there and finds parallelism 3, instead of looking up the omitted point at 1.
@@ -88,6 +100,149 @@ public class ScalingMetricEvaluatorTest {
     @Test
     void usesAQualifiedQuickMrcFitOnlyAtTheMeasuredParallelism() {
         var vertex = new JobVertexID();
+        var history = compatibleQuickMrcHistory(vertex);
+        var snapshots = history.getMetricHistory();
+
+        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var online = evaluator.evaluate(config, history, Duration.ZERO);
+        assertTrue(online.getCacheCostFailures().isEmpty());
+        var projection = online.getMemoryParallelismCurves().get(vertex);
+        assertEquals(8_192 / (1024.0 * 1024.0), projection.getMemoryMbForParallelism(1).orElseThrow());
+        assertTrue(projection.getMemoryMbForParallelism(2).isEmpty());
+        var decision = online.getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(CacheMode.ONLINE_QUALIFIED, decision.getMode());
+        assertFalse(online.getCacheEvaluation().isCachePlacementEnabled());
+        assertNull(decision.getFallbackReason());
+        assertEquals(8_192, decision.getRecommendation().getTotalNativeCacheBytes());
+        assertEquals(60, decision.getFit().getAttemptedWindow().getStart().getEpochSecond());
+        assertEquals(120, decision.getFit().getAttemptedWindow().getEnd().getEpochSecond());
+        assertEquals(1, decision.getObservation().getReceivedSubtasks());
+        assertEquals(3, decision.getObservation().getExpectedTimingAbi());
+        assertEquals(3, decision.getObservation().getTimingEndpoints().get(0).getTimingAbi());
+        assertEquals(1, decision.getFitStartObservation().getExpectedSubtasks());
+        assertTrue(decision.toLogString().contains("meanHitServiceSecondsPerAccess="));
+        assertTrue(decision.toLogString().contains("residualBusySecondsPerInput="));
+        assertTrue(decision.toLogString().contains("slopeSecondsPerInputPerUnitMissFraction="));
+        assertTrue(decision.toLogString().contains("uncertainty=unavailable"));
+
+        // At 9,091/s the measured curve is too short, but the optimistic cache bound
+        // still admits the demand. At 10,000/s, even that bound is insufficient.
+        var unsupported = evaluator.evaluate(
+                new Configuration(config).set(TARGET_UTILIZATION, .11), history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED,
+                unsupported.getCacheCostFailures().get(vertex));
+        var unsupportedDecision = unsupported.getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED, unsupportedDecision.getReason());
+        assertNull(unsupportedDecision.getRecommendation());
+        assertEquals(4096, unsupportedDecision.getProjection().getMinSupportedTotalBytes());
+        assertEquals(12_288, unsupportedDecision.getProjection().getMaxSupportedTotalBytes());
+        assertTrue(unsupportedDecision.getObservedCurveMaxBytes()
+                > unsupportedDecision.getProjection().getMaxSupportedTotalBytes());
+        var overloaded = evaluator.evaluate(
+                new Configuration(config).set(TARGET_UTILIZATION, .10), history, Duration.ZERO);
+        assertEquals("INSUFFICIENT_CURRENT_PARALLELISM",
+                overloaded.getCacheCostFailures().get(vertex).name());
+        assertFalse(overloaded.getMemoryParallelismCurves().containsKey(vertex));
+        var overloadDecision = overloaded.getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(CacheMode.ONLINE_OVERLOAD, overloadDecision.getMode());
+        assertEquals(10_000, overloadDecision.getDemandRecordsPerSecond(), 1e-8);
+        assertNotEquals(online.getCacheEvaluation().getId(), overloaded.getCacheEvaluation().getId());
+
+        snapshots.get(snapshots.lastKey()).getCacheCostSamples().get(vertex).get(0)
+                .setAttempt("restarted");
+        var invalid = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.UNBOUND_TIMING, invalid.getCacheCostFailures().get(vertex));
+        assertFalse(invalid.getMemoryParallelismCurves().containsKey(vertex));
+        var invalidDecision = invalid.getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(CacheObservation.Status.ATTEMPT_MISMATCH,
+                invalidDecision.getFit().getObservationStatus());
+        assertEquals("restarted", invalidDecision.getObservation().getTimingEndpoints().get(0).getAttempt());
+        assertNull(invalidDecision.getSelectedCostPolicy());
+
+        var shadow = evaluator.evaluate(
+                new Configuration(config).set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW, true),
+                history, Duration.ZERO);
+        assertTrue(shadow.getCacheCostFailures().isEmpty());
+        assertTrue(shadow.getMemoryParallelismCurves().get(vertex).getMemoryMbForParallelism(24).isPresent());
+        var shadowDecision = shadow.getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(CacheMode.ONLINE_SHADOW, shadowDecision.getMode());
+        assertEquals(CacheMode.LEGACY_FIXED, shadowDecision.getSelectedCostPolicy());
+        assertEquals(OnlineCacheCost.Reason.UNBOUND_TIMING, shadowDecision.getFallbackReason());
+    }
+
+    @Test
+    void retainsObservationAndTimingRejectionsInTheDecisionRecord() {
+        var vertex = new JobVertexID();
+        var history = compatibleQuickMrcHistory(vertex);
+        var snapshots = history.getMetricHistory();
+        var latest = snapshots.get(snapshots.lastKey());
+        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+
+        var sample = latest.getCacheCostSamples().get(vertex).get(0);
+        var originalMissCoverage = sample.getCoveredMisses();
+        sample.setCoveredMisses(originalMissCoverage - 1_000);
+        var coverage = evaluator.evaluate(config, history, Duration.ZERO)
+                .getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(OnlineCacheCost.Reason.TIMING_COVERAGE, coverage.getReason());
+        assertTrue(coverage.getFit().getTimingCounts().getMissCoverage() < .90);
+        assertNull(coverage.getSelectedCostPolicy());
+        sample.setCoveredMisses(originalMissCoverage);
+
+        sample.setSampledMisses(
+                snapshots.get(Instant.ofEpochSecond(60)).getCacheCostSamples().get(vertex).get(0)
+                        .getSampledMisses() + 63);
+        var sparse = evaluator.evaluate(config, history, Duration.ZERO)
+                .getCacheEvaluation().getVertices().get(vertex);
+        // The earlier 120-second candidate can fit. It has no independent prior window.
+        assertEquals(OnlineCacheCost.Reason.MISSING_HOLDOUT, sparse.getReason());
+        assertEquals(OnlineCacheCost.Reason.INSUFFICIENT_HISTORY,
+                sparse.getFit().getHoldout().getPriorRejection());
+        snapshots.remove(Instant.EPOCH);
+        sparse = evaluator.evaluate(config, history, Duration.ZERO)
+                .getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(OnlineCacheCost.Reason.TOO_FEW_SAMPLES, sparse.getReason());
+        assertEquals(63, sparse.getFit().getTimingCounts().getSampledMisses());
+
+        sample.setSampledMisses(200);
+        sample.setBusyMillis(601);
+        var invalidDecomposition = evaluator.evaluate(config, history, Duration.ZERO)
+                .getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(OnlineCacheCost.Reason.NON_POSITIVE_BASELINE, invalidDecomposition.getReason());
+        sample.setBusyMillis(1_200);
+        sample.setCapacityBytes(16_384);
+        var resized = evaluator.evaluate(config, history, Duration.ZERO)
+                .getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(CacheObservation.Status.CACHE_CHANGED, resized.getFit().getObservationStatus());
+        assertEquals(8192, resized.getObservation().getEndpoints().get(0).getCapacityBytes());
+        assertEquals(16_384, resized.getObservation().getTimingEndpoints().get(0).getCapacityBytes());
+        sample.setCapacityBytes(8192);
+        sample.setTimingAbi(2);
+        sample.setObservedAtNanos(null);
+        var abi = evaluator.evaluate(config, history, Duration.ZERO)
+                .getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(CacheObservation.Status.UNSUPPORTED_NATIVE, abi.getFit().getObservationStatus());
+        assertEquals(2, abi.getObservation().getTimingEndpoints().get(0).getTimingAbi());
+
+        for (var status : List.of(CacheObservation.Status.INCOMPLETE, CacheObservation.Status.WARMUP,
+                CacheObservation.Status.SHARED_CACHE)) {
+            latest.setCacheObservations(Map.of(vertex, CacheObservationBatch.invalid(status)));
+            var unqualified = evaluator.evaluate(config, history, Duration.ZERO)
+                    .getCacheEvaluation().getVertices().get(vertex);
+            assertEquals(status, unqualified.getObservation().getStatus());
+            assertEquals(status, unqualified.getFit().getObservationStatus());
+            assertNull(unqualified.getSelectedCostPolicy());
+        }
+        latest.setCacheObservations(Map.of());
+        latest.setMissRateCurves(Map.of());
+        var missing = evaluator.evaluate(config, history, Duration.ZERO)
+                .getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(OnlineCacheCost.Reason.MISSING_OBSERVATIONS, missing.getReason());
+        assertEquals(CacheObservation.Status.ABSENT, missing.getObservation().getStatus());
+        assertNull(missing.getObservation().getReceivedSubtasks());
+        assertNull(missing.getFit());
+    }
+
+    private static CollectedMetricHistory compatibleQuickMrcHistory(JobVertexID vertex) {
         var history = cacheCostHistory(vertex);
         var snapshots = history.getMetricHistory();
         var curve = snapshots.get(snapshots.lastKey()).getMissRateCurves().get(vertex);
@@ -105,37 +260,27 @@ public class ScalingMetricEvaluatorTest {
                     vertex, List.of(QuickMrcOnlineCacheCostTest.sample(i, 0, 0, 0))));
             snapshots.put(Instant.ofEpochSecond(60L * i), metrics);
         }
+        return history;
+    }
 
-        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
-        var online = evaluator.evaluate(config, history, Duration.ZERO);
-        assertTrue(online.getCacheCostFailures().isEmpty());
-        var projection = online.getMemoryParallelismCurves().get(vertex);
-        assertEquals(8_192 / (1024.0 * 1024.0), projection.getMemoryMbForParallelism(1).orElseThrow());
-        assertTrue(projection.getMemoryMbForParallelism(2).isEmpty());
+    @Test
+    void reportsAnInterveningCounterResetRatherThanAnUnexplainedContextChange() {
+        var vertex = new JobVertexID();
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        for (int i = 0; i < 2; i++) {
+            var snapshot = new CollectedMetrics();
+            snapshot.setCacheObservations(Map.of(vertex, QuickMrcOnlineCacheCostTest.batch(i, 0)));
+            snapshot.setCacheCostSamples(Map.of(
+                    vertex, List.of(QuickMrcOnlineCacheCostTest.sample(i, 0, 0, 0))));
+            history.put(Instant.ofEpochSecond(60L * i), snapshot);
+        }
+        var reset = new CollectedMetrics();
+        reset.setCacheObservations(Map.of(
+                vertex, CacheObservationBatch.invalid(CacheObservation.Status.COUNTER_RESET)));
+        history.put(Instant.ofEpochSecond(30), reset);
 
-        // At 9,091/s the measured curve is too short, but the optimistic cache bound
-        // still admits the demand. At 10,000/s, even that bound is insufficient.
-        var unsupported = evaluator.evaluate(
-                new Configuration(config).set(TARGET_UTILIZATION, .11), history, Duration.ZERO);
-        assertEquals(OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED,
-                unsupported.getCacheCostFailures().get(vertex));
-        var overloaded = evaluator.evaluate(
-                new Configuration(config).set(TARGET_UTILIZATION, .10), history, Duration.ZERO);
-        assertEquals("INSUFFICIENT_CURRENT_PARALLELISM",
-                overloaded.getCacheCostFailures().get(vertex).name());
-        assertFalse(overloaded.getMemoryParallelismCurves().containsKey(vertex));
-
-        snapshots.get(snapshots.lastKey()).getCacheCostSamples().get(vertex).get(0)
-                .setAttempt("restarted");
-        var invalid = evaluator.evaluate(config, history, Duration.ZERO);
-        assertEquals(OnlineCacheCost.Reason.UNBOUND_TIMING, invalid.getCacheCostFailures().get(vertex));
-        assertFalse(invalid.getMemoryParallelismCurves().containsKey(vertex));
-
-        var shadow = evaluator.evaluate(
-                new Configuration(config).set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW, true),
-                history, Duration.ZERO);
-        assertTrue(shadow.getCacheCostFailures().isEmpty());
-        assertTrue(shadow.getMemoryParallelismCurves().get(vertex).getMemoryMbForParallelism(24).isPresent());
+        var fit = ScalingMetricEvaluator.selectOnlineFit(history, vertex, 1);
+        assertEquals(OnlineCacheCost.Reason.COUNTER_RESET, fit.getReason());
     }
 
     @Test

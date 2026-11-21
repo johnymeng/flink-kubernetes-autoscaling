@@ -43,7 +43,24 @@ public final class QuickMrcCostProjection {
         boolean retainedUnconstrainedBudget;
     }
 
+    @Value
+    public static class Result {
+        @Nullable Recommendation recommendation;
+        @Nullable Long minSupportedTotalBytes;
+        @Nullable Long maxSupportedTotalBytes;
+    }
+
     public static Optional<Recommendation> recommend(
+            OnlineCacheCost.Fit fit,
+            CacheObservationBatch batch,
+            double targetRecordsPerSecond,
+            @Nullable Double fixedBaselineSecondsPerRecord) {
+        return Optional.ofNullable(
+                project(fit, batch, targetRecordsPerSecond, fixedBaselineSecondsPerRecord)
+                        .getRecommendation());
+    }
+
+    public static Result project(
             OnlineCacheCost.Fit fit,
             CacheObservationBatch batch,
             double targetRecordsPerSecond,
@@ -56,14 +73,18 @@ public final class QuickMrcCostProjection {
                 || batch.subtasks.isEmpty()
                 || fit.getSubtasks().size() != batch.subtasks.size()
                 || fit.getIdentities().size() != batch.subtasks.size()) {
-            return Optional.empty();
+            return unsupported();
         }
 
         try {
             return recommendWithinSupport(fit, batch, targetRecordsPerSecond, fixedBaselineSecondsPerRecord);
         } catch (ArithmeticException invalidGeometry) {
-            return Optional.empty();
+            return unsupported();
         }
+    }
+
+    private static Result unsupported() {
+        return new Result(null, null, null);
     }
 
     /** True only if demand exceeds even the optimistic limit at the measured topology. */
@@ -87,7 +108,7 @@ public final class QuickMrcCostProjection {
         return false;
     }
 
-    private static Optional<Recommendation> recommendWithinSupport(
+    private static Result recommendWithinSupport(
             OnlineCacheCost.Fit fit,
             CacheObservationBatch batch,
             double target,
@@ -95,7 +116,7 @@ public final class QuickMrcCostProjection {
         int parallelism = batch.subtasks.size();
         CacheObservation first = batch.subtasks.get(0);
         if (first.window == null || first.histogram == null) {
-            return Optional.empty();
+            return unsupported();
         }
         long capacityBytes = first.window.capacityBytes;
         long binBytes = Math.multiplyExact(
@@ -104,7 +125,7 @@ public final class QuickMrcCostProjection {
         // when the live cache capacity falls between histogram bins.
         int anchorBin = Math.toIntExact((capacityBytes - 1) / binBytes);
         if (anchorBin < 0) {
-            return Optional.empty();
+            return unsupported();
         }
 
         List<StackDistanceHistogram> histograms = new ArrayList<>(parallelism);
@@ -135,12 +156,12 @@ public final class QuickMrcCostProjection {
                     || histogram.getNumBuckets() <= anchorBin
                     || histogram.getBucketSizeScaling() != first.histogram.getBucketSizeScaling()
                     || histogram.getCacheItemSizeBytes() != first.histogram.getCacheItemSizeBytes()) {
-                return Optional.empty();
+                return unsupported();
             }
             histograms.add(histogram);
             totals[i] = histogram.getTotalFrequency();
             if (totals[i] <= 0) {
-                return Optional.empty();
+                return unsupported();
             }
             long hitsAtAnchor = 0;
             for (int bin = 0; bin <= anchorBin; bin++) {
@@ -156,6 +177,9 @@ public final class QuickMrcCostProjection {
             commonBins = Math.min(commonBins, histogram.getNumBuckets());
         }
 
+        long minSupportedTotalBytes = Math.multiplyExact(binBytes, parallelism);
+        long maxSupportedTotalBytes =
+                Math.multiplyExact(Math.multiplyExact(commonBins, binBytes), parallelism);
         long[] hits = new long[parallelism];
         for (int bin = 0; bin < commonBins; bin++) {
             double weightedSeconds = 0;
@@ -187,16 +211,17 @@ public final class QuickMrcCostProjection {
                         weightedSeconds += inputRates[i] / totalInputRate * seconds;
                     }
                 }
-                return Optional.of(
+                return new Result(
                         new Recommendation(
                                 Math.multiplyExact(localBytes, parallelism),
                                 weightedSeconds,
-                                Math.multiplyExact(binBytes, parallelism),
-                                Math.multiplyExact(Math.multiplyExact(commonBins, binBytes), parallelism),
+                                minSupportedTotalBytes,
+                                maxSupportedTotalBytes,
                                 worstBias,
-                                unconstrained));
+                                unconstrained),
+                        minSupportedTotalBytes, maxSupportedTotalBytes);
             }
         }
-        return Optional.empty();
+        return new Result(null, minSupportedTotalBytes, maxSupportedTotalBytes);
     }
 }

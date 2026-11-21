@@ -51,6 +51,13 @@ public class QuickMrcOnlineCacheCostTest {
         after.setCoveredMisses(100);
         assertEquals(OnlineCacheCost.Reason.TIMING_COVERAGE, qualify(before, after, 0, 1).getReason());
         after = sample(1, 0, 0, 0);
+        after.setCompactionMisses(after.getMisses() + 1);
+        var impossiblePopulation = qualify(before, after, 0, 1);
+        assertEquals(OnlineCacheCost.Reason.TIMING_COVERAGE, impossiblePopulation.getReason());
+        assertNull(impossiblePopulation.getTimingCounts().getExpectedForegroundMisses());
+        assertNull(impossiblePopulation.getTimingCounts().getMissCoverage());
+        assertEquals(100, impossiblePopulation.getTimingCounts().getSampledMisses());
+        after = sample(1, 0, 0, 0);
         before.setHitNanos(after.getHitNanos() + 1);
         assertEquals(OnlineCacheCost.Reason.COUNTER_RESET, qualify(before, after, 0, 1).getReason());
         before = sample(0, 0, 0, 0);
@@ -80,6 +87,10 @@ public class QuickMrcOnlineCacheCostTest {
         var prior = qualify(sample(0, 0, 0, 0), sample(1, 0, 0, 0), 0, 1).getFit();
         var later = qualify(sample(1, 0, 0, 0), sample(2, 0, 2_000, 0), 1, 2).getFit();
         assertTrue(prior.holdoutRelativeError(later) > .75);
+        assertEquals(CacheObservation.Status.VALID, prior.holdoutContextStatus(later));
+        var newEpoch = qualify(sample(1, 1, 0, 0), sample(2, 1, 0, 0), 1, 2).getFit();
+        assertEquals(CacheObservation.Status.CACHE_CHANGED, prior.holdoutContextStatus(newEpoch));
+        assertEquals(Double.POSITIVE_INFINITY, prior.holdoutRelativeError(newEpoch));
     }
 
     @Test
@@ -90,6 +101,14 @@ public class QuickMrcOnlineCacheCostTest {
         assertEquals(12_288, supported.getTotalNativeCacheBytes());
         assertEquals(116e-6, supported.getPredictedSecondsPerRecord(), 1e-12);
         assertTrue(QuickMrcCostProjection.recommend(fit, observation, 10_000, null).isEmpty());
+        var rejected = QuickMrcCostProjection.project(fit, observation, 10_000, null);
+        assertNull(rejected.getRecommendation());
+        assertEquals(4096, rejected.getMinSupportedTotalBytes());
+        assertEquals(12_288, rejected.getMaxSupportedTotalBytes());
+        var unrelated = QuickMrcCostProjection.project(fit, batch(2, 0), 5000, null);
+        assertNull(unrelated.getRecommendation());
+        assertNull(unrelated.getMinSupportedTotalBytes());
+        assertNull(unrelated.getMaxSupportedTotalBytes());
         var unconstrained = QuickMrcCostProjection.recommend(fit, observation, 5000, null).orElseThrow();
         assertEquals(8_192, unconstrained.getTotalNativeCacheBytes());
         assertTrue(unconstrained.isRetainedUnconstrainedBudget());

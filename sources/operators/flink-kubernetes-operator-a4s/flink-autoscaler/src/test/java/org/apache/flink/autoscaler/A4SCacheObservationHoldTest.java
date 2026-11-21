@@ -27,6 +27,8 @@ import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.CacheAction;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.CacheEvaluation;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.realizer.TestingScalingRealizer;
@@ -40,11 +42,16 @@ import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.testutils.logging.LoggerAuditingExtension;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.RegisterExtension;
+import org.slf4j.event.Level;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,12 +59,19 @@ import java.util.Optional;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class A4SCacheObservationHoldTest {
+    @RegisterExtension
+    final LoggerAuditingExtension decisionLogs =
+            new LoggerAuditingExtension(JobAutoScalerImpl.class, Level.INFO);
+
     @Test
     void invalidRequiredCacheMetricsHoldEvenWithPersistedOverrides() throws Exception {
         var context = TestingAutoscalerUtils.createDefaultJobAutoScalerContext();
@@ -97,19 +111,34 @@ class A4SCacheObservationHoldTest {
                 realizationCalls.incrementAndGet();
             }
         };
+        var decision = new AtomicReference<CacheEvaluation>();
         var autoscaler = new JobAutoScalerImpl<>(
                 collector,
                 new ScalingMetricEvaluator(),
                 new ScalingExecutor<>(eventCollector, stateStore),
                 eventCollector,
                 recordingRealizer,
-                stateStore);
+                stateStore) {
+            @Override
+            void reportCacheDecision(
+                    JobAutoScalerContext<JobID> ctx, CacheEvaluation record, CacheAction action) {
+                super.reportCacheDecision(ctx, record, action);
+                decision.set(record);
+            }
+        };
 
         autoscaler.scale(context);
 
         assertEquals(1, preservationCalls.get());
         assertEquals(0, realizationCalls.get());
         assertEquals(Map.of(vertex.toString(), "2"), stateStore.getParallelismOverrides(context));
+        assertEquals(CacheAction.POLICY_HOLD, decision.get().getAction());
+        assertEquals(CacheObservation.Status.STALE, decision.get().getObservationHolds().get(vertex));
+        assertEquals(CacheObservation.Status.STALE,
+                decision.get().getVertices().get(vertex).getObservation().getStatus());
+        assertNull(decision.get().getRequestedParallelismOverrides());
+        assertTrue(decisionLogs.getMessages().stream().anyMatch(message ->
+                message.contains("reason=STALE") && message.contains("evaluationId=" + decision.get().getId())));
         var history = collector.updateMetrics(context, stateStore);
         assertFalse(autoscaler.checkCacheObservations(context, history));
         var metrics = history.getMetricHistory().get(history.getMetricHistory().lastKey());
@@ -177,6 +206,7 @@ class A4SCacheObservationHoldTest {
             }
         };
         var requests = new AtomicInteger();
+        var executorDecision = new AtomicReference<CacheEvaluation>();
         var executor = new ScalingExecutor<JobID, JobAutoScalerContext<JobID>>(events, stateStore) {
             @Override
             public boolean scaleResource(
@@ -185,6 +215,7 @@ class A4SCacheObservationHoldTest {
                     ScalingTracking tracking, Instant now, JobTopology jobTopology,
                     DelayedScaleDown delayedScaleDown) {
                 requests.incrementAndGet();
+                executorDecision.set(metrics.getCacheEvaluation());
                 return false;
             }
         };
@@ -193,9 +224,14 @@ class A4SCacheObservationHoldTest {
 
         autoscaler.scale(context);
         assertEquals(0, requests.get());
+        assertEquals(CacheAction.ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE,
+                autoscaler.lastEvaluatedMetrics.get(context.getJobKey()).getCacheEvaluation().getAction());
         config.set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_SHADOW, true);
         autoscaler.scale(context);
         assertEquals(1, requests.get());
+        var result = autoscaler.lastEvaluatedMetrics.get(context.getJobKey()).getCacheEvaluation();
+        assertSame(executorDecision.get(), result);
+        assertEquals(CacheAction.POLICY_NO_CHANGE, result.getAction());
     }
 
     @Test
@@ -210,6 +246,15 @@ class A4SCacheObservationHoldTest {
         assertTrue(profiles.get(replay.source.toString()).contains("managedMemory=158.000mb"));
         assertEquals(1, replay.profileReads.get());
         assertEquals(1, replay.requests.get());
+        var decision = replay.autoscaler.lastEvaluatedMetrics.get(replay.context.getJobKey()).getCacheEvaluation();
+        assertEquals(CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES, decision.getAction());
+        assertTrue(decision.isCachePlacementEnabled());
+        assertEquals(profiles, decision.getRequestedResourceProfileOverrides());
+        assertEquals("4", decision.getRequestedParallelismOverrides().get(replay.join.toString()));
+        assertTrue(decisionLogs.getMessages().stream().anyMatch(message ->
+                message.contains("action=THROUGHPUT_SCALE_UP_RETAINED_PROFILES")
+                        && message.contains("evaluationId=" + decision.getId())
+                        && message.contains("appliedOverrides=unavailable")));
     }
 
     @Test
@@ -220,6 +265,8 @@ class A4SCacheObservationHoldTest {
         assertEquals(1, replay.profileReads.get());
         assertEquals(0, replay.requests.get());
         assertTrue(replay.stateStore.getParallelismOverrides(replay.context).isEmpty());
+        var decision = replay.autoscaler.lastEvaluatedMetrics.get(replay.context.getJobKey()).getCacheEvaluation();
+        assertEquals(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED, decision.getHoldReason());
     }
 
     @Test
@@ -233,6 +280,30 @@ class A4SCacheObservationHoldTest {
 
         assertEquals(0, replay.requests.get());
         assertTrue(replay.stateStore.getParallelismOverrides(replay.context).isEmpty());
+        var decision = replay.autoscaler.lastEvaluatedMetrics.get(replay.context.getJobKey()).getCacheEvaluation();
+        assertEquals(Reason.OVERLOAD_RESOURCE_QUOTA, decision.getHoldReason());
+    }
+
+    @Test
+    void boundsRoutineDecisionLogsAndCorrelatesEveryRequest() {
+        var replay = new OverloadFixture(160L << 20, Reason.INSUFFICIENT_CURRENT_PARALLELISM);
+        var first = new CacheEvaluation();
+        var throttled = new CacheEvaluation();
+        var next = new CacheEvaluation();
+        var request = new CacheEvaluation();
+        replay.autoscaler.setClock(Clock.fixed(Instant.EPOCH, ZoneOffset.UTC));
+        replay.autoscaler.reportCacheDecision(replay.context, first, CacheAction.POLICY_HOLD);
+        replay.autoscaler.reportCacheDecision(replay.context, throttled, CacheAction.POLICY_HOLD);
+        replay.autoscaler.setClock(Clock.fixed(Instant.EPOCH.plusSeconds(10), ZoneOffset.UTC));
+        replay.autoscaler.reportCacheDecision(replay.context, next, CacheAction.POLICY_HOLD);
+        replay.autoscaler.reportCacheDecision(replay.context, request, CacheAction.POLICY_REQUEST);
+
+        var logged = decisionLogs.getMessages();
+        assertEquals(3, logged.size());
+        assertTrue(logged.get(0).contains("evaluationId=" + first.getId()));
+        assertTrue(logged.get(1).contains("evaluationId=" + next.getId()));
+        assertTrue(logged.get(2).contains("evaluationId=" + request.getId()));
+        assertEquals(CacheAction.POLICY_HOLD, throttled.getAction());
     }
 
     @Test

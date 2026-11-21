@@ -174,7 +174,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             var profiles = preserveLiveProfiles(context, evaluatedMetrics, scalingSummaries,
                     overloadObservations);
             if (profiles.isEmpty()) {
-                LOG.warn("A4S hold job={} reason=OVERLOAD_LIVE_PROFILE_UNVERIFIED", context.getJobID());
+                evaluatedMetrics.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED);
                 return false;
             }
             currentProfileOverrides = profiles.get();
@@ -229,15 +229,17 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         scalingTracking.addScalingRecord(now, new ScalingRecord());
         autoScalerStateStore.storeScalingTracking(context, scalingTracking);
 
-        autoScalerStateStore.storeParallelismOverrides(
-                context,
-                getVertexParallelismOverrides(
-                        evaluatedMetrics.getVertexMetrics(), scalingSummaries));
+        var requestedParallelism =
+                getVertexParallelismOverrides(evaluatedMetrics.getVertexMetrics(), scalingSummaries);
+        autoScalerStateStore.storeParallelismOverrides(context, requestedParallelism);
+        Map<String, String> requestedProfiles = null;
 
         if (throughputOnly) {
-            autoScalerStateStore.storeResourceProfileOverrides(context, currentProfileOverrides);
-            LOG.info("A4S job={} mode=THROUGHPUT_SCALE_UP_RETAINED_PROFILES vertices={}",
-                    context.getJobID(), scalingSummaries.keySet());
+            requestedProfiles = currentProfileOverrides;
+            autoScalerStateStore.storeResourceProfileOverrides(context, requestedProfiles);
+            LOG.info("A4S job={} mode=THROUGHPUT_SCALE_UP_RETAINED_PROFILES vertices={} evaluationId={}",
+                    context.getJobID(), scalingSummaries.keySet(),
+                    evaluatedMetrics.getCacheEvaluation().getId());
         } else if (conf.get(JUSTIN_ENABLED)) {
             var currentScalingConf =
                     scalingConfigurations.setCurrentConfiguration(
@@ -254,16 +256,19 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             
             LOG.info(scalingConfigurations.toString());
 
-            autoScalerStateStore.storeParallelismOverrides(
-                    context,
-                    getVertexParallelismOverrides(currentScalingConf));
+            requestedParallelism = getVertexParallelismOverrides(currentScalingConf);
+            autoScalerStateStore.storeParallelismOverrides(context, requestedParallelism);
 
-            autoScalerStateStore.storeResourceProfileOverrides(
-                    context,
-                    getVertexResourceProfileOverrides(context.getJobID(), this.scalingConfigurations, conf));
+            requestedProfiles =
+                    getVertexResourceProfileOverrides(context.getJobID(), this.scalingConfigurations, conf);
+            autoScalerStateStore.storeResourceProfileOverrides(context, requestedProfiles);
         }
 
         autoScalerStateStore.storeConfigChanges(context, configOverrides);
+        if (throughputOnly || useA4s) {
+            evaluatedMetrics.getCacheEvaluation()
+                    .recordRequestedOverrides(requestedParallelism, requestedProfiles);
+        }
 
         // Try to clear all delayed scale down requests after scaling.
         delayedScaleDown.clearAll();
@@ -297,7 +302,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 || (cpuQuota.isPresent() && (cpu <= 0 || requiredTms * cpu > cpuQuota.get()))
                 || (memoryQuota.isPresent()
                         && (memory <= 0 || requiredTms > memoryQuota.get().getBytes() / memory))) {
-            LOG.info("A4S hold job={} reason=OVERLOAD_RESOURCE_QUOTA", context.getJobID());
+            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_RESOURCE_QUOTA);
             return true;
         }
         if (cpu <= 0 || memory <= 0) {
@@ -305,7 +310,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         }
         var used = evaluated.getGlobalMetrics().get(NUM_TASK_SLOTS_USED);
         if (used == null || !Double.isFinite(used.getCurrent()) || used.getCurrent() <= 0) {
-            LOG.info("A4S hold job={} reason=OVERLOAD_SLOT_METRICS_UNAVAILABLE", context.getJobID());
+            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_SLOT_METRICS_UNAVAILABLE);
             return true;
         }
         int currentTms = (int) Math.ceil(used.getCurrent() / slotsPerTm);

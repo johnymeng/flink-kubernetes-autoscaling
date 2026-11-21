@@ -18,12 +18,16 @@
 package org.apache.flink.autoscaler.a4s;
 
 import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.CacheObservation.Status;
 import org.apache.flink.a4s.core.CacheObservationBatch;
 
+import lombok.AllArgsConstructor;
 import lombok.Value;
+import lombok.With;
 
 import javax.annotation.Nullable;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -35,7 +39,7 @@ import java.util.concurrent.TimeUnit;
 public class OnlineCacheCost {
     public static final long MIN_WINDOW_SECONDS = 60;
     public static final long MAX_WINDOW_SECONDS = 120;
-    private static final int COMPACTION_TIMING_ABI = 3;
+    public static final int COMPACTION_TIMING_ABI = 3;
     private static final long MIN_TIMED_LOOKUPS_PER_CLASS = 64;
     private static final double MIN_COVERAGE = 0.90;
     // The histogram/ticker and resident-cache snapshots are separate native reads.
@@ -50,6 +54,7 @@ public class OnlineCacheCost {
         MISSING_OBSERVATIONS,
         UNBOUND_TIMING,
         CONTEXT_CHANGED,
+        INSUFFICIENT_HISTORY,
         WINDOW_DURATION,
         WINDOW_SKEW,
         COUNTER_RESET,
@@ -62,16 +67,69 @@ public class OnlineCacheCost {
         MISSING_HOLDOUT,
         PHASE_DRIFT,
         CAPACITY_UNSUPPORTED,
-        INSUFFICIENT_CURRENT_PARALLELISM
+        INSUFFICIENT_CURRENT_PARALLELISM,
+        OVERLOAD_LIVE_PROFILE_UNVERIFIED,
+        OVERLOAD_RESOURCE_QUOTA,
+        OVERLOAD_SLOT_METRICS_UNAVAILABLE
     }
 
     @Value
+    @With
+    @AllArgsConstructor
     public static class FitResult {
         Reason reason;
         @Nullable Fit fit;
+        @Nullable Status observationStatus;
+        @Nullable Integer failingSubtask;
+        @Nullable TimingCounts timingCounts;
+        @Nullable FitWindow attemptedWindow;
+        @Nullable Holdout holdout;
+
+        public FitResult(Reason reason, @Nullable Fit fit) {
+            this(reason, fit, null, null, null, null, null);
+        }
 
         public static FitResult rejected(Reason reason) {
             return new FitResult(reason, null);
+        }
+    }
+
+    @Value
+    public static class FitWindow {
+        Instant start;
+        Instant end;
+    }
+
+    @Value
+    public static class Holdout {
+        @Nullable FitWindow originalFitWindow;
+        @Nullable Long fitEndMillis;
+        @Nullable Double maxActualMissRelativeError;
+        @Nullable Boolean stableAccessMix;
+        @Nullable Reason priorRejection;
+        @Nullable Status priorObservationStatus;
+    }
+
+    @Value
+    public static class TimingCounts {
+        @Nullable Long expectedForegroundHits;
+        @Nullable Long expectedForegroundMisses;
+        long coveredHits;
+        long coveredMisses;
+        long sampledHits;
+        long sampledMisses;
+
+        @Nullable
+        public Double getHitCoverage() {
+            return expectedForegroundHits != null && expectedForegroundHits > 0
+                    ? coveredHits / (double) expectedForegroundHits : null;
+        }
+
+        @Nullable
+        public Double getMissCoverage() {
+            return expectedForegroundMisses != null && expectedForegroundMisses > 0
+                    ? coveredMisses / (double) expectedForegroundMisses
+                    : null;
         }
     }
 
@@ -138,9 +196,7 @@ public class OnlineCacheCost {
          * window and the coefficients frozen before it started.
          */
         public double holdoutRelativeError(Fit later) {
-            if (subtasks.size() != later.subtasks.size()
-                    || windowEndMillis != later.windowStartMillis
-                    || !adjacentContexts(later)) {
+            if (holdoutContextStatus(later) != Status.VALID) {
                 return Double.POSITIVE_INFINITY;
             }
             double worstRelativeError = 0;
@@ -154,24 +210,32 @@ public class OnlineCacheCost {
             return worstRelativeError;
         }
 
-        private boolean adjacentContexts(Fit later) {
-            if (identities.size() != later.identities.size()) {
-                return false;
+        public Status holdoutContextStatus(Fit later) {
+            if (subtasks.size() != later.subtasks.size()
+                    || identities.size() != later.identities.size()) {
+                return Status.INCOMPLETE;
+            }
+            if (windowEndMillis != later.windowStartMillis) {
+                return Status.SKEWED;
             }
             for (int i = 0; i < identities.size(); i++) {
                 FitIdentity before = identities.get(i);
                 FitIdentity after = later.identities.get(i);
-                if (!before.attempt.equals(after.attempt)
-                        || !before.process.equals(after.process)
+                if (!before.attempt.equals(after.attempt)) {
+                    return Status.ATTEMPT_MISMATCH;
+                }
+                if (!before.process.equals(after.process)
                         || before.cacheId != after.cacheId
                         || before.epoch != after.epoch
                         || before.capacityBytes != after.capacityBytes
-                        || before.samplingRate != after.samplingRate
-                        || before.endSequence != after.startSequence) {
-                    return false;
+                        || before.samplingRate != after.samplingRate) {
+                    return Status.CACHE_CHANGED;
+                }
+                if (before.endSequence != after.startSequence) {
+                    return Status.INCOMPATIBLE;
                 }
             }
-            return true;
+            return Status.VALID;
         }
 
         public boolean hasStableAccessMix(Fit later) {
@@ -204,15 +268,26 @@ public class OnlineCacheCost {
         if (start.isEmpty() || start.size() != end.size()) {
             return FitResult.rejected(Reason.MISSING_TIMING);
         }
-        if (!complete(startObservation, start.size()) || !complete(endObservation, end.size())) {
-            return FitResult.rejected(Reason.MISSING_OBSERVATIONS);
+        Status startStatus = observationStatus(startObservation, start.size());
+        Status endStatus = observationStatus(endObservation, end.size());
+        if (startStatus != Status.VALID || endStatus != Status.VALID) {
+            Status status = startStatus != Status.VALID ? startStatus : endStatus;
+            return FitResult.rejected(
+                            status == Status.COUNTER_RESET
+                                    ? Reason.COUNTER_RESET : Reason.MISSING_OBSERVATIONS)
+                    .withObservationStatus(status);
         }
         List<FitIdentity> identities = new ArrayList<>(end.size());
         for (int i = 0; i < end.size(); i++) {
             CacheObservation before = startObservation.subtasks.get(i);
             CacheObservation after = endObservation.subtasks.get(i);
-            if (!bound(before, start.get(i)) || !bound(after, end.get(i))) {
-                return FitResult.rejected(Reason.UNBOUND_TIMING);
+            Status beforeBinding = bindingStatus(before, start.get(i));
+            Status afterBinding = bindingStatus(after, end.get(i));
+            if (beforeBinding != Status.VALID || afterBinding != Status.VALID) {
+                return FitResult.rejected(Reason.UNBOUND_TIMING)
+                        .withObservationStatus(
+                                beforeBinding != Status.VALID ? beforeBinding : afterBinding)
+                        .withFailingSubtask(i);
             }
             CacheObservation.Window left = before.window;
             CacheObservation.Window right = after.window;
@@ -224,7 +299,9 @@ public class OnlineCacheCost {
                     || left.capacityBytes != right.capacityBytes
                     || left.samplingRate != right.samplingRate
                     || right.sequence <= left.sequence) {
-                return FitResult.rejected(Reason.CONTEXT_CHANGED);
+                return FitResult.rejected(Reason.CONTEXT_CHANGED)
+                        .withObservationStatus(Status.CACHE_CHANGED)
+                        .withFailingSubtask(i);
             }
             identities.add(new FitIdentity(
                     after.attempt, right.process, right.cacheId, right.epoch, right.capacityBytes,
@@ -236,34 +313,59 @@ public class OnlineCacheCost {
         return estimate(start, end, List.copyOf(identities));
     }
 
-    private static boolean complete(@Nullable CacheObservationBatch batch, int size) {
-        return batch != null
-                && batch.version == CacheObservation.VERSION
-                && batch.status == CacheObservation.Status.VALID
-                && batch.expectedSubtasks == size
-                && batch.subtasks.size() == size;
+    public static Status observationStatus(@Nullable CacheObservationBatch batch, int size) {
+        if (batch == null) {
+            return Status.ABSENT;
+        }
+        if (batch.version != CacheObservation.VERSION) {
+            return Status.UNSUPPORTED_VERSION;
+        }
+        if (batch.status == Status.VALID
+                && (batch.expectedSubtasks != size || batch.subtasks.size() != size)) {
+            return Status.INCOMPLETE;
+        }
+        return batch.status;
     }
 
-    private static boolean bound(CacheObservation observation, CacheCostSample sample) {
+    private static Status bindingStatus(
+            CacheObservation observation, @Nullable CacheCostSample sample) {
         CacheObservation.Window window = observation.window;
-        return sample != null
-                && observation.version == CacheObservation.VERSION
-                && observation.status == CacheObservation.Status.VALID
-                && window != null
-                && window.owners.equals(List.of(1L))
-                && CacheObservation.QUICK_MRC.equals(window.population)
-                && CacheObservation.CACHE_POLICY.equals(window.cachePolicy)
-                && CacheObservation.FIXED_4K.equals(window.chargePolicy)
-                && sample.getTimingAbi() == COMPACTION_TIMING_ABI
-                && observation.subtask == sample.getSubtask()
-                && observation.attempt.equals(sample.getAttempt())
-                && window.process.equals(sample.getProcess())
-                && window.cacheId == sample.getCacheId()
-                && window.capacityBytes == sample.getCapacityBytes()
-                && window.epoch == sample.getCacheEpoch()
-                && sample.getObservedAtNanos() != null
-                && Math.abs((double) (sample.getObservedAtNanos() - window.endNanos))
-                        <= TimeUnit.SECONDS.toNanos(10);
+        if (observation.version != CacheObservation.VERSION) {
+            return Status.UNSUPPORTED_VERSION;
+        }
+        if (observation.status != Status.VALID) {
+            return observation.status;
+        }
+        if (sample == null || window == null) {
+            return Status.INCOMPLETE;
+        }
+        if (!window.owners.equals(List.of(1L))) {
+            return Status.SHARED_CACHE;
+        }
+        if (sample.getTimingAbi() != COMPACTION_TIMING_ABI) {
+            return Status.UNSUPPORTED_NATIVE;
+        }
+        if (observation.subtask != sample.getSubtask()
+                || !observation.attempt.equals(sample.getAttempt())) {
+            return Status.ATTEMPT_MISMATCH;
+        }
+        if (!window.process.equals(sample.getProcess())
+                || window.cacheId != sample.getCacheId()
+                || window.capacityBytes != sample.getCapacityBytes()
+                || window.epoch != sample.getCacheEpoch()) {
+            return Status.CACHE_CHANGED;
+        }
+        if (!CacheObservation.QUICK_MRC.equals(window.population)
+                || !CacheObservation.CACHE_POLICY.equals(window.cachePolicy)
+                || !CacheObservation.FIXED_4K.equals(window.chargePolicy)) {
+            return Status.INCOMPATIBLE;
+        }
+        if (sample.getObservedAtNanos() == null) {
+            return Status.INCOMPLETE;
+        }
+        return Math.abs((double) (sample.getObservedAtNanos() - window.endNanos))
+                        <= TimeUnit.SECONDS.toNanos(10)
+                ? Status.VALID : Status.SKEWED;
     }
 
     private static boolean aligned(List<CacheCostSample> samples) {
@@ -279,17 +381,28 @@ public class OnlineCacheCost {
     /** Reject an observed reset even if the counters recover before a fit's end. */
     public static boolean hasDiscontinuity(
             List<CacheCostSample> before, List<CacheCostSample> after) {
+        return findDiscontinuity(before, after).isPresent();
+    }
+
+    /** Reports the first incompatible subtask in a pair of timing observations. */
+    public static Optional<FitResult> findDiscontinuity(
+            List<CacheCostSample> before, List<CacheCostSample> after) {
         if (before.size() != after.size()) {
-            return true;
+            return Optional.of(FitResult.rejected(Reason.MISSING_TIMING));
         }
         for (int subtask = 0; subtask < after.size(); subtask++) {
             CacheCostSample left = before.get(subtask);
             CacheCostSample right = after.get(subtask);
-            if (!sameCache(left, right, subtask) || countersDecreased(left, right)) {
-                return true;
+            var rejection = incompatibleSamples(left, right, subtask);
+            if (rejection != null) {
+                return Optional.of(rejection);
+            }
+            if (countersDecreased(left, right)) {
+                return Optional.of(FitResult.rejected(Reason.COUNTER_RESET)
+                        .withFailingSubtask(subtask));
             }
         }
-        return false;
+        return Optional.empty();
     }
 
     private static boolean countersDecreased(CacheCostSample before, CacheCostSample after) {
@@ -324,8 +437,9 @@ public class OnlineCacheCost {
         for (int subtask = 0; subtask < end.size(); subtask++) {
             CacheCostSample before = start.get(subtask);
             CacheCostSample after = end.get(subtask);
-            if (!sameCache(before, after, subtask)) {
-                return FitResult.rejected(Reason.CONTEXT_CHANGED);
+            var incompatible = incompatibleSamples(before, after, subtask);
+            if (incompatible != null) {
+                return incompatible;
             }
             long elapsedNanos = monotonic
                     ? after.getObservedAtNanos() - before.getObservedAtNanos()
@@ -334,11 +448,11 @@ public class OnlineCacheCost {
                     || elapsedNanos > TimeUnit.SECONDS.toNanos(MAX_WINDOW_SECONDS)
                     || before.getObservedAtMillis() <= 0
                     || after.getObservedAtMillis() <= before.getObservedAtMillis()) {
-                return FitResult.rejected(Reason.WINDOW_DURATION);
+                return FitResult.rejected(Reason.WINDOW_DURATION).withFailingSubtask(subtask);
             }
 
             if (countersDecreased(before, after)) {
-                return FitResult.rejected(Reason.COUNTER_RESET);
+                return FitResult.rejected(Reason.COUNTER_RESET).withFailingSubtask(subtask);
             }
             long recordsIn = after.getRecordsIn() - before.getRecordsIn();
             double busySeconds = (after.getBusyMillis() - before.getBusyMillis()) / 1000;
@@ -353,21 +467,25 @@ public class OnlineCacheCost {
             long hitNanos = after.getHitNanos() - before.getHitNanos();
             long missNanos = after.getMissNanos() - before.getMissNanos();
             if (misses > lookups || compactionHits > lookups - misses || compactionMisses > misses) {
-                return FitResult.rejected(Reason.TIMING_COVERAGE);
+                return rejectedTiming(Reason.TIMING_COVERAGE, subtask, null, null,
+                        coveredHits, coveredMisses, sampledHits, sampledMisses);
             }
             long foregroundHits = lookups - misses - compactionHits;
             long foregroundMisses = misses - compactionMisses;
             if (foregroundHits == 0 || foregroundMisses == 0) {
-                return FitResult.rejected(Reason.NO_HIT_OR_MISS);
+                return rejectedTiming(Reason.NO_HIT_OR_MISS, subtask, foregroundHits,
+                        foregroundMisses, coveredHits, coveredMisses, sampledHits, sampledMisses);
             }
             if (!usableCoverage(coveredHits, foregroundHits)
                     || !usableCoverage(coveredMisses, foregroundMisses)
                     || sampledHits > coveredHits || sampledMisses > coveredMisses) {
-                return FitResult.rejected(Reason.TIMING_COVERAGE);
+                return rejectedTiming(Reason.TIMING_COVERAGE, subtask, foregroundHits,
+                        foregroundMisses, coveredHits, coveredMisses, sampledHits, sampledMisses);
             }
             if (recordsIn == 0 || sampledHits < MIN_TIMED_LOOKUPS_PER_CLASS
                     || sampledMisses < MIN_TIMED_LOOKUPS_PER_CLASS) {
-                return FitResult.rejected(Reason.TOO_FEW_SAMPLES);
+                return rejectedTiming(Reason.TOO_FEW_SAMPLES, subtask, foregroundHits,
+                        foregroundMisses, coveredHits, coveredMisses, sampledHits, sampledMisses);
             }
 
             double meanHit = hitNanos / (double) sampledHits / 1e9;
@@ -375,11 +493,13 @@ public class OnlineCacheCost {
             double extraSecondsPerMiss = meanMiss - meanHit;
             if (hitNanos < sampledHits || missNanos < sampledMisses
                     || !positiveFinite(extraSecondsPerMiss)) {
-                return FitResult.rejected(Reason.NON_POSITIVE_PENALTY);
+                return rejectedTiming(Reason.NON_POSITIVE_PENALTY, subtask, foregroundHits,
+                        foregroundMisses, coveredHits, coveredMisses, sampledHits, sampledMisses);
             }
             double residual = busySeconds - extraSecondsPerMiss * foregroundMisses;
             if (!positiveFinite(residual)) {
-                return FitResult.rejected(Reason.NON_POSITIVE_BASELINE);
+                return rejectedTiming(Reason.NON_POSITIVE_BASELINE, subtask, foregroundHits,
+                        foregroundMisses, coveredHits, coveredMisses, sampledHits, sampledMisses);
             }
 
             var cost = new SubtaskCost(
@@ -409,23 +529,38 @@ public class OnlineCacheCost {
                         List.copyOf(subtasks), identities, oldestStart, oldestEnd));
     }
 
-    private static boolean sameCache(CacheCostSample before, CacheCostSample after, int subtask) {
-        return before != null
-                && after != null
-                && before.getSubtask() == subtask
-                && after.getSubtask() == subtask
-                && before.getAttempt() != null
-                && !before.getAttempt().isEmpty()
-                && before.getAttempt().equals(after.getAttempt())
-                && Objects.equals(before.getProcess(), after.getProcess())
-                && before.getCacheId() > 0
-                && before.getCacheId() == after.getCacheId()
-                && before.getCapacityBytes() > 0
-                && before.getCapacityBytes() == after.getCapacityBytes()
-                && before.getCacheEpoch() == after.getCacheEpoch()
-                && before.getTimingAbi() == after.getTimingAbi()
-                && validCounters(before)
-                && validCounters(after);
+    private static FitResult rejectedTiming(
+            Reason reason, int subtask, @Nullable Long foregroundHits, @Nullable Long foregroundMisses,
+            long coveredHits, long coveredMisses, long sampledHits, long sampledMisses) {
+        return FitResult.rejected(reason).withFailingSubtask(subtask)
+                .withTimingCounts(new TimingCounts(foregroundHits, foregroundMisses,
+                        coveredHits, coveredMisses, sampledHits, sampledMisses));
+    }
+
+    @Nullable
+    private static FitResult incompatibleSamples(
+            @Nullable CacheCostSample before, @Nullable CacheCostSample after, int subtask) {
+        Status status;
+        if (before == null || after == null) {
+            status = Status.INCOMPLETE;
+        } else if (before.getSubtask() != subtask || after.getSubtask() != subtask
+                || before.getAttempt() == null || before.getAttempt().isEmpty()
+                || !before.getAttempt().equals(after.getAttempt())) {
+            status = Status.ATTEMPT_MISMATCH;
+        } else if (!Objects.equals(before.getProcess(), after.getProcess())
+                || before.getCacheId() <= 0 || before.getCacheId() != after.getCacheId()
+                || before.getCapacityBytes() <= 0 || before.getCapacityBytes() != after.getCapacityBytes()
+                || before.getCacheEpoch() != after.getCacheEpoch()) {
+            status = Status.CACHE_CHANGED;
+        } else if (before.getTimingAbi() != after.getTimingAbi()) {
+            status = Status.UNSUPPORTED_NATIVE;
+        } else if (!validCounters(before) || !validCounters(after)) {
+            status = Status.INCOMPATIBLE;
+        } else {
+            return null;
+        }
+        return FitResult.rejected(Reason.CONTEXT_CHANGED).withObservationStatus(status)
+                .withFailingSubtask(subtask);
     }
 
     private static boolean validCounters(CacheCostSample sample) {
