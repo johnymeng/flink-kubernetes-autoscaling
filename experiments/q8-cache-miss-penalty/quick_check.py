@@ -1,4 +1,4 @@
-"""Check that two Q8 controllers ran the same workload and applied different join resources."""
+"""Check archived Q8 workload and placement receipts and classify observed actions."""
 import argparse
 import json
 from math import isfinite
@@ -236,10 +236,7 @@ def validate(output, analysis_seconds=None):
                     or arm["raw_main_empty_curve_evaluations"] < 2
                     or any(row["type"] == "rescale_start" for row in analyze.rows(pair / name / "rescale-events.jsonl"))):
                 issues.append("No verified evidence explaining an unchanged literal main allocation")
-        elif not applied or not arm["standard_triggers"]:
-            issues.append(f"{mode}: no verified ordinary autoscaler resize")
-        if not sustained and mode == "branch" and not any(d["applied_model"] == "online" for d in applied):
-            issues.append("Branch never applied a qualified online estimate")
+        arm["decision_evidence"] = analyze.legacy_decisions(arm)
         for decision in applied:
             if arm["completed_input"] is not None and all(x is not None for x in decision["offsets"].values()):
                 decision["records_remaining_at_savepoint"] = arm["completed_input"] - sum(decision["offsets"].values())
@@ -260,18 +257,15 @@ def validate(output, analysis_seconds=None):
     if main["controller_origins"] == branch["controller_origins"] or main["revision"] == branch["revision"]:
         issues.append("Both arms used the same autoscaler binaries or revision")
 
-    def profile(decision):
-        return decision["p"], decision["managed_bytes_per_slot"], tuple(sorted(decision["native_bytes"].values()))
-
-    decisions = {mode: [profile(d) for d in arm["applied"]] for mode, arm in arms.items()}
-    for mode, history in decisions.items():
-        initial = arms[mode]["matched_start_profile"]
-        if initial:
-            history.insert(0, (initial["join_parallelism"], initial["join_managed_slot_bytes"],
-                               tuple(sorted(initial["native_bytes_per_join"]))))
-    different = all(decisions.values()) and decisions["main"][-1] != decisions["branch"][-1]
-    if not sustained and not different:
-        issues.append("The corresponding verified join allocations did not diverge")
+    histories = []
+    for arm in (main, branch):
+        initial = arm.get("matched_start_profile") or {}
+        history = analyze.legacy_allocation_history(arm)
+        histories.append([analyze.allocation_signature(
+            initial.get("join_parallelism"), initial.get("join_managed_slot_bytes"),
+            initial.get("native_bytes_per_join")), *history])
+    same_actions = analyze.same_allocation_history(histories)
+    different = None if same_actions is None else not same_actions
     throughput = [arm["completed_input_per_wall_second"] for arm in (main, branch)]
     matched_records = [arm.get("input_at_cutoff") for arm in (main, branch)]
     sampled_change = None
@@ -282,6 +276,7 @@ def validate(output, analysis_seconds=None):
             "sampled_branch_input_change_percent_at_cutoff": sampled_change,
             "wall_seconds_including_setup_and_cleanup": meta.get("total_wall_seconds_including_setup_and_cleanup"),
             "different_verified_join_profile": different,
+            "classification": "same_action_control" if same_actions and not issues else "historical_bundle",
             "branch_throughput_change_percent": (100 * (throughput[1] / throughput[0] - 1)
                                                     if all(throughput) and not issues else None),
             "arms": arms}
@@ -292,8 +287,14 @@ if __name__ == "__main__":
     parser.add_argument("output", type=Path, help="Run root containing controllers.json and pair-*")
     parser.add_argument("--analysis-seconds", type=int,
                         help="Retrospectively summarize this many seconds of an archived run")
+    parser.add_argument("--report", type=Path, help="New output path for the assessment JSON")
     args = parser.parse_args()
     report = validate(args.output, args.analysis_seconds)
-    (args.output / "quick-results.json").write_text(json.dumps(report, sort_keys=True, indent=2) + "\n")
+    target = args.report or args.output / "quick-results.json"
+    try:
+        with target.open("x") as stream:
+            stream.write(json.dumps(report, sort_keys=True, indent=2) + "\n")
+    except FileExistsError:
+        parser.error(f"Report already exists: {target}. Select a new --report path.")
     print(json.dumps({k: v for k, v in report.items() if k != "arms"}, indent=2))
     raise SystemExit(0 if report["passed"] else 1)

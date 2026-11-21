@@ -14,7 +14,7 @@ from pathlib import Path
 
 from matplotlib import pyplot as plt
 from matplotlib.ticker import MaxNLocator, StrMethodFormatter
-from quick_series import confirmed_kafka_rates
+from quick_series import PERIOD, confirmed_kafka_rates
 
 METRICS = ("source_records_per_second", "managed_memory_used_bytes",
            "managed_memory_allocated_bytes", "task_slots_used")
@@ -69,7 +69,7 @@ def read_arm(arm_dir, case, window_seconds):
             raise ValueError(f"Insufficient observed coverage for {case} at {deadline}")
     elif marker is None or marker["type"] != "finished":
         raise ValueError(f"Incomplete finished-job series for {case}")
-    samples = [row for row in samples if row["capture_epoch"] <= end_epoch]
+    samples = [row for row in samples if row.get("capture_end_epoch", row["capture_epoch"]) <= end_epoch]
     if not samples:
         raise ValueError(f"No eligible samples for {case}")
     previous = None
@@ -78,8 +78,6 @@ def read_arm(arm_dir, case, window_seconds):
         if previous is not None and row["elapsed_sec"] <= previous:
             raise ValueError(f"Capture time did not increase in {case}")
         previous = row["elapsed_sec"]
-    if any(not any(row["values"][key] is not None for row in samples) for key in METRICS):
-        raise ValueError(f"A required Flink metric was unavailable for the entire {case} run")
     return samples, end_epoch - release, ended_at_deadline
 
 
@@ -113,6 +111,19 @@ def load_ryan_plotter(path, output):
     return upstream
 
 
+def split_plot_gaps(rows):
+    # NaN is a drawing separator for a skipped scheduled observation only.
+    # The archived sample receipts and exported observed intervals stay untouched.
+    draw = []
+    for previous, current in zip(rows, rows[1:]):
+        draw.append(previous)
+        left, right = previous.get("scheduled_elapsed_sec"), current.get("scheduled_elapsed_sec")
+        if left is not None and right is not None and right - left > PERIOD:
+            draw.append({"elapsed_sec": (previous["elapsed_sec"] + current["elapsed_sec"]) / 2,
+                         "values": dict.fromkeys(METRICS)})
+    return [*draw, rows[-1]] if rows else []
+
+
 def draw_ryan(arm, rows, upstream, controllers, output, label):
     mode = controllers[arm]["mode"]
     filename = "q8-" + mode
@@ -125,7 +136,10 @@ def draw_ryan(arm, rows, upstream, controllers, output, label):
             writer.writerow((row["capture_epoch"], *(column[index] for column in series.values())))
     run_row = {"run_id": rows[0]["deployment"], "autoscaler": label,
                "run_commit": controllers[arm]["revision"][:12]}
-    upstream.plot_run("q8", run_row, [row["elapsed_sec"] for row in rows], series,
+    drawing = split_plot_gaps(rows)
+    plotted = {original: [value(row, key) for row in drawing]
+               for original, key in zip(RYAN_METRICS, METRICS)}
+    upstream.plot_run("q8", run_row, [row["elapsed_sec"] for row in drawing], plotted,
                       output / (filename + "-ryan.png"))
 
 
@@ -198,6 +212,7 @@ def main():
         if kafka:
             samples = records[case]
             for sample, rate in zip(samples, confirmed_kafka_rates(samples, native_results[case]["transactions"])):
+                sample["raw_source_records_per_second"] = sample["values"]["source_records_per_second"]
                 sample["values"]["source_records_per_second"] = rate
     upstream = load_ryan_plotter(args.ryan_plotter, args.output)
     if native:
@@ -208,13 +223,26 @@ def main():
     for case, rows in records.items():
         draw_ryan(case, rows, upstream, controllers, args.output, cases[case])
     with (args.output / "q8-resource-series.csv").open("w", newline="") as out:
-        columns = ["case", "deployment", "job_id", "capture_epoch", "elapsed_sec",
-                   "job_state", "job_start_epoch_ms", *METRICS]
+        columns = ["case", "deployment", "job_id", "capture_epoch", "capture_end_epoch", "elapsed_sec",
+                   "job_state", "job_start_epoch_ms", "raw_source_records_per_second", *METRICS]
         writer = csv.DictWriter(out, fieldnames=columns)
         writer.writeheader()
         for rows in records.values():
             for row in rows:
-                writer.writerow({key: row.get(key) for key in columns[:-4]} | row["values"])
+                writer.writerow({key: row.get(key) for key in columns[:-4]} |
+                                {key: row["values"].get(key) for key in METRICS})
+    if native and any(result.get("counter_progress_intervals") for result in native_results.values()):
+        with (args.output / "q8-counter-intervals.csv").open("w", newline="") as out:
+            fields = ("case", "population", "start_epoch", "end_epoch", "records",
+                      "interval_average_records_per_second", "unscored_reason", "contains_observation_gap")
+            report = csv.DictWriter(out, fieldnames=fields, extrasaction="ignore")
+            report.writeheader()
+            for case, result in native_results.items():
+                release = records[case][0]["release_epoch"]
+                cutoff = release + elapsed_finish[case]
+                for interval in result.get("counter_progress_intervals", []):
+                    if release <= interval["start_epoch"] and interval["end_epoch"] <= cutoff:
+                        report.writerow({"case": case, **interval})
 
     plt.rcParams.update({
         "font.family": "DejaVu Sans", "font.size": 10, "axes.labelcolor": "#334155",
@@ -242,7 +270,7 @@ def main():
     fig.text(0.11, 0.908, subtitle, fontsize=10.5, color="#475569")
     labels = ("Source throughput\n(records/s)", "Managed memory\n(MiB)", "Task slots\nused")
     if kafka:
-        labels = ("Person + auction source\n(records/s)", labels[1], labels[2])
+        labels = ("Person + auction operators\n(records/s)", labels[1], labels[2])
     for axis, label in zip(axes[:, 0], labels):
         axis.set_ylabel(label)
     for col, (case, rows) in enumerate(records.items()):
@@ -271,8 +299,10 @@ def main():
                     if 0 <= at <= elapsed_finish[case]:
                         axis.axvline(at, color="#a44224", linestyle="--", linewidth=1)
         t = [event["elapsed_sec"] for event in rows]
-        a.plot(t, [value(event, METRICS[0]) for event in rows], linewidth=1.75, marker="o",
-               markersize=2.5, color="#0369a1")
+        drawing = split_plot_gaps(rows)
+        a.plot([event["elapsed_sec"] for event in drawing],
+               [value(event, METRICS[0]) for event in drawing], linewidth=1.75,
+               linestyle="None" if kafka else "-", marker="o", markersize=2.5, color="#0369a1")
         if offered is not None:
             a.axhline(offered, color="#9a3412", linestyle="--", linewidth=1.2)
             a.annotate(f"Offered {offered:,} records/s", xy=(.98, offered),
@@ -304,11 +334,11 @@ def main():
     axes[0, 0].yaxis.set_major_formatter(StrMethodFormatter("{x:,.0f}"))
     axes[2, 0].yaxis.set_major_locator(MaxNLocator(integer=True))
     axes[1, 0].legend(loc="best", frameon=True, framealpha=0.95, edgecolor="#e2e8f0")
-    shading = "scale acknowledgement to verified placement" if native else "resize to verified restore"
-    caption = ["5 s REST samples. Gaps mark missing data. Memory sums the TaskManager managed pools.",
-               f"Shading shows {shading}, ending at the observation cutoff if unverified."]
-    if kafka and any(result["transactions"] for result in native_results.values()):
-        caption.append("Post-resize throughput requires fresh Kafka source output counters.")
+    shading = "scale acknowledgement to observed managed placement" if native else "resize to verified restore"
+    caption = ["REST samples use a 5 s schedule. Gaps mark unavailable rates. Memory sums the TaskManager managed pools.",
+               f"Shading shows {shading}, ending at the cutoff when placement is unverified."]
+    if kafka:
+        caption.append("Kafka points require counter corroboration. Counter interval averages are reported separately.")
     if any(result.get("failed_in_place_requests") for result in native_results.values()):
         caption.append("Dashed red lines mark failed in-place updates.")
     fig.text(0.11, 0.022, "\n".join(caption),

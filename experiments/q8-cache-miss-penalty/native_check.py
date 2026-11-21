@@ -3,11 +3,14 @@ import argparse
 from collections import Counter
 from datetime import datetime
 import json
+from math import isfinite
 from pathlib import Path
 import re
 
-from analyze import allocation, input_spec, JOIN, read, rows
+from analyze import allocation, allocation_signature, input_spec, JOIN, read, rows, same_allocation_history
+from benchmark_plan import digest_json
 from native_observe import P_KEY, RP_KEY
+from quick_series import JOIN_POPULATION, SOURCE_POPULATION, counter_intervals
 
 MIB = 1024 ** 2
 ID = r"[0-9a-f]{32}"
@@ -140,6 +143,635 @@ def kafka_evidence(folder, release, end):
     return generations, actual, issues
 
 
+REQUEST_ACTIONS = {"POLICY_REQUEST", "THROUGHPUT_SCALE_UP_RETAINED_PROFILES"}
+
+
+def log_epoch(line):
+    try:
+        stamp = datetime.fromisoformat(line.split(" ", 1)[0].replace("Z", "+00:00"))
+        return stamp.timestamp() if stamp.tzinfo else None
+    except ValueError:
+        return None
+
+
+def log_field(text, field):
+    match = re.search(r"(?<![.\w])" + re.escape(field) + r"=([^\s,})]+)", text)
+    return match[1] if match and match[1] not in ("null", "unavailable") else None
+
+
+def log_number(text, field, parse=float):
+    try:
+        value = parse(log_field(text, field))
+        return value if isfinite(value) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def normalized_request(value):
+    if not isinstance(value, dict):
+        return None
+    parallelism, profiles = value.get("parallelism"), value.get("profiles")
+    if not isinstance(parallelism, dict) or not isinstance(profiles, dict):
+        return None
+    if not parallelism or parallelism.keys() != profiles.keys():
+        return None
+    if any(not isinstance(vertex, str) or not re.fullmatch(ID, vertex)
+           or not re.fullmatch(r"[1-9][0-9]*", str(count)) for vertex, count in parallelism.items()):
+        return None
+    if any(not isinstance(profile, str) or not re.fullmatch(r"ResourceProfile\{[^{}]+\}", profile)
+           for profile in profiles.values()):
+        return None
+    return {"parallelism": {vertex: int(count) for vertex, count in parallelism.items()},
+            "profiles": dict(profiles)}
+
+
+def logged_request(text):
+    fields = re.search(r"requestedParallelismOverrides=(.+?) requestedResourceProfileOverrides=(.+?) "
+                       r"(?:requestedDecisionId|appliedOverrides)=", text)
+    if not fields:
+        return None
+    parallel_entry = r"(" + ID + r")=([0-9]+)"
+    profile_entry = r"(" + ID + r")=(ResourceProfile\{[^{}]+\})"
+    for pattern, field in ((parallel_entry, fields[1]), (profile_entry, fields[2])):
+        if not re.fullmatch(r"\{" + pattern + r"(?:, " + pattern + r")*\}", field):
+            return None
+    parallelism = re.findall(parallel_entry, fields[1])
+    profiles = re.findall(profile_entry, fields[2])
+    if len(dict(parallelism)) != len(parallelism) or len(dict(profiles)) != len(profiles):
+        return None
+    return normalized_request({"parallelism": dict(parallelism), "profiles": dict(profiles)})
+
+
+def logged_memory(text, vertex):
+    match = re.search(re.escape(vertex or "") + r"=EvaluatedMetrics\.ManagedMemoryDecision\(([^)]*)\)", text)
+    if not match:
+        return {}
+    return {key: log_number(match[1], key, int) for key in (
+            "trustedCurrentManagedBytes", "configuredFloorBytes", "unconstrainedManagedBytes",
+            "retainedManagedBytes", "floorLimitedManagedBytes", "requestedManagedBytes",
+            "finalManagedBytes", "nominalNativeCacheBytes")}
+
+
+def logged_model(text):
+    observation = re.search(r" observation=EvaluatedMetrics\.ObservationEvidence\(status=([A-Z_]+)", text)
+    recommendation = re.search(r" recommendation=QuickMrcCostProjection\.Recommendation\(([^)]*)\)", text)
+    scope = log_field(recommendation[1], "predictionScope") if recommendation else None
+    return {
+        "mode": log_field(text, "mode"),
+        "reason": log_field(text, "reason"),
+        "fit_reason": log_field(text, "fitReason"),
+        "observation_status": observation[1] if observation else None,
+        "selected_cost_policy": log_field(text, "selectedCostPolicy"),
+        "fallback_reason": log_field(text, "fallbackReason"),
+        "fit_end_ms": log_number(text, "windowEndMillis", int),
+        "prediction_scope": scope,
+        "recommended_total_native_bytes": log_number(recommendation[1], "totalNativeCacheBytes", int)
+            if recommendation else None,
+        "fit_parallelism": log_number(text, "expectedSubtasks", int),
+        "residual_busy_seconds_per_input": log_number(text, "residualBusySecondsPerInput"),
+        "slope_seconds_per_input_per_unit_miss_fraction": log_number(
+            text, "slopeSecondsPerInputPerUnitMissFraction"),
+        "reported_evidence": text,
+    }
+
+
+def request_target(request, join_id):
+    memory = {}
+    for vertex, profile in request["profiles"].items():
+        match = re.search(r"\bmanagedMemory=(?:[^,}]+?\(([0-9]+) bytes\)|([0-9]+) bytes)", profile)
+        if not match:
+            return None
+        memory[vertex] = int(match[1] or match[2])
+    if join_id not in memory:
+        return None
+    return {"parallelism": request["parallelism"], "managed_bytes_by_vertex": memory,
+            "join_bytes_per_slot": memory[join_id]}
+
+
+def recommendation_allocation(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    p = candidate.get("parallelism")
+    fields = ("managed_bytes_per_slot", "native_cache_bytes")
+    memory = {key: candidate[key] for key in fields if type(candidate.get(key)) is int and candidate[key] > 0}
+    return (p, memory) if type(p) is int and p > 0 and memory else None
+
+
+def alternate_comparison(receipts, evaluation_id, chosen, request):
+    comparisons = [row for row in receipts if row.get("kind") == "comparison"
+                   and row.get("evaluation_id") == evaluation_id
+                   and row.get("source") in ("same_serialized_decision", "active_policy_replay")]
+    if len(comparisons) != 1:
+        return None, None, None
+    comparison = comparisons[0]
+    fixed, online = comparison.get("fixed"), comparison.get("online")
+    if not isinstance(fixed, dict) or not isinstance(online, dict):
+        return None, None, None
+    input_hash = comparison.get("decision_input_sha256")
+    if (not isinstance(input_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", input_hash)
+            or fixed.get("input_sha256") != input_hash or online.get("input_sha256") != input_hash):
+        return None, None, None
+    pre_a, pre_b = (recommendation_allocation(candidate.get("recommendation"))
+                    for candidate in (fixed, online))
+    pre_differs = (pre_a != pre_b if pre_a is not None and pre_b is not None
+                   and pre_a[1].keys() == pre_b[1].keys() else None)
+    final_a, final_b = (normalized_request(candidate.get("final_request")) for candidate in (fixed, online))
+    selected = final_b if chosen == "online" else final_a if chosen in ("fixed", "fixed_fallback") else None
+    differs = (final_a != final_b if final_a is not None and final_b is not None
+               and (request is None or request == selected) else None)
+    return pre_differs, differs, comparison
+
+
+def observed_request(receipts, request, join_id, accepted, nominal_native_bytes):
+    """Validate placement receipts linked to a specific accepted request."""
+    target = request_target(request, join_id) if request is not None else None
+    if target is None or accepted is None:
+        return None, None, None
+    p = target["parallelism"][join_id]
+    subtasks = {str(index) for index in range(p)}
+    managed_verified = None
+    managed_epoch = None
+    for receipt in receipts:
+        if receipt.get("kind") != "placement" or receipt["epoch"] < accepted["epoch"]:
+            continue
+        observation = receipt.get("observation")
+        if not isinstance(observation, dict):
+            continue
+        started, finished = observation.get("epoch"), observation.get("capture_end_epoch")
+        if (observation.get("join_id") != join_id
+                or type(started) not in (int, float) or type(finished) not in (int, float)
+                or not accepted["epoch"] <= started <= finished <= receipt["epoch"]):
+            continue
+        try:
+            matches_target = verified(observation, target)
+        except (TypeError, KeyError, AttributeError):
+            continue
+        if not matches_target:
+            if managed_verified is None:
+                managed_verified = False
+            continue
+        managed_verified = True
+        if managed_epoch is None:
+            managed_epoch = finished
+        native = observation.get("native") or {}
+        identities = receipt.get("cache_identities") or {}
+        if (not isinstance(native, dict) or not isinstance(identities, dict)
+                or set(native) != subtasks or set(identities) != subtasks
+                or any(type(value) is not int or value <= 0 for value in native.values())
+                or any(not isinstance(identity, dict)
+                       or not all(isinstance(identity.get(field), str) and identity[field]
+                                  for field in ("attempt", "process"))
+                       or type(identity.get("cache_id")) is not int or identity["cache_id"] <= 0
+                       or type(identity.get("capacity_generation")) is not int
+                       or identity["capacity_generation"] < 0 for identity in identities.values())):
+            continue
+        physical_caches = {(identity["process"], identity["cache_id"]) for identity in identities.values()}
+        if len(physical_caches) != p:
+            continue
+        matches = (all(value == nominal_native_bytes for value in native.values())
+                   if nominal_native_bytes is not None else None)
+        return managed_verified, matches, {
+            "observed_epoch": finished, "managed_placement_epoch": managed_epoch,
+            "native_bytes_by_subtask": native,
+            "join_allocation": allocation_signature(p, target["join_bytes_per_slot"], native),
+        }
+    return managed_verified, None, ({"observed_epoch": managed_epoch, "managed_placement_epoch": managed_epoch,
+                                     "native_bytes_by_subtask": None, "join_allocation": None}
+                                    if managed_epoch is not None else None)
+
+
+def decision_evidence(lines, receipts, *, job_id, join_id, online_configured, start, end,
+                      legacy_ack_count=0):
+    """Join controller logs and optional v1 receipts by stable IDs.
+
+    decision-evidence.jsonl records carry schema_version, kind, job_id,
+    decision_id and epoch. Native acknowledgement records include accepted
+    and the exact request. Placement records include the physical observation
+    and cache identities. Comparisons tie both candidates to the same
+    evaluation and input hash. An outcome links its evidence to the action.
+    """
+    decisions, models, handoffs, holds = {}, {}, {}, {}
+    for line in lines:
+        epoch = log_epoch(line)
+        if epoch is None or not start <= epoch <= end or not job_id:
+            continue
+        if "A4S cache decision " in line:
+            text = line.split("A4S cache decision ", 1)[1]
+            eid = log_field(text, "evaluationId")
+            if eid and log_field(text, "job") == job_id:
+                decisions.setdefault(eid, set()).add((epoch, text))
+        elif "A4S cache cost vertex=" in line:
+            text = line.split("A4S cache cost ", 1)[1]
+            eid = log_field(text, "evaluationId")
+            if eid and join_id and log_field(text, "vertex") == join_id:
+                models.setdefault(eid, set()).add(text)
+        elif "A4S hold job=" in line:
+            text = line.split("A4S hold ", 1)[1]
+            eid, vertex = log_field(text, "evaluationId"), log_field(text, "vertex")
+            if eid and log_field(text, "job") == job_id and vertex in (None, join_id):
+                holds.setdefault((eid, vertex), set()).add(log_field(text, "reason"))
+        elif "A4S realizer returned " in line:
+            text = line.split("A4S realizer returned ", 1)[1]
+            request_id = log_field(text, "decisionId")
+            if request_id and log_field(text, "job") == job_id:
+                handoffs.setdefault(request_id, []).append(epoch)
+
+    by_request = {}
+    for receipt in receipts:
+        if not isinstance(receipt, dict):
+            continue
+        epoch = receipt.get("epoch")
+        if (receipt.get("schema_version") == 1 and job_id and receipt.get("job_id") == job_id
+                and isinstance(receipt.get("decision_id"), str) and type(epoch) in (int, float)
+                and isfinite(epoch) and start <= epoch
+                and (epoch <= end or receipt.get("kind") == "comparison")):
+            by_request.setdefault(receipt["decision_id"], []).append(receipt)
+
+    evaluations, requests = [], {}
+    for eid, entries in sorted(decisions.items(), key=lambda item: min(item[1])):
+        epoch, text = min(entries)
+        unambiguous = len({line for _, line in entries}) == 1
+        action = log_field(text, "action")
+        is_request = action in REQUEST_ACTIONS
+        request_id = log_field(text, "requestedDecisionId") if is_request and unambiguous else None
+        request = logged_request(text) if request_id else None
+        candidates = models.get(eid, set())
+        model = logged_model(next(iter(candidates))) if unambiguous and len(candidates) == 1 else {}
+        memory = logged_memory(text, join_id) if unambiguous and join_id else {}
+        fit_reason = model.get("fit_reason")
+        fit_end = model.get("fit_end_ms")
+        qualified = (fit_reason == "QUALIFIED" and fit_end <= epoch * 1000
+                     and model.get("observation_status") == "VALID"
+                     if fit_reason is not None and fit_end is not None else
+                     False if fit_reason not in (None, "QUALIFIED") else None)
+        nominal = memory.get("nominalNativeCacheBytes")
+        p = request["parallelism"].get(join_id) if request else None
+        supported = (p == model.get("fit_parallelism")
+                     and model.get("prediction_scope") == "OBSERVED_ALLOCATION" and nominal > 0
+                     and model.get("recommended_total_native_bytes") == nominal * p
+                     if nominal is not None and p is not None and model else None)
+        selected = model.get("selected_cost_policy")
+        if action == "THROUGHPUT_SCALE_UP_RETAINED_PROFILES":
+            used = "throughput_recovery"
+        elif is_request and memory.get("retainedManagedBytes") is not None:
+            used = "retained_profile"
+        elif (is_request and selected == "ONLINE_QUALIFIED" and model.get("mode") == "ONLINE_QUALIFIED"
+              and qualified is True and supported is True):
+            used = "online"
+        elif is_request and request and selected in ("LEGACY_FIXED", "OFFLINE_CALIBRATED"):
+            used = "fixed_fallback" if model.get("fallback_reason") else "fixed"
+        else:
+            used = None
+
+        linked = sorted((row for row in by_request.get(request_id, []) if row["epoch"] >= epoch),
+                        key=lambda row: row["epoch"])
+        matching_ack = [row for row in linked if row.get("kind") == "acknowledgement"
+                        and request is not None and normalized_request(row.get("request")) == request]
+        accepted = next((row for row in matching_ack if row.get("accepted") is True), None)
+        sent = next((row["epoch"] for row in linked if row.get("kind") == "request"
+                     and request is not None and normalized_request(row.get("request")) == request
+                     and (accepted is None or row["epoch"] <= accepted["epoch"])), None)
+        returned = any(t >= epoch for t in handoffs.get(request_id, []))
+        if accepted is not None:
+            request_status = "accepted"
+        elif any(row.get("accepted") is False for row in matching_ack):
+            request_status = "rejected"
+        elif returned:
+            request_status = "realizer_returned"
+        else:
+            request_status = "requested" if is_request else "none"
+        recommendation_differs, final_differs, comparison = alternate_comparison(
+            linked, eid, used, request)
+        managed, native, placement = observed_request(linked, request, join_id, accepted, nominal)
+        applied = (False if managed is False or native is False else
+                   True if managed is True and native is True else None)
+        outcomes = {row["valid"] for row in linked
+                    if placement and row.get("kind") == "outcome" and type(row.get("valid")) is bool
+                    and isinstance(row.get("evidence"), str) and row["evidence"]
+                    and row["epoch"] >= placement["observed_epoch"]}
+        observed = next(iter(outcomes)) if len(outcomes) == 1 else None
+        controlled = (online_configured is True and qualified is True and used == "online"
+                      and supported is True and accepted is not None and managed is True and native is True)
+        held_by_budget = (action in ("POLICY_NO_CHANGE", "POLICY_HOLD")
+                          and memory.get("trustedCurrentManagedBytes") is not None
+                          and memory["trustedCurrentManagedBytes"] == memory.get("finalManagedBytes")
+                          and memory.get("floorLimitedManagedBytes") is not None
+                          and (memory.get("configuredFloorBytes") == memory.get("floorLimitedManagedBytes")
+                               or memory.get("retainedManagedBytes") == memory.get("floorLimitedManagedBytes"))
+                          and memory.get("unconstrainedManagedBytes") not in (None, memory.get("finalManagedBytes")))
+        typed_hold = holds.get((eid, join_id)) or holds.get((eid, None)) or set()
+        hold = log_field(text, "holdReason") or (next(iter(typed_hold)) if len(typed_hold) == 1 else None)
+        reason = model.get("reason") or hold or fit_reason
+        if held_by_budget:
+            classification = "floor_or_retention_bound_no_op"
+        elif used in ("throughput_recovery", "retained_profile"):
+            classification = used
+        elif controlled and final_differs is False:
+            classification = "same_action_control"
+        elif controlled:
+            classification = "verified_learned_control"
+        elif request_status == "accepted":
+            classification = "acknowledged_unverified" if managed is not True or native is not True else "placed"
+        elif request_status == "rejected":
+            classification = "request_rejected"
+        elif model.get("mode") == "ONLINE_SHADOW":
+            classification = "shadow_fixed_fallback" if used == "fixed_fallback" else "shadow"
+        elif action == "ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE":
+            classification = "actuator_unavailable"
+        elif model.get("prediction_scope") == "ADVISORY_CAPACITY_CHANGE":
+            classification = "advisory_candidate"
+        else:
+            classifications = {
+                "MISSING_OBSERVATIONS": "missing_curve_or_observations",
+                "ABSENT": "missing_curve_or_observations",
+                "MISSING_TIMING": "missing_timing_samples",
+                "TOO_FEW_SAMPLES": "insufficient_timing_samples",
+                "INSUFFICIENT_HISTORY": "warm_up",
+                "CAPACITY_UNSUPPORTED": "unsupported_capacity",
+                "INSUFFICIENT_CURRENT_PARALLELISM": "valid_current_parallelism_insufficiency",
+            }
+            policy_status = ("insufficient_evidence" if is_request else
+                             "policy_no_change" if action == "POLICY_NO_CHANGE" else "policy_hold")
+            classification = classifications.get(reason, policy_status)
+        evaluations.append({
+            "evaluation_id": eid, "classification": classification, "decision_id": request_id, "decision_epoch": epoch,
+            "action": action, "hold_reason": hold,
+            "online_configured": online_configured,
+            "model_qualified": qualified, "model_used": used, "model": model,
+            "candidate_supported_for_final_request": supported,
+            "recommendation_differs": recommendation_differs, "final_action_differs": final_differs,
+            "memory_resolution": memory, "same_snapshot_comparison": comparison,
+            "floor_or_retention_bound_no_op": held_by_budget,
+            "final_request": request, "request_status": request_status,
+            "request_sent_epoch": sent, "native_acknowledgement_epoch": accepted["epoch"] if accepted else None,
+            "applied_resources_verified": applied, "managed_placement_verified": managed,
+            "native_capacity_verified": native, "physical_placement": placement,
+            "valid_outcome_observed": observed, "proven_learned_control": controlled,
+            "proven_distinct_learned_action": controlled and final_differs is True,
+        })
+        if is_request:
+            key = request_id or eid
+            requests.setdefault(key, []).append(evaluations[-1])
+
+    # A stable request may be reissued after a failed attempt. Count the original decision once.
+    original = []
+    for attempts in requests.values():
+        first = attempts[0]
+        if any(row["final_request"] != first["final_request"] for row in attempts[1:]):
+            for row in attempts:
+                row.update(request_status="conflicting_request_identity", proven_learned_control=False,
+                           proven_distinct_learned_action=False,
+                           classification="insufficient_evidence", model_used=None,
+                           applied_resources_verified=None, managed_placement_verified=None,
+                           native_capacity_verified=None,
+                           valid_outcome_observed=None, request_sent_epoch=None,
+                           native_acknowledgement_epoch=None, physical_placement=None)
+        original.append(first)
+    proven = sum(row["proven_learned_control"] for row in original)
+    unclassified = sum(row["model_used"] is None or
+                       (row["model_used"] == "online" and not row["proven_learned_control"])
+                       for row in original)
+    # Legacy operator events have no request ID. Count only the guaranteed
+    # excess beyond the available request records and keep any linkage unknown.
+    unattributed = max(0, legacy_ack_count - len(original))
+    count = len(original) + unattributed
+    composition = ("mixed" if proven and any(row["model_used"] in (
+        "fixed", "fixed_fallback", "throughput_recovery", "retained_profile") for row in original)
+                   else "learned" if count and proven == count
+                   else "non_learned" if count and not proven and not unclassified and not unattributed
+                   else "insufficient_evidence" if count else "no_request")
+    return {"confidence": "decision_id" if decisions else "historical",
+            "evaluations": evaluations, "request_count": count,
+            "proven_learned_requests": proven,
+            "proven_distinct_learned_actions": sum(row["proven_distinct_learned_action"] for row in original),
+            "unclassified_requests": unclassified + unattributed,
+            "learned_decision_fraction": proven / count if count and not (unclassified + unattributed) else None,
+            "verified_learned_fraction_lower_bound": proven / count if count else None,
+            "request_composition": composition, "native_ack_events_without_decision_ids": legacy_ack_count}
+
+
+def bounded_number(value):
+    return type(value) in (int, float) and isfinite(value)
+
+
+def score_window(intervals, start, end):
+    """Report observed inner progress separately from a complete declared window."""
+    if not bounded_number(start) or not bounded_number(end) or end <= start:
+        return {"planned_start_epoch": start, "planned_end_epoch": end,
+                "unscored_reason": "window_bounds_unavailable", "records": None,
+                "rate_records_per_second": None}
+    included = [span for span in intervals if start <= span["start_epoch"]
+                and span["end_epoch"] <= end and span["records"] is not None]
+    observed_seconds = sum(span["end_epoch"] - span["start_epoch"] for span in included)
+    observed_records = sum(span["records"] for span in included) if included else None
+    contiguous = included and all(left["end_epoch"] == right["start_epoch"]
+                                  for left, right in zip(included, included[1:]))
+    covered = (contiguous and included[0]["start_epoch"] == start and included[-1]["end_epoch"] == end)
+    return {
+        "planned_start_epoch": start, "planned_end_epoch": end,
+        "included_intervals": [[span["start_epoch"], span["end_epoch"]] for span in included],
+        "observed_coverage_seconds": observed_seconds, "observed_progress_records": observed_records,
+        "observed_inner_interval_average_records_per_second":
+            observed_records / observed_seconds if contiguous else None,
+        "records": observed_records if covered else None,
+        "rate_records_per_second": observed_records / (end - start) if covered else None,
+        "unscored_reason": None if covered else "incomplete_observed_window",
+        "inclusion_rule": "complete observed counter intervals inside bounds; no interpolation",
+    }
+
+
+def matched_progress_window(intervals, anchor, lower, upper):
+    if (not bounded_number(anchor) or type(lower) is not int or type(upper) is not int
+            or lower < 0 or upper <= lower):
+        return {"records": None, "rate_records_per_second": None,
+                "unscored_reason": "matched_progress_bounds_unavailable"}
+    stable = []
+    for span in intervals:
+        if span["start_epoch"] < anchor:
+            continue
+        if span["records"] is None or (stable and (
+                span["start_epoch"] != stable[-1]["end_epoch"]
+                or span["execution_identity"] != stable[0]["execution_identity"])):
+            break
+        stable.append(span)
+    if not stable:
+        return {"records": None, "rate_records_per_second": None,
+                "unscored_reason": "stationary_counter_chain_unavailable"}
+    points = [(0, stable[0]["start_epoch"])]
+    for span in stable:
+        points.append((points[-1][0] + span["records"], span["end_epoch"]))
+
+    def measured_boundary(records):
+        return next((when for count, when in points if count == records), None)
+
+    def bracket(records):
+        return next(([a[1], b[1]] for a, b in zip(points, points[1:]) if a[0] < records < b[0]), None)
+
+    start, end = measured_boundary(lower), measured_boundary(upper)
+    result = score_window(stable, start, end)
+    if start is None or end is None:
+        result["unscored_reason"] = "record_progress_boundary_not_observed"
+    result.update(progress_anchor_epoch=points[0][1], progress_start_records=lower, progress_end_records=upper,
+                  start_boundary_bracket_epoch=bracket(lower), end_boundary_bracket_epoch=bracket(upper))
+    return result
+
+
+def scoring_windows(intervals, declarations, release, end, healthy_epoch, transitions):
+    def after_anchor_delay():
+        delay = declarations.get("post_placement_delay_seconds")
+        length = declarations.get("post_placement_seconds")
+        if (bounded_number(healthy_epoch) and bounded_number(delay) and delay >= 0
+                and bounded_number(length) and length > 0):
+            return healthy_epoch + delay, healthy_epoch + delay + length
+        return None, None
+
+    # Exclusion applies to service windows. The whole policy window includes the
+    # time lost to transitions even when some progress is unscored.
+    stationary = [span for span in intervals if not any(
+        left < span["end_epoch"] and span["start_epoch"] < right for left, right in transitions)]
+    tail = declarations.get("tail_seconds")
+    tail_start = end - tail if bounded_number(tail) and 0 < tail <= end - release else None
+    steady_start, steady_end = after_anchor_delay()
+    return {
+        "population": declarations.get("population", SOURCE_POPULATION),
+        "whole_horizon": score_window(intervals, release, end),
+        "tail": score_window(intervals, tail_start, end),
+        "post_placement": score_window(stationary, steady_start, steady_end),
+        "matched_progress": matched_progress_window(
+            stationary, healthy_epoch, declarations.get("matched_progress_start_records"),
+            declarations.get("matched_progress_end_records")),
+        "transition_intervals_excluded_from_service": [list(span) for span in transitions],
+    }
+
+
+def compare_windows(fixed, online):
+    ranks = {}
+    for label in ("whole_horizon", "tail", "post_placement", "matched_progress"):
+        a, b = (arm.get(label, {}) for arm in (fixed, online))
+        ra, rb = (score.get("rate_records_per_second") for score in (a, b))
+        if label == "matched_progress":
+            comparable = (a.get("progress_start_records"), a.get("progress_end_records")) == (
+                b.get("progress_start_records"), b.get("progress_end_records"))
+        else:
+            comparable = all(bounded_number(score.get(key)) for score in (a, b)
+                             for key in ("planned_start_epoch", "planned_end_epoch")) and (
+                a["planned_end_epoch"] - a["planned_start_epoch"] ==
+                b["planned_end_epoch"] - b["planned_start_epoch"])
+        comparable = comparable and fixed.get("population") == online.get("population")
+        ranks[label] = {"fixed_records_per_second": ra, "online_records_per_second": rb,
+                        "ranking": ("equal" if ra == rb else "fixed" if ra > rb else "online")
+                        if comparable and bounded_number(ra) and bounded_number(rb) else None}
+    return ranks
+
+
+def declared_windows(folder, plan):
+    expected = read(folder.parent / "pair.json").get("comparison_plan_sha256")
+    comparison = read(folder / "comparison-plan.json")
+    # Both declarations are captured by the plan hash before the arms run.
+    if expected or comparison:
+        if not expected or not comparison or digest_json(comparison) != expected:
+            return {}, "comparison_plan_identity_unverified"
+        arm = {"hardcoded": "A", "calibrated": "B"}.get(plan.get("arm"))
+        windows = comparison.get("arms", {}).get(arm, {}).get("horizon", {}).get("scoring_windows")
+        return (windows or {}), "paired_plan" if windows else "windows_not_declared"
+    windows = plan.get("scoring_windows")
+    return (windows or {}), "legacy_plan" if windows else "windows_not_declared"
+
+
+def transition_timeline(policy, spans, resources, progress, expected, intervals, release, end):
+    def absolute(value):
+        return release + value if bounded_number(value) else None
+
+    def milestones(item):
+        ack, placed = item.get("acknowledged_epoch"), item.get("managed_placement_epoch")
+        running = item.get("all_running_epoch")
+        if bounded_number(ack) and bounded_number(running):
+            times = [identity[1] / 1000 for sample in resources
+                     if ack <= sample.get("capture_epoch", -1) <= running
+                     for roster in (sample.get("vertex_attempts") or {}).values() if roster
+                     for identity in roster.values() if ack <= identity[1] / 1000 <= running]
+            item["replacement_deploy_first_observed_task_epoch"] = min(times, default=None)
+            item["replacement_deploy_last_observed_task_epoch"] = max(times, default=None)
+        else:
+            item["replacement_deploy_first_observed_task_epoch"] = None
+            item["replacement_deploy_last_observed_task_epoch"] = None
+        stable = next((span for span in intervals if bounded_number(running)
+                       and span["start_epoch"] >= running and span["end_epoch"] < item["observation_end_epoch"]
+                       and span["records"] is not None), None)
+        recovered = stable["end_epoch"] if stable else None
+        item["counter_rate_recovery_observed_epoch"] = recovered
+        positive_backlog = False
+        caught_up = None
+        for row in progress:
+            stamp = row.get("capture_end_epoch")
+            if (not expected or not bounded_number(ack) or not bounded_number(stamp)
+                    or not ack <= stamp < item["observation_end_epoch"] or row.get("state") != "RUNNING"):
+                continue
+            values = [(row.get(key) or {}).get("q8Backlog") for key in expected]
+            if any(type(value) is not int or value < 0 for value in values):
+                continue
+            if positive_backlog and recovered is not None and stamp >= recovered and sum(values) == 0:
+                caught_up = stamp
+                break
+            positive_backlog |= sum(values) > 0
+        item["backlog_caught_up_observed_epoch"] = caught_up
+        item["ack_to_managed_placement_seconds"] = placed - ack if bounded_number(placed) and bounded_number(ack) else None
+        item["ack_to_all_running_seconds"] = running - ack if bounded_number(running) and bounded_number(ack) else None
+        sent = item.get("request_sent_epoch")
+        item["request_to_ack_seconds"] = ack - sent if bounded_number(sent) and bounded_number(ack) else None
+        return item
+
+    linked = {}
+    for decision in policy.get("evaluations", []):
+        request_id = decision.get("decision_id")
+        if not request_id or request_id in linked or decision.get("final_request") is None:
+            continue
+        placement = decision.get("physical_placement") or {}
+        snapshot = placement.get("observed_epoch")
+        managed = placement.get("managed_placement_epoch", snapshot) if decision.get("managed_placement_verified") else None
+        linked[request_id] = {
+            "decision_id": request_id, "confidence": "decision_id",
+            "request_status": decision["request_status"], "decision_epoch": decision["decision_epoch"], "request_sent_epoch": decision.get("request_sent_epoch"),
+            "acknowledged_epoch": decision.get("native_acknowledgement_epoch"),
+            "all_running_epoch": managed, "managed_placement_epoch": managed,
+            "native_placement_epoch": snapshot if decision.get("native_capacity_verified") else None,
+        }
+    ordered = sorted(linked.values(), key=lambda item: item["decision_epoch"])
+    for index, item in enumerate(ordered):
+        item["observation_end_epoch"] = ordered[index + 1]["decision_epoch"] if index + 1 < len(ordered) else end
+    legacy = []
+    for index, span in enumerate(spans):
+        ack = absolute(span.get("in_place_ack_from_release_s"))
+        if not bounded_number(ack):
+            continue
+        sample = span.get("ack_to_running_requested_parallelism_s")
+        next_ack = (absolute(spans[index + 1].get("in_place_ack_from_release_s"))
+                    if index + 1 < len(spans) else end)
+        legacy.append({
+            "decision_id": None, "confidence": "legacy_event_span",
+            "decision_epoch": absolute(span.get("decision_from_release_s")), "request_sent_epoch": None,
+            "acknowledged_epoch": ack, "all_running_epoch": ack + sample if bounded_number(sample) else None,
+            "managed_placement_epoch": absolute(span.get("observed_from_release_s")),
+            "native_placement_epoch": None, "observation_end_epoch": next_ack or end,
+        })
+    return {"linked": [milestones(item) for item in ordered],
+            "legacy_event_spans": [milestones(item) for item in legacy]}
+
+
+def selected_healthy_epoch(declarations, timeline, initial):
+    linked = [item for item in timeline["linked"] if item.get("request_status") != "rejected"]
+    if not linked and not timeline["legacy_event_spans"] and initial:
+        profile = recorded_profile(initial)
+        if allocation_signature(profile.get("join_parallelism"), profile.get("join_managed_slot_bytes"),
+                                profile.get("native_bytes_per_join")) is not None:
+            return initial["capture_end_epoch"]
+        return None
+    chosen = declarations.get("placement_index", 0 if len(linked) == 1 else None)
+    if type(chosen) is int and 0 <= chosen < len(linked):
+        return linked[chosen]["native_placement_epoch"]
+    return None
+
+
 def analyze_arm(folder):
     plan = read(folder / "plan.json")
     release = plan["release_ms"] / 1000
@@ -154,9 +786,12 @@ def analyze_arm(folder):
     issues = []
     if any(str(conf.get(key)).lower() != "true" for key in REQUIRED):
         issues.append("The deployed job did not enable the built-in Justin/A4S autoscaler with in-place scaling")
-    if (plan.get("arm") == "calibrated") != (str(conf.get("job.autoscaler.a4s.online-cache-costs.enabled")).lower() == "true"):
+    enabled = str(conf.get("job.autoscaler.a4s.online-cache-costs.enabled")).lower()
+    online_configured = enabled == "true" if enabled in ("true", "false") else None
+    if online_configured is not None and (plan.get("arm") == "calibrated") != online_configured:
         issues.append("Deployed online cost option differs from arm assignment")
     expected = {}
+    declared_input_stages = []
     if kafka:
         args = created["spec"]["job"]
         if not args.get("entryClass", "").endswith("SqlQueryJob") or "q8_unique" not in args.get("args", []):
@@ -164,6 +799,12 @@ def analyze_arm(folder):
     else:
         expected, flags = input_spec(created)
         stages = [tuple(map(int, stage.split(":"))) for stage in flags["--q8-input-plan"].split(",")]
+        elapsed = 0
+        for duration, person, auction in stages:
+            declared_input_stages.append({"scheduled_epoch": release + elapsed,
+                                          "person_records_per_source_second": person,
+                                          "auction_records_per_source_second": auction})
+            elapsed += duration
         if any(int(flags["--p-person-source"]) * p + int(flags["--p-auction-source"]) * a != 80000
                for _, p, a in stages) or sum(s[0] for s in stages) < end - release - .01:
             issues.append("Scheduled input is not 80,000 records/s for the observed window")
@@ -172,7 +813,7 @@ def analyze_arm(folder):
 
     progress = [row for row in rows(folder / "progress.jsonl") if row["capture_end_epoch"] <= end]
     resources = [row for row in rows(folder / "resource-series.jsonl") if row.get("type") == "sample"
-                 and row["capture_epoch"] <= end]
+                 and row.get("capture_end_epoch", row["capture_epoch"]) <= end]
     snapshots = rows(folder / "native-operator-series.jsonl")
     events = event_times(snapshots, created_time(created), end)
     decisions = [t for t, reason, message in events if reason == "ScalingReport" and "scaling execution enabled" in message.lower()]
@@ -242,7 +883,8 @@ def analyze_arm(folder):
         changed_slots = next((s for s in filled if ack <= s["capture_epoch"] < next_ack
                               and s["values"]["task_slots_used"] > 0
                               and previous_slots is not None and s["values"]["task_slots_used"] != previous_slots), None)
-        spans.append({"decision_from_release_s": report - release if report is not None else None,
+        spans.append({"decision_evidence_link": None,
+                      "decision_from_release_s": report - release if report is not None else None,
                       "in_place_ack_from_release_s": ack - release, "requested": target,
                       "first_changed_occupied_slots": changed_slots["values"]["task_slots_used"] if changed_slots else None,
                       "ack_to_first_changed_slots_s": changed_slots["capture_epoch"] - ack if changed_slots else None,
@@ -260,8 +902,6 @@ def analyze_arm(folder):
         issues.append("Observed target or physical allocation changed without a native acknowledgement")
     else:
         outcome = "no_in_place_resize_observed"
-    if spans and outcome != "in_place_verified":
-        issues.append("An acknowledged resize lacks complete in-place placement verification")
     observations = [(r["epoch"], sum(r[k]["q8Offered"] for k in expected)) for r in progress if not kafka and r["epoch"] >= release
                     and all(r.get(k, {}).get("q8Offered", -1) >= 0 for k in expected)]
     live_rate = None
@@ -294,9 +934,35 @@ def analyze_arm(folder):
         outcome = "in_place_failed_then_upgrade"
     if not lines:
         issues.append("Scoped operator logs are missing")
-    if plan["arm"] == "calibrated" and not online:
-        issues.append("Operator logs did not confirm a qualified online cache cost for the Q8 join")
-    return {"outcome": outcome, "window_s": end - release,
+    policy_evidence = decision_evidence(
+        lines, rows(folder / "decision-evidence.jsonl"), job_id=conf.get("$internal.pipeline.job-id"),
+        join_id=join_id, online_configured=online_configured,
+        start=created_time(created), end=end, legacy_ack_count=len(actions))
+    windows, scoring_source = declared_windows(folder, plan)
+    population = windows.get("population", SOURCE_POPULATION)
+    intervals = counter_intervals(resources, population) if population in (SOURCE_POPULATION, JOIN_POPULATION) else []
+    timeline = transition_timeline(policy_evidence, spans, resources, progress, expected, intervals, release, end)
+    healthy = selected_healthy_epoch(windows, timeline, initial_row)
+    transitions = []
+    for item in [*timeline["linked"], *timeline["legacy_event_spans"]]:
+        if item.get("request_status") == "rejected":
+            continue
+        left = item["request_sent_epoch"] or item["acknowledged_epoch"] or item["decision_epoch"]
+        right = item["native_placement_epoch"] or item["managed_placement_epoch"] or item["observation_end_epoch"]
+        if bounded_number(left) and bounded_number(right) and right > left:
+            transitions.append((left, right))
+    timeline["scheduled_input_release_epoch"] = release
+    timeline["declared_input_stages"] = declared_input_stages
+    timeline["recorded_producer_events"] = [row for row in rows(folder / "kafka-generations.jsonl")
+                                            if row.get("event") in ("start", "pause", "stop", "reset")
+                                            and bounded_number(row.get("epoch")) and row["epoch"] <= end] if kafka else []
+    return {"outcome": outcome, "decision_evidence": policy_evidence,
+            "timeline": timeline,
+            "counter_progress_intervals": intervals,
+            "comparison_windows": scoring_windows(intervals, windows, release, end, healthy, transitions),
+            "scoring_declaration_status": scoring_source,
+            "offered_population": "mixed_nexmark_broker_arrivals" if kafka else "q8_replay_offered_records",
+            "valid_measurement_window_observed": live_rate is not None and not issues, "window_s": end - release,
             "source_mode": plan.get("source_mode", "replay"), "join_id": join_id,
             "sampling_period_s": 5, "initial_profile": recorded_profile(initial_row), "initial_slots": initial_slots,
             "last_observed_occupied_slots": filled[-1]["values"]["task_slots_used"] if filled else None,
@@ -316,21 +982,10 @@ def created_time(created):
     return datetime.fromisoformat(created["metadata"]["creationTimestamp"].replace("Z", "+00:00")).timestamp()
 
 
-def join_cost_at_reports(lines, join_id, online_enabled):
-    """Read the join evaluation immediately preceding each operator ScalingReport."""
-    reports = []
-    model = "unobserved"
-    for line in lines:
-        if f"Evaluating metrics for vertex {join_id}" in line:
-            model = "fixed_fallback" if online_enabled else "fixed"
-        elif f"No usable miss rate curve found for vertex {join_id}" in line:
-            model = "no_usable_curve"
-        elif f"A4S online cache costs for vertex {join_id}:" in line:
-            model = "online"
-        elif "SCALINGREPORT" in line and "Scaling execution enabled" in line:
-            reports.append({"operator_utc": line.split(" ", 1)[0], "join_cost": model})
-            model = "unobserved"
-    return reports
+def join_cost_at_reports(lines, _join_id, _online_enabled):
+    """Retain legacy report times without using adjacent lines as model-selection evidence."""
+    return [{"operator_utc": line.split(" ", 1)[0], "join_cost": "unknown"}
+            for line in lines if "SCALINGREPORT" in line and "Scaling execution enabled" in line]
 
 
 def fallback_failures(lines, release, end, reports):
@@ -370,22 +1025,40 @@ def main():
     operators = [read(args.pair / arm / "operator.json") for arm in result]
     plans = [read(args.pair / arm / "plan.json") for arm in result]
     pair_issues = []
+    pair = read(args.pair / "pair.json")
+    comparison = pair.get("comparison", "implementation-bundle")
     for field in ("revision", "jar_sha256"):
         values = [op.get(field) for op in operators]
-        if not all(values) or len(set(values)) != 2:
-            pair_issues.append(f"Distinct operator {field} values were not established")
+        if not all(values):
+            pair_issues.append(f"Operator {field} identity is unavailable")
+        elif comparison == "same-build" and values[0] != values[1]:
+            pair_issues.append(f"Same-build operator {field} identities differ")
     if not plans[0].get("artifacts") or plans[0]["artifacts"] != plans[1].get("artifacts"):
         pair_issues.append("The two arms do not share identical worker and workload artifacts")
     if all(plan.get("source_mode") == "kafka" for plan in plans):
         brokers = [plan.get("kafka_bootstrap_servers") for plan in plans]
         if not all(brokers) or len(set(brokers)) != 2:
             pair_issues.append("Isolated Kafka broker endpoints were not established")
+    histories = [[allocation_signature(profile.get("join_parallelism"), profile.get("join_managed_slot_bytes"),
+                                        profile.get("native_bytes_per_join"))
+                  if (profile := tx.get("observed_profile")) else None
+                  for tx in run.get("transactions", [])] for run in result.values()]
+    same_actions = same_allocation_history(histories)
+    scores = compare_windows(*(run.get("comparison_windows", {}) for run in result.values()))
     for arm, operator in zip(result, operators):
+        result[arm]["paired_window_rankings"] = scores
+        result[arm]["comparison"] = comparison
+        result[arm]["same_observed_actions"] = same_actions
+        result[arm]["same_action_control"] = same_actions is True and not pair_issues and not result[arm]["issues"]
         result[arm]["revision"] = operator.get("revision")
         result[arm]["operator_jar_sha256"] = operator.get("jar_sha256")
         result[arm]["issues"].extend(pair_issues)
     output = args.output or args.pair / "native-results.json"
-    output.write_text(json.dumps(result, indent=2) + "\n")
+    try:
+        with output.open("x") as report:
+            report.write(json.dumps(result, indent=2) + "\n")
+    except FileExistsError:
+        parser.error(f"Report already exists: {output}. Select a new --output path.")
     print(json.dumps({arm: {"outcome": run.get("outcome"), "issues": run["issues"]} for arm, run in result.items()}))
     return int(any(run["issues"] for run in result.values()))
 

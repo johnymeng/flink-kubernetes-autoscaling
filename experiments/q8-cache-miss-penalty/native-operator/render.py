@@ -75,7 +75,12 @@ def render(args):
                 "logger.q8native.level = DEBUG\n")
         if kind == "Deployment":
             pod = manifest["spec"]["template"]
-            annotations = {"q8.autoscaling/revision": args.revision, "q8.autoscaling/policy-sha256": digest["variant.jar"]}
+            annotations = {"q8.autoscaling/revision": args.revision,
+                           "q8.autoscaling/policy-sha256": digest["variant.jar"],
+                           "q8.autoscaling/wiring-sha256": digest["wiring.jar"],
+                           "q8.autoscaling/telemetry-sha256": digest["telemetry.jar"],
+                           "q8.autoscaling/base-jar-sha256": base_sha,
+                           "q8.autoscaling/operator-image": args.image}
             for metadata in (manifest["metadata"], pod["metadata"]):
                 metadata.setdefault("annotations", {}).update(annotations)
             spec = pod["spec"]

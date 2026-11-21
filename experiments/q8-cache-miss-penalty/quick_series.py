@@ -23,6 +23,144 @@ COLS = ("source_records_per_second", "managed_memory_used_bytes",
 PERIOD = 5
 
 
+SOURCE_POPULATION = "q8_source_task_emitted_records"
+JOIN_POPULATION = "q8_join_input_records"
+
+
+def attempt_roster(details, parallelism, *, running=True):
+    attempts = {}
+    for task in (details or {}).get("subtasks", []):
+        index, number = task.get("subtask"), task.get("attempt")
+        deployed, worker = task.get("start-time"), task.get("taskmanager-id")
+        if (type(index) is not int or index in attempts or type(number) is not int or number < 0
+                or type(deployed) is not int or deployed <= 0 or not isinstance(worker, str)
+                or not worker or worker == "(unassigned)" or task.get("other-concurrent-attempts")
+                or (running and task.get("status") != "RUNNING")):
+            return None
+        attempts[index] = [number, deployed, worker]
+    return attempts if set(attempts) == set(range(parallelism)) and attempts else None
+
+
+def metric_counts(values, names):
+    if not isinstance(values, list) or not names:
+        return None
+    result = {}
+    for name in names:
+        candidates = [row.get("value") for row in values if row.get("id") == name]
+        if len(candidates) != 1 or not re.fullmatch(r"[0-9]+", str(candidates[0])):
+            return None
+        result[str(int(name.split(".", 1)[0]))] = int(candidates[0])
+    return result
+
+
+def task_io_counts(details, field):
+    # Vertex details bind MutableIOMetrics to the execution attempt's metric
+    # store. The generic operator-metric endpoint can retain a prior attempt.
+    counts = {}
+    for task in (details or {}).get("subtasks", []):
+        metrics = task.get("metrics") or {}
+        count = metrics.get(field)
+        if metrics.get(field + "-complete") is True and type(count) is int and count >= 0:
+            counts[str(task["subtask"])] = count
+    return counts
+
+
+def bound_counter_endpoint(vertices, before, after, field):
+    rosters, population = {}, {}
+    counts_complete = True
+    for vertex in vertices:
+        start = attempt_roster(before.get(vertex["id"]), vertex["parallelism"])
+        final = attempt_roster(after.get(vertex["id"]), vertex["parallelism"])
+        if start is not None and final is not None and start != final:
+            return {"status": "attempt_changed", "attempts": None, "counts": None}
+        if start is None or final is None:
+            return {"status": "attempt_unavailable", "attempts": None, "counts": None}
+        current = task_io_counts(after.get(vertex["id"]), field)
+        for index, identity in final.items():
+            key = f"{vertex['id']}/{index}"
+            rosters[key] = identity
+            if str(index) not in current:
+                counts_complete = False
+            else:
+                population[key] = current[str(index)]
+    return {"status": "complete" if counts_complete and population else "counter_unavailable",
+            "attempts": rosters or None, "counts": population if counts_complete and population else None}
+
+
+def counter_endpoint(row, population):
+    evidence = (row.get("counter_endpoints") or {}).get(population) or {}
+    roster = evidence.get("attempts")
+    counts = evidence.get("counts")
+    job, epoch = row.get("job_id"), row.get("job_start_epoch_ms")
+    identity = (job, epoch, roster) if (isinstance(job, str) and job and
+                type(epoch) is int and epoch > 0 and isinstance(roster, dict) and roster) else None
+    if (identity is None or row.get("job_state") != "RUNNING"
+            or evidence.get("status") != "complete" or not isinstance(counts, dict)
+            or counts.keys() != roster.keys()
+            or any(type(value) is not int or value < 0 for value in counts.values())):
+        return identity, None
+    return identity, counts
+
+
+def counter_intervals(rows, population):
+    """Score endpoint deltas only. The trajectory inside every interval is unknown."""
+    points = []
+    for row in rows:
+        stamp = row.get("capture_end_epoch", row.get("capture_epoch"))
+        if type(stamp) in (int, float) and isfinite(stamp):
+            points.append((stamp, row))
+    if not points:
+        return []
+    # The first and last observations bound the available evidence. Do not
+    # resolve duplicate times by taking the more favorable counter.
+    if any(left[0] >= right[0] for left, right in zip(points, points[1:])):
+        return []
+    first, last = points[0][0], points[-1][0]
+    span_start = first
+    previous = None
+    result = []
+
+    def emit(start, end, reason=None, records=None, gap=False, identity=None):
+        if end > start:
+            result.append({
+                "population": population, "start_epoch": start, "end_epoch": end, "records": records,
+                "interval_average_records_per_second": records / (end - start) if records is not None else None,
+                "unscored_reason": reason, "contains_observation_gap": gap,
+                "execution_identity": identity, "within_interval_trajectory": None,
+            })
+
+    gap = False
+    for stamp, row in points:
+        identity, counts = counter_endpoint(row, population)
+        evidence = (row.get("counter_endpoints") or {}).get(population) or {}
+        boundary = (row.get("job_state") not in (None, "RUNNING")
+                    or evidence.get("status") == "attempt_changed"
+                    or (previous and identity is not None and identity != previous[1])
+                    or (previous and row.get("job_start_epoch_ms") not in (None, previous[1][1])))
+        if boundary:
+            emit(span_start, stamp, "execution_changed")
+            span_start, previous, gap = stamp, None, False
+        if counts is None:
+            gap = True
+            continue
+        if previous:
+            prior = previous[2]
+            capture_start = row.get("capture_epoch")
+            if type(capture_start) not in (int, float) or capture_start < span_start:
+                emit(span_start, stamp, "overlapping_or_unbound_capture_bounds")
+            elif any(count < prior[key] for key, count in counts.items()):
+                emit(span_start, stamp, "counter_decreased")
+            else:
+                emit(span_start, stamp, records=sum(counts[key] - prior[key] for key in counts),
+                     gap=gap or row.get("values", {}).get(COLS[0]) is None, identity=identity)
+        else:
+            emit(span_start, stamp, "missing_counter_endpoint")
+        previous = (stamp, identity, counts)
+        span_start, gap = stamp, row.get("values", {}).get(COLS[0]) is None
+    emit(span_start, last, "missing_counter_endpoint")
+    return result
+
+
 def kafka_source_counters(row):
     readings = {}
     for source in row.get("sources", []):
@@ -51,20 +189,22 @@ def confirmed_kafka_rates(rows, transactions):
         elapsed = row["elapsed_sec"]
         rate = row["values"]["source_records_per_second"]
         change = next((step for step in reversed(transactions) if step["in_place_ack_from_release_s"] <= elapsed), None)
-        if change is None:
-            yield rate
-            continue
-        ack = change["in_place_ack_from_release_s"]
-        recovery = change.get("ack_to_running_requested_parallelism_s")
-        execution = (ack, row.get("job_start_epoch_ms"))
+        ack = change["in_place_ack_from_release_s"] if change else None
+        recovery = change.get("ack_to_running_requested_parallelism_s") if change else None
+        typed = "counter_endpoints" in row
+        identity, counts = counter_endpoint(row, SOURCE_POPULATION)
+        execution = (ack, identity if typed else row.get("job_start_epoch_ms"))
         current = {}
-        if recovery is not None and elapsed >= ack + recovery and row.get("job_state") == "RUNNING":
+        running = row.get("job_state") == "RUNNING"
+        settled = change is None or (recovery is not None and elapsed >= ack + recovery)
+        if running and settled and (not typed or counts is not None):
             current = kafka_source_counters(row)
         confirmed = (execution == previous_execution and current and current.keys() == previous.keys()
                      and all(count >= previous[key][0] and (meter == 0 or count > previous[key][0])
                              for key, (count, meter) in current.items())
                      and any(count > previous[key][0] for key, (count, _) in current.items()))
-        yield rate if confirmed else None
+        first_legacy_gauge = not typed and change is None and previous_execution is None and running
+        yield rate if confirmed or first_legacy_gauge else None
         previous, previous_execution = current, execution
 
 
@@ -86,7 +226,11 @@ def measure(metrics, names):
 
 def capture(pool, get, job_path, *, kafka=False):
     job, overview, managers = pool.map(get, (job_path, "/overview", "/taskmanagers"))
-    sources, _ = topology(job)
+    sources, join_id = topology(job)
+    join = next((vertex for vertex in (job or {}).get("vertices", []) if vertex["id"] == join_id), None)
+    vertices = [*sources, *([join] if join else [])]
+    detail_paths = [f"{job_path}/vertices/{vertex['id']}" for vertex in vertices]
+    before = dict(zip((vertex["id"] for vertex in vertices), pool.map(get, detail_paths)))
     tm = (managers or {}).get("taskmanagers", [])
     paths = [f"{job_path}/vertices/{v['id']}/metrics" for v in sources]
     tm_paths = [f"/taskmanagers/{quote(w['id'], safe='')}/metrics?get={USED},{TOTAL}" for w in tm]
@@ -106,8 +250,14 @@ def capture(pool, get, job_path, *, kafka=False):
             rates = sorted(name for name in operator_ids if name.endswith("PerSecond"))
             counts = sorted(name for name in operator_ids if name.endswith("numRecordsOut"))
             actual = sorted(operator_ids)
-        complete_rates = (len(rates) == v["parallelism"] and
-                          {int(name.split(".", 1)[0]) for name in rates} == set(range(v["parallelism"])))
+        expected = set(range(v["parallelism"]))
+        def complete(names):
+            return (len(names) == v["parallelism"]
+                    and {int(name.split(".", 1)[0]) for name in names} == expected)
+        rates = rates if complete(rates) and sorted(rates) == sorted(
+            name for name in actual if name.endswith("PerSecond")) else []
+        counts = counts if complete(counts) and sorted(counts) == sorted(
+            name for name in actual if name.endswith(".numRecordsOut")) else []
         offsets = sorted(m["id"] for m in catalog or []
                          if m.get("id", "").endswith((".currentOffset", ".committedOffset")))
         # At 24 Kafka partitions the offset catalog alone exceeds Flink's HTTP
@@ -117,16 +267,23 @@ def capture(pool, get, job_path, *, kafka=False):
         source_details.append({"vertex_id": v["id"], "name": v["name"],
                                "metric_ids": actual + offsets, "rates": rates, "counts": counts,
                                "query": path + "?get=" + quote(",".join(requested), safe=",")
-                               if complete_rates and sorted(rates) == sorted(m for m in actual if m.endswith("PerSecond"))
-                               else None})
+                               if requested else None})
     queries = [entry["query"] for entry in source_details if entry["query"]]
-    source_metrics = iter(pool.map(get, queries))
+    source_metrics = iter(list(pool.map(get, queries)))
     for detail in source_details:
         values = next(source_metrics) if detail["query"] else None
         detail["values"] = values
-        detail["rate_total"] = measure(values, detail.pop("rates"))
-        counts = detail.pop("counts")
-        detail["record_total"] = measure(values, counts) if counts else None
+        rates = detail.pop("rates")
+        detail["rate_total"] = measure(values, rates) if rates else None
+        counts = metric_counts(values, detail.pop("counts"))
+        detail["record_total"] = sum(counts.values()) if counts is not None else None
+
+    after = dict(zip((vertex["id"] for vertex in vertices), pool.map(get, detail_paths)))
+    endpoints = {}
+    if len(sources) == 2:
+        endpoints[SOURCE_POPULATION] = bound_counter_endpoint(sources, before, after, "write-records")
+    if join:
+        endpoints[JOIN_POPULATION] = bound_counter_endpoint([join], before, after, "read-records")
 
     result = dict.fromkeys(COLS)
     rates = [entry["rate_total"] for entry in source_details]
@@ -145,7 +302,10 @@ def capture(pool, get, job_path, *, kafka=False):
                 result[COLS[3]] = allocated - free
     result = {"values": result, "job_state": (job or {}).get("state"),
               "job_start_epoch_ms": (job or {}).get("start-time"), "overview": overview,
-              "sources": source_details, "taskmanagers": list(zip(tm, memory))}
+              "sources": source_details, "taskmanagers": list(zip(tm, memory)),
+              "counter_endpoints": endpoints,
+              "vertex_attempts": {vertex["id"]: attempt_roster(
+                  after.get(vertex["id"]), vertex["parallelism"], running=False) for vertex in vertices}}
     return result
 def read_json(path):
     return json.loads(path.read_text())
@@ -220,6 +380,7 @@ def main():
                 errors["sample"] = str(error)
                 row.update(values=dict.fromkeys(COLS), job_state=None, job_start_epoch_ms=None)
             row["errors"] = errors
+            row["capture_end_epoch"] = time.time()
             emit(row)
             captured += 1
             index = max(index + 1, ceil((time.time() - release) / PERIOD))

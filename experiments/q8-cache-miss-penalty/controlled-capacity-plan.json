@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "status": "protocol_proposed_live_authorization_required",
+  "mode": "sequential",
+  "independent_repetition_unit": "trial",
+  "pair_orders": ["AB", "BA"],
+  "maximum_trials": 12,
+  "proposed_per_trial_wall_clock_cap_seconds": 1800,
+  "proposed_total_trial_wall_clock_cap_seconds": 21600,
+  "scope": "fixed-P controlled validation before any learned policy comparison",
+  "execution_specification_fields_to_resolve": [
+    "final source and prerequisite receipts, including the Prompt 14 exact applied-allocation contract",
+    "exact operator, runtime, JNI and workload hashes, image digests and loaded identity evidence",
+    "worker, physical device, namespace, job IDs, broker/topics and ownership",
+    "allowed mutations, exact native transport and failure/cleanup boundary",
+    "parallelism, matched source trace, seed, initial state and input progress",
+    "anchor and held-out capacities inside validated native support, per-task memory floor and resource ceilings",
+    "fixed and online effective configuration and policy treatment allowlist",
+    "trial IDs, placement and observation windows, absolute duration and resource caps",
+    "predeclared workload SLO, resource feasibility margins, confidence and supported forecast criteria",
+    "output directory, cleanup ownership and early-stop limits"
+  ],
+  "matched_start_contract": {
+    "topology": "Use one declared fixed parallelism throughout each controlled-capacity comparison.",
+    "state": "Use the same content-addressed starting state, dataset seed, partition offsets and input progress boundaries.",
+    "population": "Record exact native all-lookup and foreground classes and the matching join input counters.",
+    "window": "Fit on earlier disjoint observations. Predeclare held-out windows and exact phase/progress inclusion from Prompt 17.",
+    "resource_policy": "Retain one metadata policy and a verified per-task write floor. Independently verify observed native capacity and managed allocation.",
+    "placement": "Run sequentially on matching worker and physical storage. Record disk pressure, host I/O/CPU, RocksDB compaction, pending work and write stalls."
+  },
+  "cells": [
+    {
+      "id": "repeat_anchor_and_identical_action_control",
+      "arms": {"A": "measured anchor allocation", "B": "same measured anchor allocation"},
+      "trials": 4,
+      "purpose": "Verify current-allocation telemetry, exact miss anchor error, repeatability and the identical-action control."
+    },
+    {
+      "id": "supported_held_out_capacity",
+      "arms": {"A": "same anchor", "B": "predeclared supported held-out capacity at the same P"},
+      "trials": 4,
+      "purpose": "Freeze predictions before the held-out measurement. Verify complete current-epoch applied receipts and score MRC, actual-miss service and combined errors separately."
+    },
+    {
+      "id": "later_phase_same_p",
+      "arms": {"A": "anchor", "B": "same supported held-out capacity"},
+      "trials": 4,
+      "purpose": "Use a predeclared phase/load step and matching record progress. Measure coupled write/compaction effects and retain transition time in whole-policy utility."
+    }
+  ],
+  "intervention_classification": {
+    "default": "coupled_managed_memory",
+    "read_cache_only_requires": [
+      "a verified independent read-capacity actuator",
+      "equal observed write-buffer budget and metadata placement at the measured endpoints"
+    ]
+  },
+  "qualification_rules": {
+    "telemetry": "Require full identity and count conservation for the same scope, original prior inputs, and evidence of the actual applied allocation.",
+    "mrc": "Record signed feasibility-boundary outcomes and absolute percentage-point errors. Fix the decision margin from the serialized policy input in advance. The supported error and uncertainty bound must fit inside that margin for every binding task.",
+    "service_cost": "Compare the actual-miss oracle, genuine prior MRC forecast, legacy fixed cost and recent compatible busy/input baseline. Determine the tolerable cost error from the predeclared demand headroom at the binding task. Missing dispersion or a crossed feasibility boundary stops learned qualification.",
+    "support": "Keep out-of-support or cross-P results diagnostic. Use trials as repetitions and keep any overlap explicit.",
+    "control": "Require linked request, native placement and completed work with resource integrals when measured. Identical final or applied resources remain controls. A higher rate alone supplies no allocation claim."
+  },
+  "instrumentation_comparison": {
+    "included": false,
+    "separate_plan_if_authorized": "Use paired fixed allocation and identical input with instrumentation as the sole treatment. Keep resource and latency comparisons separate from policy selection."
+  },
+  "early_stop": [
+    "identity or population mismatch, incompatible interval or event conservation failure",
+    "known unsafe write budget or resource limit",
+    "unverified or mismatched active allocation, actuator fallback or rejected request",
+    "host/storage interference, incomplete authorization or exhausted declared budget"
+  ]
+}

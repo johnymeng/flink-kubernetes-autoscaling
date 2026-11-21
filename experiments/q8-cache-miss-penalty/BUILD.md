@@ -27,3 +27,9 @@ The build compiles the replay source and checks checkpoint/restore for both even
 | `branch-autoscaler.jar` | Complete autoscaler at `0c0c818a`, including the estimator, common-intercept option and per-slot conversion. | `27f27e1ba422f1d495dcf72c3240186416e8e17607f96dbb0ce34afa46298d48` |
 
 JAR timestamps, manifests and build tools can change archive hashes across rebuilds. Pin and compare the hashes emitted for the particular run. Both arms must use those same bytes. The profile override takes effect only with `pipeline.jobvertex-resourceprofile-overrides-on-submit.enabled=true`. It validates the entire override map before changing any slot group on the replacement job.
+
+## Bind artifacts to a comparison plan
+
+Use the checksummed bytes for the particular trial and the full repaired source tree from the authority handoff when preparing the [offline comparison plan](QUICK.md). Record the FRocksDB gitlink and the actual ordered patch hashes from that tree. Historical hashes above identify the earlier lab binaries.
+
+Keep the existing in-container JAR checks and class-origin proof. The operator renderer records requested base, policy, wiring and telemetry hashes in deployment annotations. Record image identity and actual class or native-library evidence separately from the requested digests. Leave observed-loaded fields unavailable until the corresponding receipts exist.

@@ -226,8 +226,8 @@ def analyze(folder, *, require_shadow=True, require_finish=True):
                             cf[other].get("parallelism") == proposal.get("parallelism")
                             and cf[other].get("profiles") == proposal.get("resource_profiles"))
                             if (cf.get(other) or {}).get("proposed") else None,
-                        "applied_model": ("online" if cf.get("online_fit_qualified") else "fixed_fallback")
-                        if plan["arm"] == "calibrated" else "fixed",
+                        "applied_model": "unknown",
+                        "legacy_reported_fit_qualified": cf.get("online_fit_qualified"),
                         "active_parallelism": proposal.get("parallelism"), "active_profiles": proposal.get("resource_profiles")})
     drained = {k for k, (size, p) in expected.items() if offset_log["end", -1, k] == {(size, size, p)}}
     known_checkpoints = {tx["checkpoint"] for tx in applied}
@@ -295,8 +295,52 @@ def analyze(folder, *, require_shadow=True, require_finish=True):
             "applied": applied, "issues": issues}
 
 
+def allocation_signature(parallelism, managed_bytes, native):
+    """A comparable join allocation requires actual native capacity for every subtask."""
+    if (type(parallelism) is not int or parallelism <= 0
+            or type(managed_bytes) is not int or managed_bytes <= 0):
+        return None
+    if isinstance(native, dict):
+        if set(native) != {str(index) for index in range(parallelism)}:
+            return None
+        native = list(native.values())
+    if (not isinstance(native, list) or len(native) != parallelism
+            or any(type(value) is not int or value <= 0 for value in native)):
+        return None
+    return parallelism, managed_bytes, tuple(sorted(native))
+
+
+def legacy_allocation_history(arm):
+    return [allocation_signature(decision.get("p"), decision.get("managed_bytes_per_slot"),
+                                 decision.get("native_bytes"))
+            for decision in arm.get("applied", [])]
+
+
+def same_allocation_history(histories):
+    if not histories or any(not history or any(item is None for item in history)
+                            for history in histories):
+        return None
+    return all(history == histories[0] for history in histories)
+
+
+def legacy_decisions(arm):
+    """Keep the archive's observed outcome and reported policy separate from current claims."""
+    return {"confidence": "historical", "learned_decision_fraction": None,
+            "proven_learned_requests": 0, "unclassified_requests": len(arm.get("applied", [])),
+            "requests": [
+                {"transaction": decision.get("transaction"), "model_qualified": None,
+                 "model_used": None, "archive_reported_model": decision.get("applied_model"),
+                 "archive_reported_fit_qualified": (decision.get("counterfactual") or {}).get("online_fit_qualified"),
+                 "archive_alternate_selected_same_request": decision.get("other_model_would_apply_same_profile"),
+                 "observed_allocation": allocation_signature(
+                     decision.get("p"), decision.get("managed_bytes_per_slot"), decision.get("native_bytes")),
+                 "counterfactual": decision.get("counterfactual")}
+                for decision in arm.get("applied", [])
+            ]}
+
+
 def compare(arms):
-    arms.sort(key=lambda arm: arm.get("release_ms", 0))
+    arms = sorted(arms, key=lambda arm: arm.get("release_ms", 0))
     order = [a.get("arm") for a in arms]
     checks = {}
     for field in ("provenance", "input_plan", "input_end_offsets", "matched_start_profile"):
@@ -305,6 +349,8 @@ def compare(arms):
             and set(order) == {"hardcoded", "calibrated"})
     exercised = any(a.get("applied") for a in arms)
     matched = abba and all(checks.values()) and all(not a["issues"] for a in arms)
+    histories = [legacy_allocation_history(arm) for arm in arms]
+    same_actions = same_allocation_history(histories)
     pairs = []
     for i in range(0, len(arms) - 1, 2):
         by_mode = {a["arm"]: a for a in arms[i:i+2]}
@@ -313,21 +359,21 @@ def compare(arms):
             if all(rates):
                 both_triggered = all(a.get("standard_triggers", 0) > 0 for a in by_mode.values())
                 both_scaled = all(a.get("applied") for a in by_mode.values())
-                used_online = any(t["applied_model"] == "online" for t in by_mode["calibrated"]["applied"])
                 pairs.append({"pair": i // 2 + 1, "policy_rate_change_percent": 100 * (rates[1] / rates[0] - 1),
                               "both_triggered": both_triggered, "both_applied": both_scaled,
-                              "online_applied_with_qualified_fit": used_online,
-                              "exercised_online_resize": both_triggered and both_scaled and used_online})
+                              "online_applied_with_qualified_fit": None, "exercised_online_resize": False,
+                              "same_observed_actions": same_allocation_history(histories[i:i+2])})
     other_recoveries = any(a.get("unexpected_restores") or a.get("unexpected_job_start_epochs_ms") for a in arms)
-    qualified = matched and not other_recoveries and len(pairs) == 2 and all(p["exercised_online_resize"] for p in pairs)
     change = median(p["policy_rate_change_percent"] for p in pairs) if pairs else None
     return {"abba_order": order, "complete_abba": abba, "match": checks, "any_verified_resize": exercised,
             "additional_observed_recoveries": other_recoveries,
-            "matched_policy_comparison_pass": matched, "online_resize_comparison_pass": qualified,
-            "qualification_pass": qualified, "pairs": pairs,
+            "classification": ("same_action_control" if matched and same_actions else "historical_bundle"),
+            "same_observed_actions": same_actions,
+            "decisions_by_arm": [legacy_decisions(arm) for arm in arms],
+            "matched_policy_comparison_pass": matched, "online_resize_comparison_pass": False,
+            "qualification_pass": False, "pairs": pairs,
             "matched_policy_paired_median_rate_change_percent": change if matched else None,
-            "paired_median_rate_change_percent": change if qualified else None, "arms": arms}
-
+            "paired_median_rate_change_percent": None, "arms": arms}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -340,7 +386,11 @@ def main():
     report = compare([analyze(path) for path in sorted(paths)])
     data = json.dumps(report, indent=2, sort_keys=True) + "\n"
     if args.output:
-        args.output.write_text(data)
+        try:
+            with args.output.open("x") as report:
+                report.write(data)
+        except FileExistsError:
+            parser.error(f"Report already exists: {args.output}. Select a new --output path.")
     else:
         print(data, end="")
 

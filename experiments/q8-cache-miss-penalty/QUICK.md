@@ -1,49 +1,49 @@
 # Q8 comparison with the built-in A4S autoscaler
 
-Run two Kubernetes operators compiled from the pinned main and online revisions. Each operator must exclusively watch the workload assigned to it. Separate Kubernetes contexts or disjoint watched namespaces support concurrent runs. Each operator makes its own decision and submits the in-place update to the running Flink job. The harness submits the initial FlinkDeployment and observes it through Kubernetes and Flink REST.
+Plan a bounded pair with the same operator, runtime, JNI, overlay, workload and effective settings. Arm A uses fixed costs and arm B uses online costs. The built-in operator handles any authorized action. Comparisons between different pinned branches are implementation bundles.
 
-The external Nexmark producer targets 80,000 generated events/s for 360 seconds, including bids. The `q8_unique` SQL query consumes persons and auctions. With the standard 1:3:46 event mix, its sources receive roughly 6,400 of the 80,000 generated events/s. Broker per-topic offset deltas measure the delivered mix and the Q8 charts show the consumer source rate. Each arm uses its own initially empty broker and topics. The runner submits the same Kafka-backed `com.github.nexmark.flink.sql.SqlQueryJob` used by experiment 1730. It uses experiment 1724’s shared `submit-job.sh`, `job-status.sh`, and `stop-job.sh` scripts for the consumer. A separate producer follows Q20’s stop, reset topics, and replay sequence on a detected consumer restart.
+The recorded Kafka workload targets 80,000 **mixed Nexmark events/s**. The Person:Auction:Bid mix is 1:3:46, so the expected Q8-relevant input is 6,400 Person/Auction events/s. A target of 80,000 relevant events/s under that mix describes a separate workload. The existing executor keeps the recorded mixed-event load and empty named topics. The plan exposes projected targets and leaves actual counts unavailable until the broker and consumer produce evidence.
 
-Both consumers start with two physically occupied slots on one TaskManager. The runner verifies this through Flink REST before input release. The branch enables fitted online costs and main uses its original fixed costs. Identical runtime artifacts, Q8 SQL, initial geometry, stabilization and metric windows apply to both arms. The default concurrent runs share the worker’s CPU and SSD.
+## Prepare an offline plan
 
-## Run the comparison
-
-Use the common workload artifacts from [BUILD.md](BUILD.md). Place `rocksdbjni.jar`, `abi3-mrc-telemetry.jar` and the two-slot `savepoint-profiles.jar` in `ARTIFACTS`. Copy `nexmark-flink-0.3-SNAPSHOT.jar`, `flink-sql-connector-kafka-3.3.0.jar`, and `kafka-clients-3.4.0.jar` from the Q8/Q20 benchmark image to the same directory. The application JAR must contain the `q8_unique` SQL resource and the `SqlQueryJob` entry point. The overlay also includes the serializable per-vertex Justin resource request used when Flink persists an in-place update. The runner uses the JDK’s `javap` to check this before submission. Rebuild older two-slot overlays with the command below. The shared-start configuration applies ordinary slot sharing to the initial job and passes native Justin rescaling to the runtime’s per-vertex allocator. Build each operator from its stated revision and keep the matching autoscaler JAR SHA-256 from that build. [Prepare a native operator](native-operator/README.md). The runner verifies the JAR inside the ready operator container before submission and again during cleanup. Enable DEBUG logging on `org.apache.flink.autoscaler.ScalingMetricEvaluator` to capture which costs the branch actually used.
+Render each arm's requested FlinkDeployment from the staged local files. This uses the same renderer as the runner and hashes the files directly. The preview job ID and generated names are placeholders for the eventual trial.
 
 ```bash
-bash shared-start/build-shared-start-overlay.sh "$REPO" "$DIST_LIB" "$BUILD_DEPS" \
-  "$ORIGINAL_ARTIFACTS/savepoint-profiles.jar" "$ARTIFACTS/savepoint-profiles.jar"
-
-export MAIN_NAMESPACE MAIN_OPERATOR_NAMESPACE MAIN_OPERATOR_DEPLOYMENT MAIN_REVISION
-export MAIN_OPERATOR_JAR MAIN_OPERATOR_JAR_SHA256 MAIN_BOOTSTRAP_SERVERS MAIN_KAFKA_HOOK
-export BRANCH_NAMESPACE BRANCH_OPERATOR_NAMESPACE BRANCH_OPERATOR_DEPLOYMENT BRANCH_REVISION
-export BRANCH_OPERATOR_JAR BRANCH_OPERATOR_JAR_SHA256 BRANCH_BOOTSTRAP_SERVERS BRANCH_KAFKA_HOOK
-bash quick_test.sh "$RESULTS/q8-native-80k"
+python3 quick_pair.py --render-arm hardcoded --namespace <fixed-namespace> \
+  --worker <worker> --owner <fixed-owner> --bootstrap-servers <fixed-broker> \
+  --artifacts <directory>
+python3 quick_pair.py --render-arm calibrated --namespace <online-namespace> \
+  --worker <worker> --owner <online-owner> --bootstrap-servers <online-broker> \
+  --artifacts <directory>
+bash quick_test.sh --dry-run comparison-plan.json
 ```
 
-Assign these variables to the deployed identities, external brokers, per-arm producer hook executables and build receipts before launching. A producer hook may reset only its own benchmark broker. The submitted job uses `--query q8_unique --source kafka --bootstrap-servers <arm-broker>` and a distinct job name. `*_OPERATOR_JAR` is the absolute in-container path used by its operator JVM. The default container is `flink-kubernetes-operator`. Set `MAIN_OPERATOR_CONTAINER` or `BRANCH_OPERATOR_CONTAINER` to select a different container. Set `MAIN_KUBECONFIG` and `BRANCH_KUBECONFIG` for separate contexts, or use one shared `KUBECONFIG`. A label-selected installation can set `MAIN_LABEL` and `BRANCH_LABEL` to its respective `key=value`. Set `RYAN_PLOTTER` to the pinned Q8 plotter when working offline.
+The offline commands read local files and print JSON. They never launch a workload, check a Kubernetes context, run SSH, contact Kafka, invoke Docker or call a producer hook. An invalid or incomplete plan emits its findings and exits with status 2. A valid plan describes comparable intended settings. Its identity status can still be unverified.
 
-The included `kafka_host.py` hook runs the Q20 standalone `insert_kafka_unique` producer on the external Kafka host. It uses dedicated broker and producer containers for each arm. On reset it recreates that broker with empty storage, recreates the three 24-partition topics, and starts the next generation at event ID 1. Use an SSH account on the producer host that can run the same Docker commands as experiment 1724.
+The plan uses `schema_version: 1` and carries `comparison` (`same-build` or `implementation-bundle`), `claim` (`measurement` or `learned-action`), `orders` (a finite list such as `["AB", "BA"]`) and `execution` (sequential by default). Supply `arms.A` and `arms.B` with the fields below.
 
-```bash
-export Q8_RUN_ID="q8-$(date -u +%Y%m%d-%H%M%S)"
-export Q8_KAFKA_HOST=c153 Q8_KAFKA_HOST_IP=142.150.234.153
-export MAIN_KAFKA_HOOK="$PWD/kafka_host.py" BRANCH_KAFKA_HOOK="$PWD/kafka_host.py"
-export MAIN_BOOTSTRAP_SERVERS="$Q8_KAFKA_HOST_IP:29082" BRANCH_BOOTSTRAP_SERVERS="$Q8_KAFKA_HOST_IP:29182"
-Q8_ARM=hardcoded "$MAIN_KAFKA_HOOK" provision
-Q8_ARM=calibrated "$BRANCH_KAFKA_HOOK" provision
-# Run quick_test.sh with the operator and artifact variables above. After the run:
-Q8_ARM=hardcoded "$MAIN_KAFKA_HOOK" cleanup
-Q8_ARM=calibrated "$BRANCH_KAFKA_HOOK" cleanup
-```
+| Field | Required evidence |
+|---|---|
+| `trial_id`, `mode` | Unique trial ID and `fixed` for A or `online` for B |
+| `source` | Full `revision`, tested `tree`, `native_gitlink`, and apply-ordered `native_patches` entries with `path` and `sha256` |
+| `artifacts` | `requested` hashes for immutable operator/runtime images, base and overlay JARs, runtime telemetry, JNI and benchmark JAR, Kafka connector and client. See `ARTIFACT_KEYS` and `WORKLOAD_DEPENDENCIES` in `benchmark_plan.py`. Supply `deployed` and `observed_loaded` only from independent receipts. An evidence reference has `reference` and `sha256` fields. The loaded JNI ELF has its own SHA-256. |
+| `manifest`, `operator_configuration` | The rendered workload manifest and effective operator configuration, including the reconcile cadence |
+| `runtime_policy`, `actuation` | Estimator, timing instrumentation and ABI, metadata placement, managed/WBM settings, per-vertex floors and resource limits. Declare `built-in-operator-native` for a current comparison. |
+| `placement` | Flink and broker workers, all relevant `worker_ids`, physical `storage_device_ids` and matching hardware/storage configuration. Concurrent arms require disjoint IDs and an `isolation_evidence` reference for each inventory. |
+| `workload` | Query, source and producer implementations, pinned producer/broker images, producer hook hash, workload population and target, event mix, seed or dataset hash, first event ID, total event budget, topic names and partitions, initial offsets, state/reset policy and completion criterion |
+| `horizon` | Explicit positive `duration_seconds`. For a learned-action claim, declare `action_budget_seconds` and `post_action_seconds`. The receipt checks the effective stabilization and collection windows against the paired-fit requirement. |
 
-The wrapper starts both arms in parallel. Set `Q8_ORDER=AB` or `BA` to run sequentially. When a single operator installation is switched between revisions, run `quick_pair.py` once per revision with the same output root and `--arm hardcoded` or `--arm calibrated`. The per-arm command accepts an optional explicit epoch-millisecond `--release-ms` for synchronized inputs. The default schedules the release 125 seconds after artifact staging, or eight seconds after both slots are confirmed if startup takes longer. Each arm has a distinct job ID, namespace-scoped resources and fresh state directories.
+Same-build comparison ignores the cost selector and the harness's specific generated names, IDs, owner paths and broker endpoints. It retains the rest of the manifest and placement configuration for comparison. A concurrent plan also allows the physical worker and device IDs to differ when the supplied evidence documents disjoint resources. It records those IDs and evidence separately.
 
-`native_check.py` reports when the operator proposed and acknowledged each resize, when the requested tasks were first observed running, and when Flink confirmed the managed-memory placement. The placement check reconciles the cluster overview with each TaskManager's occupied slots and checks the requested memory of each vertex. For the join, every occupied job slot on each reported join TaskManager must have the target size, since the subtask observation identifies only its TaskManager. The checker reports effective RocksDB capacity separately when available. Its decision log records whether the join used an online estimate at each scaling report.
+The release-to-cutoff budget includes time to qualify and time to observe the intended action and score its results. A measurement claim can describe an observation-only run. An insufficient learned-action plan stays at its requested duration. A valid time budget establishes planning feasibility while actual fit and actuation remain dependent on evidence.
 
-`plot_quick.py` generates the Q8 throughput, managed-memory and occupied-slot charts. After a native resize, it waits for running tasks at the requested parallelism. It then shows Kafka throughput for intervals where consecutive observations have matching source subtasks, monotonic output counters, some progress, and an advancing counter for each positive rate meter. Frozen meters and quiet subtasks with lingering positive meters therefore produce a gap. The original meters and counters remain in each arm's `resource-series.jsonl`.
+## Runner interface
 
-In the November 19 Kafka comparison, main stayed at two slots for the 360-second window. The branch scaled to 16 occupied slots, with verified placement 70.2 seconds after its decision. Its join had no usable miss-rate curve for that decision, and the source counters stopped advancing across the resize. [Q8 charts and measurements](results/kafka-native-80k-2026-11-19/)
+An authorized run binds the plan with `Q8_COMPARISON_PLAN`. The wrapper checks both arms before creating the result directory. Configure the existing per-arm `MAIN_*` and `BRANCH_*` operator identities, namespaces, broker addresses, hook paths and Kubernetes contexts. Set `OBSERVATION_SECONDS` explicitly and choose the predeclared entry with `Q8_PAIR_INDEX` and `Q8_ORDER`. Order defaults to AB. Use the plan's immutable producer and broker images through `Q8_SQL_IMAGE` and `Q8_KAFKA_IMAGE`. Per-arm worker and broker hosts can be set with `MAIN_WORKER`, `BRANCH_WORKER`, `MAIN_KAFKA_HOST` and `BRANCH_KAFKA_HOST`, with the corresponding broker IP values as required by the hook.
+
+The explicit historical path uses `Q8_LEGACY_IMPLEMENTATION_BUNDLE=1` with a sequential order. Direct `quick_pair.py` calls use `--comparison-plan` or `--legacy-implementation-bundle` and require `--observation-seconds`. A plan provides no live execution authorization.
+
+The arm directory preserves the submitted manifest, staged artifact hashes, deployment receipt and operator class-origin probe. The workload receipt measures broker offset deltas for all three topics and for Person/Auction, with raw consumer observations preserved separately in `resource-series.jsonl`. The current observer records task placement and native cache observations where available. A process-classpath probe supplies evidence for the listed classes. The worker's loaded JNI ELF needs its own receipt.
 
 ## Historical savepoint-redeployment measurements
 

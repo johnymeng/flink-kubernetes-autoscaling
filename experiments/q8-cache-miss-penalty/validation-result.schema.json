@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Q8 offline validation report v1",
+  "type": "object",
+  "required": [
+    "schema_version", "scope", "live_validation_verified", "units",
+    "input_sha256", "native_telemetry_evidence", "current_windows",
+    "q8_archive", "q20_archive", "control"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "scope": {"const": "offline_validation"},
+    "live_validation_verified": {"const": false},
+    "units": {
+      "type": "object",
+      "required": ["cost", "miss_fraction", "miss_error", "memory_integral", "cpu_integral"]
+    },
+    "input_sha256": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+    },
+    "native_telemetry_evidence": {
+      "type": "object",
+      "required": ["trace_and_concurrency_checks_observed", "transcripts"],
+      "properties": {
+        "trace_and_concurrency_checks_observed": {"type": ["boolean", "null"]},
+        "transcripts": {"type": "array"}
+      }
+    },
+    "current_windows": {
+      "type": "object",
+      "required": ["telemetry", "mrc", "cost", "dependence"],
+      "properties": {
+        "telemetry": {"type": "array", "items": {"$ref": "#/$defs/windowReport"}},
+        "mrc": {"type": "array", "items": {"$ref": "#/$defs/windowReport"}},
+        "cost": {"type": "array", "items": {"$ref": "#/$defs/windowReport"}},
+        "dependence": {"type": "object", "required": ["unit_of_repetition", "overlapping_windows"]}
+      }
+    },
+    "q8_archive": {"type": ["object", "null"]},
+    "q20_archive": {"type": ["object", "null"]},
+    "control": {
+      "type": "object",
+      "required": ["allocation_superiority_established", "policy_replay_method", "current"]
+    }
+  },
+  "$defs": {
+    "windowReport": {
+      "type": "object",
+      "required": ["window_index", "trial_id", "case", "status"],
+      "properties": {
+        "window_index": {"type": "integer", "minimum": 0},
+        "trial_id": {"type": ["string", "null"]},
+        "case": {"type": ["string", "null"]},
+        "status": {"enum": ["scored", "valid_counters", "unavailable"]}
+      }
+    }
+  }
+}

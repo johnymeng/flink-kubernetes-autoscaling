@@ -1,0 +1,261 @@
+{
+  "schema_version": 1,
+  "claim": "operational M vs F comparison only until actual learned-action gates pass",
+  "experiment_code_tree": "4ef0ef0601c454347ecfb96c35a2d45c60f0b78e",
+  "common_workload_tree": "c64918bea8f91a39661d3ac0aa077122ba592c92",
+  "arms": {
+    "M": {
+      "revision": "f8ce7fbbfae48869d8b1869748ad517801a9f726",
+      "components": {
+        "runtime_tree": "da957ba144a76984875c4daf7fa198989dcb36e1",
+        "operator_tree": "581261595cf66907a6e8e3df4aa1d9354401a425",
+        "native_gitlink": "d439c0fbf80e87340c728ab3fad1664ac9f72098"
+      },
+      "mode": "literal_main",
+      "native_patches_in_order": [],
+      "configuration": {
+        "job.autoscaler.a4s.online-cache-costs.enabled": "false"
+      },
+      "release_receipt": null
+    },
+    "F": {
+      "revision": "acefdfe86ceafec7102a713d5cb81d753227ab4a",
+      "components": {
+        "runtime_tree": "9f3be78a9dc4626574c97ac535a475cde6e237b2",
+        "operator_tree": "2c2b10171fb0ad20019b6c22996f8047632de4bb",
+        "native_gitlink": "d439c0fbf80e87340c728ab3fad1664ac9f72098"
+      },
+      "mode": "fixed_cost",
+      "native_patches_in_order": [
+        {
+          "path": "sources/libs/patches/frocksdb-a4s-block-latency.patch",
+          "sha256": "284573a3c115d563c35e883e7ab041afc806556e6f07ca8b0a35c1eaa2f7e96f"
+        },
+        {
+          "path": "sources/libs/patches/frocksdb-a4s-cache-lookup-v1.patch",
+          "sha256": "f37eb53e6504d58673ab966e90c0eb278b6e4c92e799af2ef37a0096ff04d72f"
+        },
+        {
+          "path": "sources/libs/patches/frocksdb-a4s-quickmrc-snapshot-v1.patch",
+          "sha256": "98f596317bb623a87f6a76b58e182c322e0ed044a3fdabbdac71b720a9c59cf6"
+        },
+        {
+          "path": "sources/libs/patches/frocksdb-a4s-no-sampled-hit-log.patch",
+          "sha256": "a1b8120fd32b2f943c10db89f2afb32fa0eabf722b28c3a172a8dcc0ad240f1e"
+        }
+      ],
+      "configuration": {
+        "job.autoscaler.a4s.online-cache-costs.enabled": "false"
+      },
+      "release_receipt": null
+    },
+    "O": {
+      "revision": "acefdfe86ceafec7102a713d5cb81d753227ab4a",
+      "components": {
+        "runtime_tree": "9f3be78a9dc4626574c97ac535a475cde6e237b2",
+        "operator_tree": "2c2b10171fb0ad20019b6c22996f8047632de4bb",
+        "native_gitlink": "d439c0fbf80e87340c728ab3fad1664ac9f72098"
+      },
+      "mode": "online",
+      "same_artifacts_as": "F",
+      "configuration": {
+        "job.autoscaler.a4s.online-cache-costs.enabled": "true"
+      },
+      "release_receipt": null,
+      "launch_gate": "held until exact real byte support, independently tested forecasting, action receipts and correctness qualify"
+    }
+  },
+  "fixed_costs_seconds_per_access": {
+    "hit": 5e-06,
+    "total_miss": 0.005,
+    "incremental_miss": 0.004995
+  },
+  "infrastructure": {
+    "control_host": "c165",
+    "context": "kubernetes-admin@kubernetes",
+    "worker": "c167",
+    "worker_uid_at_freeze": "0c83337d-cbaa-4844-b2a6-0f336a3f1932",
+    "run_owned_virtual_cluster": true,
+    "one_operator_namespace_only": true,
+    "baseline_diagnostic_spec_sha256": "e060daea68b85d587d5f54d18abb866be929c30f43564fb9365f06c17738d9b3",
+    "expected_worker_count_at_start": 2,
+    "worker_cpu": 4,
+    "worker_managed_mib": 768,
+    "worker_process_memory_mib": 2220,
+    "jobmanager_cpu": 1,
+    "jobmanager_process_memory_mib": 2048,
+    "each_source_parallelism": 2,
+    "initial_join_parallelism": 1,
+    "max_job_taskmanager_workers": 2,
+    "max_job_taskmanager_cpu": 8,
+    "max_job_taskmanager_process_memory_mib": 4440,
+    "per_task_start_profiles": {
+      "source_managed_mib": 158,
+      "join_managed_mib": 192
+    },
+    "write_buffer_ratio": 0.5,
+    "owned_storage_roots": [
+      "/data/flink/rocksdb",
+      "/mnt/experiments/autoscaling-experiments/flink-state"
+    ]
+  },
+  "common_configuration": {
+    "execution.checkpointing.interval": "20 s",
+    "high-availability": "org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory",
+    "high-availability.storageDir": "file:///q8-state/ha",
+    "job.autoscaler.a4s.enabled": "true",
+    "job.autoscaler.a4s.hit-latency-sec": "0.000005",
+    "job.autoscaler.a4s.memory-base.mb": "32",
+    "job.autoscaler.a4s.miss-latency-sec": "0.005",
+    "job.autoscaler.a4s.online-cache-costs.use-fixed-baseline": "false",
+    "job.autoscaler.cache-hit-rate.min.threshold": "0.8",
+    "job.autoscaler.enabled": "true",
+    "job.autoscaler.justin.enabled": "true",
+    "job.autoscaler.metrics.window": "3m",
+    "job.autoscaler.scale-down.interval": "1 h",
+    "job.autoscaler.stabilization.interval": "2m",
+    "job.autoscaler.state-latency.threshold": "1000000.0",
+    "job.autoscaler.target.utilization": "0.35",
+    "job.autoscaler.target.utilization.boundary": "0.1",
+    "job.autoscaler.vertex.max-parallelism": "24",
+    "jobmanager.adaptive-scheduler.resource-stabilization-timeout": "300 s",
+    "jobmanager.scheduler": "adaptive",
+    "kubernetes.operator.job.drain-on-savepoint-deletion": "false",
+    "kubernetes.operator.job.upgrade.inplace-scaling.enabled": "true",
+    "kubernetes.operator.job.upgrade.last-state-fallback.enabled": "false",
+    "metrics.fetcher.update-interval": "1000",
+    "pipeline.jobvertex-resourceprofile-overrides-on-submit.enabled": "true",
+    "pipeline.max-parallelism": "24",
+    "state.backend": "rocksdb",
+    "state.backend.latency-track.keyed-state-enabled": "true",
+    "state.backend.rocksdb.a4s.quick-mrc.enabled": "true",
+    "state.backend.rocksdb.a4s.quick-mrc.ghost-cache-multiplier": "1",
+    "state.backend.rocksdb.a4s.quick-mrc.histogram-bin-size": "64",
+    "state.backend.rocksdb.a4s.quick-mrc.sampling-rate": "0.02",
+    "state.backend.rocksdb.localdir": "/data/rocksdb",
+    "state.backend.rocksdb.memory.lru-cache-num-shard-bits": "0",
+    "state.backend.rocksdb.metrics.a4s-block-latency": "true",
+    "state.backend.rocksdb.metrics.block-cache-hit": "true",
+    "state.backend.rocksdb.metrics.block-cache-miss": "true",
+    "state.backend.rocksdb.metrics.block-cache-usage": "true",
+    "state.backend.rocksdb.metrics.bytes-read": "true",
+    "state.backend.rocksdb.metrics.bytes-written": "true",
+    "state.backend.rocksdb.metrics.column-family-as-variable": "true",
+    "state.backend.rocksdb.metrics.compaction-pending": "true",
+    "state.backend.rocksdb.metrics.compaction-read-bytes": "true",
+    "state.backend.rocksdb.metrics.compaction-write-bytes": "true",
+    "state.backend.rocksdb.metrics.cur-size-active-mem-table": "true",
+    "state.backend.rocksdb.metrics.cur-size-all-mem-tables": "true",
+    "state.backend.rocksdb.metrics.estimate-live-data-size": "true",
+    "state.backend.rocksdb.metrics.estimate-num-keys": "true",
+    "state.backend.rocksdb.metrics.estimate-pending-compaction-bytes": "true",
+    "state.backend.rocksdb.metrics.estimate-table-readers-mem": "true",
+    "state.backend.rocksdb.metrics.live-sst-files-size": "true",
+    "state.backend.rocksdb.metrics.size-all-mem-tables": "true",
+    "state.backend.rocksdb.metrics.stack-distance-histogram": "true",
+    "state.backend.rocksdb.metrics.total-sst-files-size": "true",
+    "state.backend.rocksdb.use-direct-reads": "true",
+    "state.backend.rocksdb.use-direct-writes": "true",
+    "state.checkpoints.dir": "file:///q8-state/checkpoints",
+    "state.savepoints.dir": "file:///q8-state/savepoints",
+    "taskmanager.cpu.cores": "4",
+    "taskmanager.memory.managed.fraction": "0.4",
+    "taskmanager.memory.managed.size": "768m",
+    "taskmanager.numberOfTaskSlots": "4",
+    "web.cancel.enable": "true",
+    "web.submit.enable": "true",
+    "job.autoscaler.scaling.enabled": "true",
+    "job.autoscaler.a4s.online-cache-costs.shadow": "false",
+    "job.autoscaler.quota.cpu": "8",
+    "job.autoscaler.quota.memory": "4440m"
+  },
+  "required_live_bindings": [
+    "fresh run ID, isolated host and virtual namespaces, job IDs and initial source/join vertex IDs",
+    "locked digest sets and packaged/loaded artifact receipts for M, F and O where eligible",
+    "exact absolute cursor release epochs and deadlines before each mutation",
+    "starting empty RocksDB/checkpoint/results paths with ownership markers and recorded worker placement",
+    "same workload bytes, generator plan and offered offsets across compared arms",
+    "full rendered common settings and differences in effective option support for literal main"
+  ],
+  "timed_workload": {
+    "entry_class": "be.uclouvain.gepiciad.nexmark.Query8",
+    "plan": "600:8889:31111",
+    "records_per_second_per_person_partition": 8889,
+    "records_per_second_per_auction_partition": 31111,
+    "nominal_total_records_per_second": 80000,
+    "offered_total_records": 48000000,
+    "seed": "Nexmark uses each deterministic global event ID as its random seed",
+    "start_offsets": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "window_seconds": 10,
+    "sink": "discarding; no correctness claim",
+    "run_order_if_operational_gates_pass": [
+      "M",
+      "F",
+      "F",
+      "M"
+    ],
+    "max_timed_trials": 4,
+    "collection_seconds_per_trial": 600,
+    "max_collection_seconds": 2400,
+    "scout_startup_max_seconds": 720,
+    "cleanup_max_seconds": 885,
+    "max_wall_seconds_per_trial": 2205,
+    "max_wall_seconds_total": 8820,
+    "stop_on": "loss of ownership, unhealthy node, startup deadline, missing matched initial placement or horizon",
+    "whole_horizon_window_seconds": [
+      0,
+      600
+    ],
+    "steady_label_window_seconds": [
+      300,
+      600
+    ],
+    "data_policy": "compatible cumulative endpoints and actual elapsed time only; gaps and resets unavailable",
+    "checkpoint_interval_seconds": 20,
+    "checkpoint_source": "existing q8-cache-miss-penalty/deployment.json checkpoint protocol"
+  },
+  "correctness_workload": {
+    "entry_class": "be.uclouvain.gepiciad.nexmark.Query8CheckpointOracle",
+    "fixture_sha256": "114fcaa84ca458e238079987c2b328057b411e5669c35805f1f7b711ca0e5af6",
+    "oracle_sha256": "d2579c36a0230acf5476ed36c9c7078942d4f91ca7ebdb7d55e234a25821b975",
+    "cut_event_millis": 1700000015000,
+    "expected_result_multiplicity": 15,
+    "cross_cut_join_results": 2,
+    "checkpoint_interval_millis": 5000,
+    "exactly_once": true,
+    "planned_initial_and_final_join_parallelism": [
+      1,
+      4
+    ],
+    "release_suffix_seconds_after_prefix": 180,
+    "terminal_deadline_seconds_after_prefix": 300,
+    "witness_required": "same job and JobManager; native request, ACK and observed P4 with new attempts before suffix; all four checkpoint cursors restored and completed; terminal output multiset",
+    "known_not_validated": "real native transition, current release and production performance"
+  },
+  "qualification": {
+    "fit_support": "two adjacent 60\u2013120s windows. Near 5 minutes from RUNNING to full history at unchanged settings in R04",
+    "online_gates": [
+      "attested native byte/eviction support",
+      "independent miss forecasts at changed supported capacities",
+      "observed busy seconds per input accounting",
+      "safe write budget and final resources",
+      "native ACK plus exact observed attempt/slot/cache allocation",
+      "checkpoint transition oracle"
+    ],
+    "censored_or_held_outcomes_must_be_preserved": true,
+    "required_evidence": [
+      "whole-horizon throughput and valid steady intervals",
+      "offered offsets and backlog",
+      "selected action including candidates, requested, acknowledged and observed resources",
+      "physical/native identities and load, stalls, compaction and utilization",
+      "raw seconds per access versus normalized seconds per input per miss fraction",
+      "independent current and held-out miss and busy predictions, uncertainty and phase drift",
+      "checkpoint/source/result correctness and restart downtime"
+    ]
+  }
+}

@@ -67,8 +67,8 @@ def remove(created):
          "preconditions": {"uid": meta["uid"]}})
 
 
-def render(template, replacements):
-    raw = (HERE / template).read_text().replace(DEFAULT_NS, NS)
+def render(template, replacements, *, namespace=None):
+    raw = (HERE / template).read_text().replace(DEFAULT_NS, namespace or NS)
     for key, value in replacements.items():
         raw = raw.replace(key, str(value))
     return json.loads(raw)
@@ -285,6 +285,8 @@ def main():
 
 if __name__ == "__main__":
     if "--legacy-external" in sys.argv:
+        if "--dry-run" in sys.argv or "--render-arm" in sys.argv:
+            sys.exit("Offline comparison plans use the built-in native operator entry point")
         sys.argv.remove("--legacy-external")
         main()
     else:
