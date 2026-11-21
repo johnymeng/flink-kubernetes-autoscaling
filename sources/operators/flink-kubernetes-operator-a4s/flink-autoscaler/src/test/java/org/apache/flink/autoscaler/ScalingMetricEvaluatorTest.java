@@ -230,11 +230,11 @@ public class ScalingMetricEvaluatorTest {
         assertEquals(CacheMode.OFFLINE_CALIBRATED,
                 calibrated.getCacheEvaluation().getVertices().get(vertex).getSelectedCostPolicy());
 
-        // The first feasible parallelism needs 100 MiB. With 50 MiB available, retry
-        // starts there and finds parallelism 3, instead of looking up the omitted point at 1.
+        // The lower points do not fit, and the unconstrained higher-P estimate
+        // cannot provide a byte-supported cache allocation.
         config.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 550.0);
         var decision = new A4S(history.getJobTopology(), calibrated, Map.of()).makeDecision(config);
-        assertEquals(3, decision.get(vertex).getParallelism());
+        assertTrue(decision.isEmpty());
     }
 
     @Test

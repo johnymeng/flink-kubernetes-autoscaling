@@ -498,6 +498,9 @@ public class AutoScalerOptions {
                     .withDescription(
                             "Constant managed memory in MB used when a4s.managed-memory-override.enabled is true.");
 
+    /** Append the vertex hex ID to configure a verified per-task managed-memory floor in MiB. */
+    public static final String A4S_MEMORY_FLOOR_PREFIX = "job.autoscaler.a4s.memory-floor.mb.";
+
     public static final ConfigOption<Double> A4S_MEMORY_BASE_MB =
             autoScalerConfig("a4s.memory-base.mb")
                     .doubleType()

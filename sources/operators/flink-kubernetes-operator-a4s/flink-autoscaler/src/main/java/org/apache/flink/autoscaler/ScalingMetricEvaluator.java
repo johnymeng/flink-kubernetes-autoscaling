@@ -92,6 +92,9 @@ public class ScalingMetricEvaluator {
                         : latestCollectedMetrics.getMissRateCurves();
         var result = new EvaluatedMetrics(scalingOutput, null, memoryParallelismCurves,
                 collectedMissRateCurves, cacheCostFailures);
+        if (latestCollectedMetrics.getCacheObservations() != null) {
+            result.setCacheObservations(Map.copyOf(latestCollectedMetrics.getCacheObservations()));
+        }
         var decisions = result.getCacheEvaluation().getVertices();
         double hitLatencySec = conf.getDouble(AutoScalerOptions.A4S_HIT_LATENCY_SEC);
         double missLatencySec = conf.getDouble(AutoScalerOptions.A4S_MISS_LATENCY_SEC);

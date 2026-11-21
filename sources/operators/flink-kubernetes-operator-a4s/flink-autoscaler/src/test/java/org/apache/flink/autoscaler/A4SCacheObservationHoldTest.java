@@ -326,6 +326,152 @@ class A4SCacheObservationHoldTest {
     }
 
     @Test
+    void retainedWriteBudgetIsPerTaskWhenScalingFromOneToFour() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.QUALIFIED);
+        replay.useFixedPolicy();
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals("4", replay.stateStore.getParallelismOverrides(replay.context)
+                .get(replay.join.toString()));
+        var profile = replay.stateStore.getResourceProfileOverrides(replay.context)
+                .get(replay.join.toString());
+        assertTrue(profile.contains("managedMemory=192.000mb"), profile);
+        var budget = replay.evaluation().getCacheEvaluation().getManagedMemoryDecisions().get(replay.join);
+        assertEquals(192L << 20, budget.getTrustedCurrentManagedBytes().longValue());
+        assertEquals(192L << 20, budget.getRetainedManagedBytes().longValue());
+        assertEquals(192L << 20, budget.getFinalManagedBytes().longValue());
+        assertEquals(160L << 20, budget.getNominalNativeCacheBytes().longValue());
+        assertEquals(64L << 20, budget.getNominalWriteBufferManagerBytes().longValue());
+        assertNull(budget.getReservedOrPinnedBytes());
+    }
+
+    @Test
+    void fixedPolicyCanUseAnExplicitLowerFloorAndRoundsUp() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.QUALIFIED);
+        replay.useFixedPolicy();
+        replay.setManagedFloor("96.1");
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals(1, replay.requests.get());
+        assertEquals(0, replay.profileReads.get());
+        var budget = replay.evaluation().getCacheEvaluation().getManagedMemoryDecisions().get(replay.join);
+        assertEquals((long) Math.ceil(96.1 * (1L << 20)), budget.getConfiguredFloorBytes().longValue());
+        assertNull(budget.getRetainedManagedBytes());
+        assertEquals(97L << 20, budget.getFinalManagedBytes().longValue());
+        assertTrue(replay.stateStore.getResourceProfileOverrides(replay.context)
+                .get(replay.join.toString()).contains("managedMemory=97.000mb"));
+    }
+
+    @Test
+    void configuredFloorAllowsThroughputRecoveryWithoutNativeCorroboration() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.MISSING_OBSERVATIONS);
+        replay.observationAvailable = false;
+        replay.curveAvailable = false;
+        replay.setManagedFloor("96.1");
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals(1, replay.requests.get());
+        var evaluation = replay.evaluation().getCacheEvaluation();
+        assertEquals(CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES, evaluation.getAction());
+        var budget = evaluation.getManagedMemoryDecisions().get(replay.join);
+        assertNull(budget.getTrustedCurrentManagedBytes());
+        assertEquals(97L << 20, budget.getFinalManagedBytes().longValue());
+        assertTrue(replay.stateStore.getResourceProfileOverrides(replay.context)
+                .get(replay.join.toString()).contains("managedMemory=97.000mb"));
+    }
+
+    @Test
+    void fixedAndOnlinePoliciesHoldOnAnOverrideBelowTheExactFloor() throws Exception {
+        for (boolean online : List.of(false, true)) {
+            var replay = new OverloadFixture(160L << 20, Reason.QUALIFIED);
+            if (!online) {
+                replay.useFixedPolicy();
+            }
+            replay.setManagedFloor("96.1");
+            var conf = replay.context.getConfiguration();
+            conf.set(AutoScalerOptions.A4S_MANAGED_MEMORY_OVERRIDE_ENABLED, true);
+            conf.set(AutoScalerOptions.A4S_MANAGED_MEMORY_OVERRIDE_MB, 96);
+            replay.assertNoRequest();
+
+            var evaluation = replay.evaluation().getCacheEvaluation();
+            assertEquals(CacheAction.POLICY_HOLD, evaluation.getAction());
+            assertEquals(Reason.MEMORY_OVERRIDE_BELOW_FLOOR, evaluation.getHoldReason());
+            var budget = evaluation.getManagedMemoryDecisions().get(replay.join);
+            assertEquals(96L << 20, budget.getRequestedManagedBytes().longValue());
+            assertNull(budget.getFinalManagedBytes());
+        }
+    }
+
+    @Test
+    void fixedPolicyHoldsWhenTheReportedProfileIsUncorroborated() throws Exception {
+        var replay = new OverloadFixture(159L << 20, Reason.QUALIFIED);
+        replay.useFixedPolicy();
+        replay.assertNoRequest();
+
+        var evaluation = replay.evaluation().getCacheEvaluation();
+        var budget = evaluation.getManagedMemoryDecisions().get(replay.join);
+        assertEquals(CacheAction.POLICY_HOLD, evaluation.getAction());
+        assertEquals(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED, evaluation.getHoldReason());
+        assertNull(budget.getTrustedCurrentManagedBytes());
+        assertNull(budget.getFinalManagedBytes());
+    }
+
+    @Test
+    void safeWriteBudgetHoldsWhenItExceedsTheManagerManagedMemoryPool() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.MISSING_TIMING);
+        replay.context.getConfiguration().set(
+                TaskManagerOptions.MANAGED_MEMORY_SIZE, MemorySize.ofMebiBytes(128));
+        replay.assertNoRequest();
+
+        var evaluation = replay.evaluation().getCacheEvaluation();
+        assertEquals(Reason.MEMORY_BUDGET_INFEASIBLE, evaluation.getHoldReason());
+        assertEquals(192L << 20, evaluation.getManagedMemoryDecisions()
+                .get(replay.join).getFinalManagedBytes().longValue());
+    }
+
+    @Test
+    void safeWriteBudgetHoldsWhenItExceedsTheDerivedManagedMemoryPool() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.QUALIFIED);
+        replay.useFixedPolicy();
+        replay.context.getConfiguration().set(TaskManagerOptions.MANAGED_MEMORY_FRACTION, 0.2f);
+        replay.assertNoRequest();
+
+        var evaluation = replay.evaluation().getCacheEvaluation();
+        assertEquals(Reason.MEMORY_BUDGET_INFEASIBLE, evaluation.getHoldReason());
+        assertEquals(192L << 20, evaluation.getManagedMemoryDecisions()
+                .get(replay.join).getFinalManagedBytes().longValue());
+    }
+
+    @Test
+    void nominalNativeCapacitiesFollowTheRuntimeWriteBufferRatio() {
+        var vertex = new JobVertexID();
+        var config = new Configuration();
+        for (long managedMiB : List.of(32L, 192L)) {
+            long managed = managedMiB << 20;
+            config.setString(AutoScalerOptions.A4S_MEMORY_FLOOR_PREFIX + vertex.toHexString(),
+                    Long.toString(managedMiB));
+            var decision = ScalingExecutor.resolveManagedMemory(config, vertex, true, 10.0, null, false);
+            assertEquals(managed, decision.getFinalManagedBytes().longValue());
+            assertEquals(5 * managed / 6, decision.getNominalNativeCacheBytes().longValue());
+            assertEquals(managed / 3, decision.getNominalWriteBufferManagerBytes().longValue());
+            assertNull(decision.getReservedOrPinnedBytes());
+        }
+    }
+
+    @Test
+    void distinctProposalsCanResolveToTheSameFloor() {
+        var vertex = new JobVertexID();
+        var config = new Configuration();
+        config.setString(AutoScalerOptions.A4S_MEMORY_FLOOR_PREFIX + vertex.toHexString(), "128");
+        var smaller = ScalingExecutor.resolveManagedMemory(config, vertex, true, 64.0, null, false);
+        var larger = ScalingExecutor.resolveManagedMemory(config, vertex, true, 96.0, null, false);
+        assertEquals(64L << 20, smaller.getUnconstrainedManagedBytes().longValue());
+        assertEquals(96L << 20, larger.getUnconstrainedManagedBytes().longValue());
+        assertEquals(128L << 20, smaller.getFloorLimitedManagedBytes().longValue());
+        assertEquals(smaller.getFinalManagedBytes(), larger.getFinalManagedBytes());
+    }
+
+    @Test
     void overloadScalesOnlyTheProvenBottleneckAndPreservesLivePerSubtaskMemory() throws Exception {
         var replay = new OverloadFixture(160L << 20, Reason.INSUFFICIENT_CURRENT_PARALLELISM);
         replay.autoscaler.scale(replay.context);
@@ -825,14 +971,16 @@ class A4SCacheObservationHoldTest {
                             ? Map.of(join, MemoryParallelismCurve.builder().targetThroughput(30_000)
                                     .addPoint(1, 160).build())
                             : Map.<JobVertexID, MemoryParallelismCurve>of();
-                    return new EvaluatedMetrics(
+                    var globalMetrics = new HashMap<>(healthyGlobalMetrics());
+                    globalMetrics.put(ScalingMetric.NUM_TASK_SLOTS_USED, EvaluatedScalingMetric.of(2 * edgeParallelism + 1));
+                    var evaluated = new EvaluatedMetrics(
                             Map.of(join, joinMetrics, source, sourceMetrics,
                                     sink, balancedMetrics(edgeParallelism)),
-                            Map.of(ScalingMetric.GC_PRESSURE, EvaluatedScalingMetric.of(0),
-                                    ScalingMetric.HEAP_MAX_USAGE_RATIO, EvaluatedScalingMetric.avg(.4),
-                                    ScalingMetric.NUM_TASK_SLOTS_USED,
-                                    EvaluatedScalingMetric.of(2 * edgeParallelism + 1)),
-                            curves, Map.of(), reason == Reason.QUALIFIED ? Map.of() : Map.of(join, reason));
+                            globalMetrics, curves, Map.of(),
+                            reason == Reason.QUALIFIED ? Map.of() : Map.of(join, reason));
+                    var latest = metrics.getMetricHistory().get(metrics.getMetricHistory().lastKey());
+                    evaluated.setCacheObservations(latest.getCacheObservations());
+                    return evaluated;
                 }
             };
             var events = new TestingEventCollector<JobID, JobAutoScalerContext<JobID>>();
@@ -969,6 +1117,17 @@ class A4SCacheObservationHoldTest {
                             0, 0, 0, 0, 0, 0, List.of()));
         }
 
+        private void useFixedPolicy() {
+            var conf = context.getConfiguration();
+            conf.set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, false);
+            conf.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(1024));
+        }
+
+        private void setManagedFloor(String mib) {
+            context.getConfiguration().setString(
+                    AutoScalerOptions.A4S_MEMORY_FLOOR_PREFIX + join.toHexString(), mib);
+        }
+
         private static Map<ScalingMetric, EvaluatedScalingMetric> overloadedMetrics(int p) {
             return new HashMap<>(Map.of(
                     ScalingMetric.PARALLELISM, EvaluatedScalingMetric.of(p),
@@ -1007,6 +1166,10 @@ class A4SCacheObservationHoldTest {
 
     private static Map<ScalingMetric, EvaluatedScalingMetric> healthyGlobalMetrics() {
         return Map.of(ScalingMetric.GC_PRESSURE, EvaluatedScalingMetric.of(0),
-                ScalingMetric.HEAP_MAX_USAGE_RATIO, EvaluatedScalingMetric.avg(.4));
+                ScalingMetric.HEAP_MAX_USAGE_RATIO, EvaluatedScalingMetric.avg(.4),
+                ScalingMetric.HEAP_MEMORY_USED, EvaluatedScalingMetric.avg(128L << 20),
+                ScalingMetric.MANAGED_MEMORY_USED, EvaluatedScalingMetric.avg(192L << 20),
+                ScalingMetric.METASPACE_MEMORY_USED, EvaluatedScalingMetric.avg(128L << 20),
+                ScalingMetric.NUM_TASK_SLOTS_USED, EvaluatedScalingMetric.of(3));
     }
 }

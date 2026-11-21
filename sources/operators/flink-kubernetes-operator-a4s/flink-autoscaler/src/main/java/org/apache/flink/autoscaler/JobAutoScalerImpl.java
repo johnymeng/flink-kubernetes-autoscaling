@@ -346,7 +346,9 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             parallelismChanged = scalingExecutor.scaleResource(
                     ctx, evaluatedMetrics, scalingHistory, scalingTracking, now, jobTopology,
                     delayedScaleDown);
-            action = parallelismChanged ? CacheAction.POLICY_REQUEST : CacheAction.POLICY_NO_CHANGE;
+            action = parallelismChanged ? CacheAction.POLICY_REQUEST
+                    : cacheDecision.getHoldReason() != null
+                            ? CacheAction.POLICY_HOLD : CacheAction.POLICY_NO_CHANGE;
         }
 
         if (delayedScaleDown.isUpdated()) {
@@ -433,11 +435,12 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             return;
         }
         LOG.info("A4S cache decision job={} evaluationId={} action={} cachePlacementEnabled={} holdReason={} "
-                        + "observationHolds={} requestedParallelismOverrides={} "
+                        + "observationHolds={} managedMemoryDecisions={} requestedParallelismOverrides={} "
                         + "requestedResourceProfileOverrides={} appliedOverrides=unavailable",
                 ctx.getJobID(), decision.getId(), action, decision.isCachePlacementEnabled(),
                 decision.getHoldReason(),
-                decision.getObservationHolds(), decision.getRequestedParallelismOverrides(),
+                decision.getObservationHolds(), decision.getManagedMemoryDecisions(),
+                decision.getRequestedParallelismOverrides(),
                 decision.getRequestedResourceProfileOverrides());
         decision.getObservationHolds().forEach((vertex, status) ->
                 LOG.info("A4S hold job={} vertex={} reason={} evaluationId={}",

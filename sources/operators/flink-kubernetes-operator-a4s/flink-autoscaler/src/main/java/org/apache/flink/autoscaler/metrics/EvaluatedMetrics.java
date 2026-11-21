@@ -55,6 +55,10 @@ public class EvaluatedMetrics {
 
     @EqualsAndHashCode.Exclude
     @ToString.Exclude
+    private Map<JobVertexID, CacheObservationBatch> cacheObservations = Map.of();
+
+    @EqualsAndHashCode.Exclude
+    @ToString.Exclude
     private final CacheEvaluation cacheEvaluation = new CacheEvaluation();
 
     public EvaluatedMetrics(
@@ -115,6 +119,8 @@ public class EvaluatedMetrics {
         private final Map<JobVertexID, CacheDecision> vertices = new LinkedHashMap<>();
         private final Map<JobVertexID, CacheObservation.Status> observationHolds =
                 new LinkedHashMap<>();
+        private final Map<JobVertexID, ManagedMemoryDecision> managedMemoryDecisions =
+                new LinkedHashMap<>();
         private boolean cachePlacementEnabled;
         @Nullable private CacheAction action;
         @Nullable private OnlineCacheCost.Reason holdReason;
@@ -126,6 +132,22 @@ public class EvaluatedMetrics {
             requestedParallelismOverrides = Map.copyOf(parallelism);
             requestedResourceProfileOverrides = profiles == null ? null : Map.copyOf(profiles);
         }
+    }
+
+    /** Per-task managed-memory resolution. Final bytes describe the request. */
+    @Value
+    public static class ManagedMemoryDecision {
+        @Nullable Long configuredFloorBytes;
+        @Nullable Long trustedCurrentManagedBytes;
+        @Nullable Long unconstrainedManagedBytes;
+        @Nullable Long retainedManagedBytes;
+        @Nullable Long floorLimitedManagedBytes;
+        @Nullable Long requestedManagedBytes;
+        @Nullable Long finalManagedBytes;
+        @Nullable Long nominalNativeCacheBytes;
+        @Nullable Long nominalWriteBufferManagerBytes;
+        @Nullable Long reservedOrPinnedBytes;
+        @Nullable OnlineCacheCost.Reason holdReason;
     }
 
     @Value

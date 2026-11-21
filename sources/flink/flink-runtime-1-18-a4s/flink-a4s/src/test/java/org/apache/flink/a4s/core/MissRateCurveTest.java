@@ -42,6 +42,24 @@ class MissRateCurveTest {
     }
 
     @Test
+    void supportedInverseKeepsInclusivePlateausAndExactZero() {
+        List<MissRateCurve.Point> points = Arrays.asList(
+                new MissRateCurve.Point(4096, 0.3),
+                new MissRateCurve.Point(8192, 0.3),
+                new MissRateCurve.Point(12288, 0.0));
+        MissRateCurve curve = new MissRateCurve(points, MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
+        assertEquals(4096L, curve.supportedMemoryBytesForMissRate(0.3).get().longValue());
+        assertEquals(12288L, curve.supportedMemoryBytesForMissRate(0).get().longValue());
+        assertEquals(java.util.Optional.empty(), curve.supportedMemoryBytesForMissRate(1));
+        assertEquals(java.util.Optional.empty(),
+                new MissRateCurve(points).supportedMemoryBytesForMissRate(0.3));
+        MissRateCurve malformed = new MissRateCurve(Arrays.asList(
+                points.get(0), points.get(2), points.get(1)),
+                MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
+        assertEquals(java.util.Optional.empty(), malformed.supportedMemoryBytesForMissRate(0.3));
+    }
+
+    @Test
     void testLeastMemoryBytesForMissRate_simpleCase() {
         MissRateCurve mrc =
                 new MissRateCurve(

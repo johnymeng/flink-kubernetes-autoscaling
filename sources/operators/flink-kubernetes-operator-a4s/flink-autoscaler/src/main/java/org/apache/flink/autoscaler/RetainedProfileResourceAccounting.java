@@ -49,7 +49,7 @@ final class RetainedProfileResourceAccounting {
             JobID job, WorkerSnapshot snapshot, Map<ResourceProfile, Long> running,
             Map<ResourceProfile, Long> requested) {
         if (snapshot.workers.isEmpty() || running.isEmpty()
-                || !running.keySet().equals(requested.keySet())) {
+                || requested.isEmpty()) {
             return Optional.empty();
         }
         try {
@@ -87,7 +87,7 @@ final class RetainedProfileResourceAccounting {
             }
 
             int currentWorkers = snapshot.workers.size();
-            long needed = estimateRequestedWorkers(capacity, running, requested, currentWorkers);
+            long needed = estimateFinalWorkers(capacity, requested, currentWorkers);
             if (needed > Integer.MAX_VALUE) {
                 return Optional.empty();
             }
@@ -173,14 +173,23 @@ final class RetainedProfileResourceAccounting {
     static long estimateRequestedWorkers(
             ResourceProfile capacity, Map<ResourceProfile, Long> running,
             Map<ResourceProfile, Long> requested, int currentWorkers) {
+        if (!running.keySet().equals(requested.keySet())
+                || requested.entrySet().stream().anyMatch(entry ->
+                        running.get(entry.getKey()) <= 0 || entry.getValue() < running.get(entry.getKey()))) {
+            throw new IllegalArgumentException("Retained profile cannot be accounted for");
+        }
+        return estimateFinalWorkers(capacity, requested, currentWorkers);
+    }
+
+    private static long estimateFinalWorkers(
+            ResourceProfile capacity, Map<ResourceProfile, Long> requested, int currentWorkers) {
         long guaranteedCopiesPerWorker = Long.MAX_VALUE;
         long totalRequested = 0;
         for (var requirement : requested.entrySet()) {
             var profile = requirement.getKey();
             long count = requirement.getValue();
-            long alreadyAllocated = running.get(profile);
             long perWorker = copiesPerWorker(capacity, profile);
-            if (perWorker <= 0 || alreadyAllocated <= 0 || count < alreadyAllocated) {
+            if (perWorker <= 0 || count <= 0 || !profile.getExtendedResources().isEmpty()) {
                 throw new IllegalArgumentException("Retained profile cannot be accounted for");
             }
             guaranteedCopiesPerWorker = Math.min(guaranteedCopiesPerWorker, perWorker);

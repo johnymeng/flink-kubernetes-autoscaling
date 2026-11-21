@@ -106,6 +106,18 @@ public class MemoryParallelismCurve {
             .findFirst();
     }
 
+    public Optional<Double> getSupportedMemoryMbForParallelism(int parallelism) {
+        return points.stream()
+                .filter(point -> point.parallelism == parallelism && point.supportedCacheSize)
+                .map(Point::getMemoryMB)
+                .findFirst();
+    }
+
+    public Optional<Integer> getMinSupportedParallelism() {
+        return points.stream().filter(point -> point.supportedCacheSize)
+                .map(Point::getParallelism).findFirst();
+    }
+
     /**
      * Convert a curve in whole-vertex native cache MiB to per-slot managed MiB.
      * The merged MRC scales the capacity axis by the number of source partitions.
@@ -255,8 +267,6 @@ public class MemoryParallelismCurve {
                         .mapToDouble(MissRateCurve.Point::getMissRate)
                         .min()
                         .orElse(Double.POSITIVE_INFINITY);
-        boolean byteAxisSupported =
-                mrc.getCapacityAxis() == MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES;
         for (int parallelism = minParallelism; parallelism <= maxParallelism; parallelism++) {
             // This is the maximum acceptable miss rate. We need a cache size
             // that achieves this miss rate or lower
@@ -278,12 +288,10 @@ public class MemoryParallelismCurve {
                 maximumMissRate = 1.0;
             }
 
-            double memoryMB = mrc.leastMemoryBytesForMissRate(maximumMissRate) / (1024.0 * 1024.0);
-            // A plateau fallback or an unconstrained budget supplies no evidence for downsizing.
-            builder.addPoint(
-                    parallelism,
-                    memoryMB,
-                    byteAxisSupported && maximumMissRate < 1 && maximumMissRate >= minimumMissRate);
+            var supported = mrc.supportedMemoryBytesForMissRate(maximumMissRate);
+            double bytes = supported.isPresent()
+                    ? supported.get() : mrc.leastMemoryBytesForMissRate(maximumMissRate);
+            builder.addPoint(parallelism, bytes / (1024.0 * 1024.0), supported.isPresent());
         }
         return builder.build();
     }

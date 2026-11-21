@@ -111,6 +111,30 @@ public class MissRateCurve {
         return new MissRateCurve(mrc);
     }
 
+    /** Find a supported inclusive point on a verified byte axis. */
+    public Optional<Long> supportedMemoryBytesForMissRate(double maxMissRate) {
+        if (capacityAxis != CapacityAxis.ATTESTED_NATIVE_BYTES
+                || !Double.isFinite(maxMissRate) || maxMissRate < 0 || maxMissRate >= 1) {
+            return Optional.empty();
+        }
+        long previousBytes = 0;
+        double previousMissRate = 1;
+        Long best = null;
+        for (Point point : points) {
+            if (point.cacheSizeBytes <= previousBytes || !Double.isFinite(point.missRate)
+                    || point.missRate < 0 || point.missRate > previousMissRate) {
+                return Optional.empty();
+            }
+            if (best == null && point.missRate <= maxMissRate) {
+                best = point.cacheSizeBytes;
+            }
+            previousBytes = point.cacheSizeBytes;
+            previousMissRate = point.missRate;
+        }
+        return Optional.ofNullable(best);
+    }
+
+    /** Diagnostic inverse. Unattainable targets may return a nominal plateau coordinate. */
     public double leastMemoryBytesForMissRate(double maxMissRate) {
         if (points.isEmpty()) {
             throw new IllegalStateException("MissRateCurve has no points");

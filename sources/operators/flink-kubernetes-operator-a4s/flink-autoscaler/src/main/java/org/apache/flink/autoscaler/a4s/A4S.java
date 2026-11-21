@@ -113,7 +113,8 @@ public class A4S {
         mpcs.forEach(
                 (vertex, curve) ->
                         parallelismForVertex.computeIfPresent(
-                                vertex, (id, requested) -> Math.max(requested, curve.getMinParallelism())));
+                                vertex, (id, requested) -> Math.max(
+                                        requested, curve.getMinSupportedParallelism().orElse(requested))));
 
         double maxManagedMemoryMB = MAX_MANAGED_MEMORY_MB - conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
         int maxAttempts = conf.get(AutoScalerOptions.A4S_MAX_ATTEMPTS);
@@ -156,8 +157,13 @@ public class A4S {
                 continue;
             }
 
-            int parallelism = Math.max(parallelismForVertex.get(operator), mpc.getMinParallelism());
-            double memoryMB = mpc.getMemoryMbForParallelism(parallelism).orElseThrow(() -> new IllegalStateException("No memory for parallelism " + parallelism + " found for operator " + operator));
+            int requested = parallelismForVertex.get(operator);
+            int parallelism = Math.max(requested, mpc.getMinSupportedParallelism().orElse(requested));
+            var supported = mpc.getSupportedMemoryMbForParallelism(parallelism);
+            if (supported.isEmpty()) {
+                return Optional.empty();
+            }
+            double memoryMB = supported.get();
 
             if (memoryMB > maxManagedMemoryMB) {
                 return Optional.empty();
@@ -193,8 +199,12 @@ public class A4S {
             if (parallelism + 1 > mpc.getMaxParallelism()) {
                 continue;
             }
-            double memoryDiff = mpc.getMemoryMbForParallelism(parallelism + 1).get() - 
-                mpc.getMemoryMbForParallelism(parallelism).get();
+            var current = mpc.getSupportedMemoryMbForParallelism(parallelism);
+            var next = mpc.getSupportedMemoryMbForParallelism(parallelism + 1);
+            if (current.isEmpty() || next.isEmpty()) {
+                continue;
+            }
+            double memoryDiff = next.get() - current.get();
             if (memoryDiff < minMemoryDiff) {
                 minMemoryDiff = memoryDiff;
                 minMemoryDiffOperator = operator;
