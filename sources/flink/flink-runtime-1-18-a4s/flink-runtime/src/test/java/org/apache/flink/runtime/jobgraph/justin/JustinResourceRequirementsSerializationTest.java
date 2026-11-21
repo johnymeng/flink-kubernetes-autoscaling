@@ -30,6 +30,22 @@ import static org.assertj.core.api.Assertions.assertThat;
 class JustinResourceRequirementsSerializationTest {
 
     @Test
+    void resourceOnlyDifferenceSurvivesSerialization() throws Exception {
+        JustinVertexResourceRequirements.Parallelism parallelism =
+                new JustinVertexResourceRequirements.Parallelism(1, 2);
+        ResourceProfile first = ResourceProfile.newBuilder().setManagedMemoryMB(192).build();
+        ResourceProfile second = ResourceProfile.newBuilder().setManagedMemoryMB(193).build();
+        JustinVertexResourceRequirements before =
+                new JustinVertexResourceRequirements(parallelism, first);
+        JustinVertexResourceRequirements after =
+                new JustinVertexResourceRequirements(parallelism, second);
+
+        assertThat(before).isNotEqualTo(after);
+        JustinVertexResourceRequirements restored = InstantiationUtil.clone(after);
+        assertThat(restored).isEqualTo(after).hasSameHashCodeAs(after);
+    }
+
+    @Test
     void restoresParallelismAndMemoryProfilesFromThePersistedJobGraph() throws Exception {
         JobGraph graph = new JobGraph("in-place scaling");
         SingleJobJobGraphStore store = new SingleJobJobGraphStore(graph);

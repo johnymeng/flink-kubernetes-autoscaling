@@ -117,7 +117,7 @@ public class ScalingMetrics {
         // We only measure observed tpr when we are catching up, that is when the lag is beyond the
         // configured observe threshold
         boolean catchingUp =
-                scalingMetrics.getOrDefault(ScalingMetric.LAG, 0.)
+                scalingMetrics.getOrDefault(ScalingMetric.LAG, Double.NaN)
                         >= conf.get(AutoScalerOptions.OBSERVE_TRUE_PROCESSING_RATE_LAG_THRESHOLD)
                                         .toSeconds()
                                 * numRecordsInPerSecond;
@@ -196,10 +196,9 @@ public class ScalingMetrics {
             Map<FlinkMetric, AggregatedMetric> flinkMetrics,
             Map<ScalingMetric, Double> scalingMetrics) {
         var pendingRecords = flinkMetrics.get(FlinkMetric.PENDING_RECORDS);
-        if (pendingRecords != null) {
+        if (pendingRecords != null && pendingRecords.getSum() != null
+                && Double.isFinite(pendingRecords.getSum()) && pendingRecords.getSum() >= 0) {
             scalingMetrics.put(ScalingMetric.LAG, pendingRecords.getSum());
-        } else {
-            scalingMetrics.put(ScalingMetric.LAG, 0.);
         }
     }
 

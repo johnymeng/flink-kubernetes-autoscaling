@@ -489,7 +489,7 @@ public class ScalingMetricEvaluator {
                 .filter(topology::isSource)
                 .anyMatch(
                         vertex -> {
-                            double lag = lastMetrics.get(vertex).getOrDefault(LAG, 0.0);
+                            double lag = lastMetrics.get(vertex).getOrDefault(LAG, Double.NaN);
                             double inputRateAvg =
                                     getRate(ScalingMetric.NUM_RECORDS_IN, vertex, metricsHistory);
                             if (Double.isNaN(inputRateAvg)) {
@@ -721,8 +721,12 @@ public class ScalingMetricEvaluator {
         if (topology.isSource(vertex)) {
             double catchUpTargetSec = conf.get(AutoScalerOptions.CATCH_UP_DURATION).toSeconds();
 
-            double lagRate = getRate(LAG, vertex, metricsHistory);
-            double ingestionDataRate = Math.max(0, inputRate + lagRate);
+            double lag = latestVertexMetrics.getOrDefault(LAG, Double.NaN);
+            double lagRate = Double.isFinite(lag)
+                    ? getRate(LAG, vertex, metricsHistory) : Double.NaN;
+            // With no backlog estimate, keep the independently measured input-rate target.
+            double ingestionDataRate = Double.isFinite(lagRate)
+                    ? Math.max(0, inputRate + lagRate) : inputRate;
             if (Double.isNaN(ingestionDataRate)) {
                 throw new RuntimeException(
                         "Cannot evaluate metrics without ingestion rate information");
@@ -730,8 +734,8 @@ public class ScalingMetricEvaluator {
 
             out.put(TARGET_DATA_RATE, EvaluatedScalingMetric.avg(ingestionDataRate));
 
-            double lag = latestVertexMetrics.getOrDefault(LAG, 0.);
-            double catchUpInputRate = catchUpTargetSec == 0 ? 0 : lag / catchUpTargetSec;
+            double catchUpInputRate = catchUpTargetSec > 0 && Double.isFinite(lag)
+                    ? lag / catchUpTargetSec : 0;
             if (catchUpInputRate > 0) {
                 LOG.debug(
                         "Extra backlog processing input rate for {} is {}",

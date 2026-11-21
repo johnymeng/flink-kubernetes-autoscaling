@@ -45,6 +45,17 @@ public class ScalingMetricsTest {
     private static final JobVertexID SOURCE = new JobVertexID();
 
     @Test
+    void missingBacklogAndReportedZeroAreDistinct() {
+        Map<ScalingMetric, Double> scalingMetrics = new HashMap<>();
+        ScalingMetrics.computeLagMetrics(Map.of(), scalingMetrics);
+        assertTrue(scalingMetrics.isEmpty());
+
+        ScalingMetrics.computeLagMetrics(
+                Map.of(FlinkMetric.PENDING_RECORDS, aggSum(0.)), scalingMetrics);
+        assertEquals(Map.of(ScalingMetric.LAG, 0.), scalingMetrics);
+    }
+
+    @Test
     public void testProcessingAndOutputMetrics() {
         var source = new JobVertexID();
         var op = new JobVertexID();

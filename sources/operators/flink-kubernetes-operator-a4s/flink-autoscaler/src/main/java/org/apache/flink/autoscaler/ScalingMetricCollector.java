@@ -556,7 +556,7 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
             List<String> pendingRecordsMetric = FlinkMetric.PENDING_RECORDS.findAll(allMetricNames);
             if (pendingRecordsMetric.isEmpty()) {
                 LOG.warn(
-                        "pendingRecords metric for {} could not be found. Either a legacy source or an idle source. Assuming no pending records.",
+                        "Source backlog is unavailable for {} (pendingRecords metric missing).",
                         jobVertexID);
             }
             pendingRecordsMetric.forEach(m -> filteredMetrics.put(m, FlinkMetric.PENDING_RECORDS));

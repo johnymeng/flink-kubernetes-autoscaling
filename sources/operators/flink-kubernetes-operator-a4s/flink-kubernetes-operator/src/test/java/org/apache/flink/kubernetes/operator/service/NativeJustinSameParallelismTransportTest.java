@@ -19,6 +19,7 @@ package org.apache.flink.kubernetes.operator.service;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirements;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
 import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.client.program.rest.RestClusterClient;
@@ -44,6 +45,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -66,6 +68,22 @@ class NativeJustinSameParallelismTransportTest {
         assertEquals(1, vertices.values().stream()
                 .filter(vertex -> vertex.getResourceProfile().getManagedMemory().getBytes() == requested)
                 .count());
+    }
+
+    @Test
+    void resourceOnlyDifferenceSurvivesJson() throws Exception {
+        var id = new JobVertexID();
+        var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 2);
+        var smaller = new JustinVertexResourceRequirements(
+                parallelism, NativeFlinkService.parseResourceProfile(encoded((224L << 20) + 37)));
+        var larger = new JustinVertexResourceRequirements(
+                parallelism, NativeFlinkService.parseResourceProfile(encoded((224L << 20) + 38)));
+        assertNotEquals(smaller, larger);
+        var mapper = RestMapperUtils.getStrictObjectMapper();
+        var body = new JustinResourceRequirementsBody(new JustinResourceRequirements(Map.of(id, larger)));
+        var restored = mapper.readValue(mapper.writeValueAsBytes(body), JustinResourceRequirementsBody.class);
+        assertEquals(body, restored);
+        assertEquals(body.hashCode(), restored.hashCode());
     }
 
     @Test
