@@ -360,7 +360,8 @@ public class OnlineCacheCost {
         }
         if (!CacheObservation.QUICK_MRC.equals(window.population)
                 || !CacheObservation.CACHE_POLICY.equals(window.cachePolicy)
-                || !CacheObservation.FIXED_4K.equals(window.chargePolicy)) {
+                || (!CacheObservation.isNominalQuickMrcCharge(window.chargePolicy)
+                        && !CacheObservation.ATTESTED_BYTE_CHARGE.equals(window.chargePolicy))) {
             return Status.INCOMPATIBLE;
         }
         if (sample.getObservedAtNanos() == null) {

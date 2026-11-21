@@ -255,6 +255,8 @@ public class MemoryParallelismCurve {
                         .mapToDouble(MissRateCurve.Point::getMissRate)
                         .min()
                         .orElse(Double.POSITIVE_INFINITY);
+        boolean byteAxisSupported =
+                mrc.getCapacityAxis() == MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES;
         for (int parallelism = minParallelism; parallelism <= maxParallelism; parallelism++) {
             // This is the maximum acceptable miss rate. We need a cache size
             // that achieves this miss rate or lower
@@ -279,7 +281,9 @@ public class MemoryParallelismCurve {
             double memoryMB = mrc.leastMemoryBytesForMissRate(maximumMissRate) / (1024.0 * 1024.0);
             // A plateau fallback or an unconstrained budget supplies no evidence for downsizing.
             builder.addPoint(
-                    parallelism, memoryMB, maximumMissRate < 1 && maximumMissRate >= minimumMissRate);
+                    parallelism,
+                    memoryMB,
+                    byteAxisSupported && maximumMissRate < 1 && maximumMissRate >= minimumMissRate);
         }
         return builder.build();
     }

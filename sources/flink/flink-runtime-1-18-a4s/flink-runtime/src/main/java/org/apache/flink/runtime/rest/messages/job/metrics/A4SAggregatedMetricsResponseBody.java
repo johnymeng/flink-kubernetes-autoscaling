@@ -59,16 +59,35 @@ public class A4SAggregatedMetricsResponseBody implements ResponseBody {
         this(scaledMrc, cacheCostSamples, null);
     }
 
+    public A4SAggregatedMetricsResponseBody(
+            MissRateCurve scaledMrc,
+            @Nullable List<A4SCacheCostSample> cacheCostSamples,
+            @Nullable CacheObservationBatch cacheObservations) {
+        this(scaledMrc, cacheCostSamples, cacheObservations,
+                scaledMrc == null ? null : scaledMrc.getCapacityAxis().name());
+    }
+
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
             @JsonProperty(FIELD_NAME_SCALED_MRC) MissRateCurve scaledMrc,
             @JsonProperty(FIELD_NAME_CACHE_COST_SAMPLES)
                     @Nullable List<A4SCacheCostSample> cacheCostSamples,
             @JsonProperty(CacheObservationBatch.FIELD_NAME)
-                    @Nullable CacheObservationBatch cacheObservations) {
+                    @Nullable CacheObservationBatch cacheObservations,
+            @JsonProperty(MissRateCurve.FIELD_NAME_CAPACITY_AXIS) @Nullable String capacityAxis) {
         this.cacheObservations = cacheObservations;
-        this.scaledMrc = scaledMrc == null ? new MissRateCurve(Collections.emptyList()) : scaledMrc;
+        MissRateCurve.CapacityAxis axis =
+                MissRateCurve.CapacityAxis.NOMINAL_ROUNDED_4K.name().equals(capacityAxis)
+                        ? MissRateCurve.CapacityAxis.NOMINAL_ROUNDED_4K
+                        : MissRateCurve.CapacityAxis.UNVERIFIED;
+        this.scaledMrc = new MissRateCurve(
+                scaledMrc == null ? Collections.emptyList() : scaledMrc.getPoints(), axis);
         this.cacheCostSamples = cacheCostSamples;
+    }
+
+    @JsonProperty(MissRateCurve.FIELD_NAME_CAPACITY_AXIS)
+    public String getScaledMrcCapacityAxis() {
+        return scaledMrc.getCapacityAxis().name();
     }
 
     public MissRateCurve getScaledMrc() {

@@ -138,7 +138,8 @@ final class A4SCacheObservationAggregator {
                 long totalBytes = Math.multiplyExact(localBytes, expected.size());
                 points.add(new MissRateCurve.Point(totalBytes, weightedMisses / totalLookupRate));
             }
-            return new Result(Status.VALID, new MissRateCurve(points));
+            return new Result(
+                    Status.VALID, new MissRateCurve(points, MissRateCurve.CapacityAxis.NOMINAL_ROUNDED_4K));
         } catch (ArithmeticException overflow) {
             return new Result(Status.MALFORMED);
         }
@@ -179,7 +180,7 @@ final class A4SCacheObservationAggregator {
             return Status.INCOMPATIBLE;
         }
         if (!CacheObservation.QUICK_MRC.equals(window.population)
-                || !CacheObservation.FIXED_4K.equals(window.chargePolicy)
+                || !CacheObservation.isNominalQuickMrcCharge(window.chargePolicy)
                 || histogram.getCacheItemSizeBytes() != 4096) {
             return Status.INCOMPATIBLE;
         }

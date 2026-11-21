@@ -140,6 +140,7 @@ public final class QuickMrcCostProjection {
             StackDistanceHistogram histogram = observation.histogram;
             var identity = fit.getIdentities().get(i);
             if (observation.window == null
+                    || !CacheObservation.ATTESTED_BYTE_CHARGE.equals(observation.window.chargePolicy)
                     || observation.status != CacheObservation.Status.VALID
                     || observation.subtask != i
                     || !observation.attempt.equals(identity.getAttempt())

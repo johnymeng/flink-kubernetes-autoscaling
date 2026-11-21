@@ -294,6 +294,7 @@ public class EvaluatedMetrics {
         @Nullable Long capacityBytes;
         @Nullable Integer ownerCount;
         @Nullable String population;
+        @Nullable String chargePolicy;
         @Nullable Long intervalStartNanos;
         @Nullable Long intervalEndNanos;
         @Nullable Long observedAtMillis;
@@ -307,6 +308,7 @@ public class EvaluatedMetrics {
                     window == null ? null : window.cacheId, window == null ? null : window.epoch,
                     window == null ? null : window.sequence, window == null ? null : window.capacityBytes,
                     window == null ? null : window.owners.size(), window == null ? null : window.population,
+                    window == null ? null : window.chargePolicy,
                     window == null ? null : window.startNanos, window == null ? null : window.endNanos,
                     window == null ? null : window.observedAtMillis,
                     window == null ? null : window.references, window == null ? null : window.misses);

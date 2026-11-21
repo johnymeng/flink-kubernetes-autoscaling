@@ -82,7 +82,9 @@ public class A4STest {
         var local = new StackDistanceHistogram(
                 new long[] {50}, 50, 1, 16384, 4096);
         var merged = StackDistanceHistogram.merge(List.of(local, local));
-        var mrc = MissRateCurve.fromStackDistanceHistogram(merged);
+        var mrc = new MissRateCurve(
+                MissRateCurve.fromStackDistanceHistogram(merged).getPoints(),
+                MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
         var mpc = MemoryParallelismCurve.fromCalibratedMissRateCurve(
                 1000.0, 0.001, 0.002, 2, 2, mrc);
         assertThat(mpc.hasSupportedCacheSize(2)).isTrue();

@@ -94,6 +94,21 @@ public class QuickMrcOnlineCacheCostTest {
     }
 
     @Test
+    void roundedAndLegacyCoordinatesWithholdProjectionButAllowTimingFit() {
+        for (String chargePolicy : List.of(CacheObservation.ROUNDED_4K_CHARGE, CacheObservation.FIXED_4K)) {
+            var before = batch(0, 0, 8192, 500, chargePolicy);
+            var after = batch(1, 0, 8192, 500, chargePolicy);
+            var result = OnlineCacheCost.fitQuickMrc(
+                    before, List.of(sample(0, 0, 0, 0)), after, List.of(sample(1, 0, 0, 0)));
+            assertEquals(OnlineCacheCost.Reason.QUALIFIED, result.getReason());
+            var rejected = QuickMrcCostProjection.project(result.getFit(), after, 8500, null);
+            assertNull(rejected.getRecommendation());
+            assertNull(rejected.getMinSupportedTotalBytes());
+            assertNull(rejected.getMaxSupportedTotalBytes());
+        }
+    }
+
+    @Test
     void choosesOnlyAFeasibleMeasuredCapacityAndPreservesUnconstrainedBudget() {
         var fit = qualify(sample(0, 0, 0, 0), sample(1, 0, 0, 0), 0, 1).getFit();
         var observation = batch(1, 0);
@@ -196,6 +211,11 @@ public class QuickMrcOnlineCacheCostTest {
 
     private static CacheObservationBatch batch(
             int window, long epoch, long capacityBytes, long windowMisses) {
+        return batch(window, epoch, capacityBytes, windowMisses, CacheObservation.ATTESTED_BYTE_CHARGE);
+    }
+
+    private static CacheObservationBatch batch(
+            int window, long epoch, long capacityBytes, long windowMisses, String chargePolicy) {
         long endNanos = 1_000_000_000L + 60_000_000_000L * window;
         var observation =
                 new CacheObservation(
@@ -203,7 +223,7 @@ public class QuickMrcOnlineCacheCostTest {
                         CacheObservation.Status.VALID,
                         new CacheObservation.Window(
                                 "process", 987, epoch, window + 1, List.of(1L),
-                                CacheObservation.QUICK_MRC, CacheObservation.FIXED_4K,
+                                CacheObservation.QUICK_MRC, chargePolicy,
                                 CacheObservation.CACHE_POLICY, .02, capacityBytes,
                                 endNanos - 10_000_000_000L, endNanos, 1_000L + 60_000L * window,
                                 1000, windowMisses),

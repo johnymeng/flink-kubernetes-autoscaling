@@ -21,12 +21,14 @@ package org.apache.flink.runtime.rest.handler.job.metrics;
 import org.apache.flink.a4s.core.CacheObservation;
 import org.apache.flink.a4s.core.CacheObservation.Status;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 
 import org.apache.flink.runtime.rest.util.RestMapperUtils;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.node.ObjectNode;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -67,6 +69,34 @@ class A4SCacheObservationAggregatorTest {
                 assertEquals(expected.get("missRate").asDouble(), actual.getMissRate(), 1e-12);
             }
         }
+    }
+
+    @Test
+    void wireLabelsNominalGeometryAndWithholdsUnknownOrUnattestedAxes() throws Exception {
+        CacheObservation a = observation(0, "a", 1, 100, NOW, new long[] {1, 1, 2}, 0);
+        CacheObservation b = observation(1, "b", 2, 120, NOW, new long[] {3, 0}, 1);
+        MissRateCurve curve = aggregate(Arrays.asList(a, b)).curve;
+        assertEquals(MissRateCurve.CapacityAxis.NOMINAL_ROUNDED_4K, curve.getCapacityAxis());
+
+        ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
+        ObjectNode wire = mapper.valueToTree(new A4SAggregatedMetricsResponseBody(curve));
+        assertTrue(wire.get("scaledMrc").isArray());
+        assertEquals("NOMINAL_ROUNDED_4K", wire.get(MissRateCurve.FIELD_NAME_CAPACITY_AXIS).asText());
+        assertEquals(MissRateCurve.CapacityAxis.NOMINAL_ROUNDED_4K,
+                mapper.treeToValue(wire, A4SAggregatedMetricsResponseBody.class)
+                        .getScaledMrc().getCapacityAxis());
+        wire.remove(MissRateCurve.FIELD_NAME_CAPACITY_AXIS);
+        assertEquals(MissRateCurve.CapacityAxis.UNVERIFIED,
+                mapper.treeToValue(wire, A4SAggregatedMetricsResponseBody.class)
+                        .getScaledMrc().getCapacityAxis());
+        wire.put(MissRateCurve.FIELD_NAME_CAPACITY_AXIS, "UNKNOWN_FUTURE_SCHEMA");
+        assertEquals(MissRateCurve.CapacityAxis.UNVERIFIED,
+                mapper.treeToValue(wire, A4SAggregatedMetricsResponseBody.class)
+                        .getScaledMrc().getCapacityAxis());
+        wire.put(MissRateCurve.FIELD_NAME_CAPACITY_AXIS, "ATTESTED_NATIVE_BYTES");
+        assertEquals(MissRateCurve.CapacityAxis.UNVERIFIED,
+                mapper.treeToValue(wire, A4SAggregatedMetricsResponseBody.class)
+                        .getScaledMrc().getCapacityAxis());
     }
 
     @Test

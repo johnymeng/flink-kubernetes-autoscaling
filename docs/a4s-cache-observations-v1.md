@@ -16,15 +16,17 @@ Its deterministic fixtures cover the same population and byte units.
    prevents further native reads before closing its JNI handle.
 3. `rocksdb.a4s-cache-observation` identifies the sender by job, vertex, subtask and execution
    attempt. The window adds a process UUID, native cache ID, native capacity epoch, sequence,
-   backend lease IDs, population, charge and eviction policies, sampler rate, live capacity
+   backend lease IDs, population, charge and eviction policies, sampler rate, actual native capacity
    in bytes, process-local monotonic interval, wall time, and exact native interval counts.
-   The histogram provides sampled reference counts, cold misses and capacity-bin units. The
-   supported region runs from one bin through the last emitted bin, inclusive.
+   The histogram provides sampled reference counts, cold misses and rounded charge quanta.
+   Its nominal coordinate range runs from one bin through the last emitted bin, inclusive.
 4. Query `GET /jobs/<job>/vertices/<vertex>/a4s-metrics` using
    `get=cacheObservations,cacheCostSamples,cacheCostCompaction`. The current execution graph
    provides every expected running attempt. Match each response's `cacheObservations.subtasks`
    against job, vertex, subtask, attempt and `window.process/cacheId/epoch/sequence`. Inspect
    `status`, `expectedSubtasks`, `oldestAgeMillis` and `wireBytes` before reading `scaledMrc`.
+   The sibling `scaledMrcCapacityAxis` labels versioned aggregate coordinates as
+   `NOMINAL_ROUNDED_4K`. Missing or unknown axes are unverified.
 5. The autoscaler stores the most recent batch, constituent observations, and independent timing
    samples in `CollectedMetrics`. Under Justin+A4S every unfinished vertex requires a complete
    observation unless explicitly exempted by its vertex ID in
@@ -70,9 +72,19 @@ snapshot and reuse state intact. Snapshot schema mismatch or unavailable JNI cap
 explicitly ineligible. Only one physical shard is supported. Timing sample and busy-time reads
 have separate consistency boundaries.
 
-Native counters describe resident-cache lookups. The histogram bins retain the estimator's
-sampling weights and inclusive edges, with the existing nominal 4 KiB capacity label per item.
-Variable native charges can bias that nominal capacity estimate.
+Native counters describe resident-cache lookups. The estimator rounds each entry's payload charge
+up independently to 4,096-byte quanta and tracks those quanta in grouped distance buckets.
+A bin scales that distance by the configured number of quanta. The numeric curve coordinates
+express multiples of those quanta. The physical cache's capacity is independently observed in
+bytes, and the managed-memory budget also covers non-cache resources. Metadata charge, pinned
+entries and high-priority LRU pools are additional limits of the nominal counterfactual.
+
+The new `quickmrc-rounded-4k-charge-v1` policy token declares this approximate domain. The historical
+`fixed-4096-byte-item` token describes the same nominal axis. The fixed policy can retain numeric
+diagnostics, but its inversion provides no verified native byte allocation. The sampled timing fit
+can remain valid independently. Exact learned allocation requires a separate byte-charge and
+eviction-policy attestation, which this QuickMRC producer cannot supply. The consumer also
+rejects unrecognized capacity-axis claims for published aggregate curves.
 
 Monotonic duration is local to each process. REST accepts 9–30 s windows with wall start and end
 skew at most 5 s and end age at most 30 s. The skew check assumes synchronized worker wall clocks.

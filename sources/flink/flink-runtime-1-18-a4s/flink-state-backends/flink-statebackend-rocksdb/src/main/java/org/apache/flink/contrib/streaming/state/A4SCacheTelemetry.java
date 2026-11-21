@@ -137,7 +137,7 @@ final class A4SCacheTelemetry {
                     state[5],
                     publication.owners,
                     CacheObservation.QUICK_MRC,
-                    CacheObservation.FIXED_4K,
+                    CacheObservation.ROUNDED_4K_CHARGE,
                     CacheObservation.CACHE_POLICY,
                     sampleRate,
                     state[2],

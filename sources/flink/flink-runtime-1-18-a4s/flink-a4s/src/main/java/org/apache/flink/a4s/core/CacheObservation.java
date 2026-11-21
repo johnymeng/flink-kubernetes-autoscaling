@@ -40,7 +40,11 @@ public final class CacheObservation {
     public static final long MAX_AGE_MILLIS = 30_000;
     public static final long MAX_CLOCK_SKEW_MILLIS = 5_000;
     public static final String QUICK_MRC = "quickmrc-resident-lookup-v1";
+    /** Historical QuickMRC label. It did not attest actual fixed entry charges. */
     public static final String FIXED_4K = "fixed-4096-byte-item";
+    public static final String ROUNDED_4K_CHARGE = "quickmrc-rounded-4k-charge-v1";
+    /** Reserved for a byte-charge and eviction-policy attestation. QuickMRC does not emit it. */
+    public static final String ATTESTED_BYTE_CHARGE = "attested-native-byte-charge-v1";
     public static final String CACHE_POLICY = "single-shard-rocksdb-lru";
 
     private static final ObjectMapper JSON =
@@ -49,6 +53,10 @@ public final class CacheObservation {
                     .enable(DeserializationFeature.FAIL_ON_MISSING_CREATOR_PROPERTIES)
                     .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES)
                     .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+
+    public static boolean isNominalQuickMrcCharge(String chargePolicy) {
+        return ROUNDED_4K_CHARGE.equals(chargePolicy) || FIXED_4K.equals(chargePolicy);
+    }
 
     /** Quality codes appear on the wire as enum names. */
     public enum Status {

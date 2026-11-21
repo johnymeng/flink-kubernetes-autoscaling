@@ -12,10 +12,24 @@ import java.util.Objects;
 import java.util.Optional;
 
 public class MissRateCurve {
+    public static final String FIELD_NAME_CAPACITY_AXIS = "scaledMrcCapacityAxis";
+
+    public enum CapacityAxis {
+        UNVERIFIED,
+        NOMINAL_ROUNDED_4K,
+        ATTESTED_NATIVE_BYTES
+    }
+
     private final List<Point> points;
+    private final CapacityAxis capacityAxis;
 
     @JsonCreator
     public MissRateCurve(List<Point> points) {
+        this(points, CapacityAxis.UNVERIFIED);
+    }
+
+    public MissRateCurve(List<Point> points, CapacityAxis capacityAxis) {
+        this.capacityAxis = Objects.requireNonNull(capacityAxis);
         if (points == null) {
             this.points = Collections.emptyList();
         } else {
@@ -30,7 +44,11 @@ public class MissRateCurve {
         return points;
     }
 
-    /** Represents a point on the Miss Rate Curve: cache size -> miss rate. */
+    public CapacityAxis getCapacityAxis() {
+        return capacityAxis;
+    }
+
+    /** A miss rate at a coordinate on the containing curve's capacity axis. */
     public static class Point {
         public static final String FIELD_NAME_CACHE_SIZE_BYTES = "cacheSizeBytes";
         public static final String FIELD_NAME_MISS_RATE = "missRate";
@@ -82,11 +100,11 @@ public class MissRateCurve {
 
         for (int i = 0; i < numBuckets; i++) {
             cumulativeFreqAtSize += histogram.getFrequency(i);
-            long currentCacheSize = (i + 1L) * bucketSizeScaling;
+            long binUpperUnits = Math.multiplyExact(i + 1L, bucketSizeScaling);
             double missRate = 1.0 - ((double) cumulativeFreqAtSize / totalFrequency);
             missRate = Math.max(0.0, Math.min(1.0, missRate));
-            long cacheSizeItems = currentCacheSize * cacheItemSizeBytes;
-            long scaledCacheSizeBytes = cacheSizeItems * histogram.getNumPartitions();
+            long localCoordinate = Math.multiplyExact(binUpperUnits, cacheItemSizeBytes);
+            long scaledCacheSizeBytes = Math.multiplyExact(localCoordinate, histogram.getNumPartitions());
             mrc.add(new Point(scaledCacheSizeBytes, missRate));
         }
 
@@ -134,14 +152,14 @@ public class MissRateCurve {
             return "MissRateCurve{points=[]}";
         }
         StringBuilder sb = new StringBuilder();
-        sb.append("MissRateCurve{points=[");
+        sb.append("MissRateCurve{capacityAxis=").append(capacityAxis).append(", points=[");
         for (int i = 0; i < points.size(); i++) {
             if (i > 0) {
                 sb.append(", ");
             }
             Point p = points.get(i);
             double cacheMiB = p.getCacheSizeBytes() / (1024.0 * 1024.0);
-            sb.append(String.format("cacheSizeMiB=%.6f missRate=%.6f", cacheMiB, p.getMissRate()));
+            sb.append(String.format("coordinateMiB=%.6f missRate=%.6f", cacheMiB, p.getMissRate()));
         }
         sb.append("]}");
         return sb.toString();

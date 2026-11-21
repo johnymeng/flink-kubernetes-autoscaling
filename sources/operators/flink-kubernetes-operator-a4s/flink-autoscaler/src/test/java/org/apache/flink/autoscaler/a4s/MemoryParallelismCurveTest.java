@@ -102,7 +102,8 @@ public class MemoryParallelismCurveTest {
         var positiveMisses = new MissRateCurve(List.of(new MissRateCurve.Point(64L << 20, 0.001)));
         var zeroMisses = new MissRateCurve(List.of(
                 new MissRateCurve.Point(64L << 20, 0.001),
-                new MissRateCurve.Point(128L << 20, 0.0)));
+                new MissRateCurve.Point(128L << 20, 0.0)),
+                MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
 
         var withoutZero = MemoryParallelismCurve.fromMissRateCurve(
                 200_000.0, 5e-3, 5e-6, 1, 2, positiveMisses);
@@ -258,12 +259,24 @@ public class MemoryParallelismCurveTest {
     }
 
     @Test
+    void nominalAndUnverifiedCurvesKeepTheirNumericalEstimateOutsideByteSupport() {
+        for (var axis : List.of(MissRateCurve.CapacityAxis.NOMINAL_ROUNDED_4K,
+                MissRateCurve.CapacityAxis.UNVERIFIED)) {
+            var mrc = new MissRateCurve(List.of(new MissRateCurve.Point(64L << 20, 0.25)), axis);
+            var curve = MemoryParallelismCurve.fromMissRateCurve(4, 0.3125, 0.0625, 1, 1, mrc);
+            assertThat(curve.getMemoryMbForParallelism(1)).contains(64.0);
+            assertThat(curve.hasSupportedCacheSize(1)).isFalse();
+        }
+    }
+
+    @Test
     void testMeasuredCachePointSupportsAnInRangeMissBudget() {
         MissRateCurve mrc =
                 new MissRateCurve(
                         List.of(
                                 new MissRateCurve.Point(4_096L, 1.0),
-                                new MissRateCurve.Point(64L << 20, 0.25)));
+                                new MissRateCurve.Point(64L << 20, 0.25)),
+                        MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
 
         MemoryParallelismCurve fixed =
                 MemoryParallelismCurve.fromMissRateCurve(4, 0.3125, 0.0625, 1, 2, mrc);
@@ -279,7 +292,8 @@ public class MemoryParallelismCurveTest {
                 new MissRateCurve(
                         List.of(
                                 new MissRateCurve.Point(4_096L, 1.0),
-                                new MissRateCurve.Point(64L << 20, 0.0)));
+                                new MissRateCurve.Point(64L << 20, 0.0)),
+                        MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
 
         MemoryParallelismCurve online =
                 MemoryParallelismCurve.fromCalibratedMissRateCurve(4, 0.25, 0.25, 1, 3, mrc);

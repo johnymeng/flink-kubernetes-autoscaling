@@ -140,7 +140,8 @@ public class ScalingMetricEvaluatorTest {
         var topology = new JobTopology(new VertexInfo(vertex, Map.of(), parallelism, maxParallelism));
         var mrc = new MissRateCurve(List.of(
                 new MissRateCurve.Point(100L << 20, 0.001),
-                new MissRateCurve.Point(200L << 20, 0.0)));
+                new MissRateCurve.Point(200L << 20, 0.0)),
+                MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
         var metrics = new TreeMap<Instant, CollectedMetrics>();
         for (int second = 0; second <= 1; second++) {
             metrics.put(Instant.ofEpochSecond(second), new CollectedMetrics(
@@ -425,7 +426,8 @@ public class ScalingMetricEvaluatorTest {
                         List.of(
                                 new MissRateCurve.Point(50L << 20, 1.0),
                                 new MissRateCurve.Point(100L << 20, 0.5),
-                                new MissRateCurve.Point(200L << 20, 0.0)));
+                                new MissRateCurve.Point(200L << 20, 0.0)),
+                MissRateCurve.CapacityAxis.ATTESTED_NATIVE_BYTES);
         var metrics = new TreeMap<Instant, CollectedMetrics>();
         for (int second = 0; second <= 1; second++) {
             metrics.put(
