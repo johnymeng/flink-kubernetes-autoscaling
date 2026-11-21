@@ -45,6 +45,7 @@ import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
 import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.exception.ReconciliationException;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
@@ -185,7 +186,15 @@ public class NativeFlinkService extends AbstractFlinkService {
         var justinEnabled = deployConfig.get(AutoScalerOptions.JUSTIN_ENABLED);
 
         if (justinEnabled) {
-            return justin(ctx, deployConfig);
+            boolean profileOnly = deployConfig.get(PipelineOptions.PARALLELISM_OVERRIDES)
+                    .equals(observeConfig.get(PipelineOptions.PARALLELISM_OVERRIDES))
+                    && !deployConfig.get(KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES)
+                            .equals(observeConfig.get(KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES));
+            boolean acknowledged = justin(ctx, deployConfig);
+            if (!acknowledged && profileOnly) {
+                throw new ReconciliationException("Native Justin profile-only request was not acknowledged");
+            }
+            return acknowledged;
         }
         if (!supportsInPlaceScaling(resource, observeConfig)) {
             return false;
@@ -322,7 +331,7 @@ public class NativeFlinkService extends AbstractFlinkService {
             }
             return true;
         } catch (Throwable t) {
-            LOG.error("Error while rescaling, falling back to regular upgrade", t);
+            LOG.error("Native Justin resource request failed", t);
             return false;
         }
     }

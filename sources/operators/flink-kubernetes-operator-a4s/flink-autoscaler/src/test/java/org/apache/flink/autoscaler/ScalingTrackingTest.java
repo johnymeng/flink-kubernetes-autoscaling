@@ -22,6 +22,10 @@ import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -50,6 +54,31 @@ class ScalingTrackingTest {
         conf = new Configuration();
         conf.set(AutoScalerOptions.RESTART_TIME, configuredRestartTime);
         conf.set(AutoScalerOptions.PREFER_TRACKED_RESTART_TIME, true);
+    }
+
+    @Test
+    void requestReceiptRoundTripsAndOldTrackingRecordsRemainReadable() throws Exception {
+        var mapper = new ObjectMapper(new YAMLFactory())
+                .registerModule(new JavaTimeModule())
+                .setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        var when = Instant.parse("2026-01-01T00:00:00Z");
+        var legacy = mapper.readValue(
+                "scalingRecords:\n  '2026-01-01T00:00:00Z':\n    restartDuration: 5\n",
+                ScalingTracking.class);
+        assertThat(legacy.getScalingRecords().get(when).getRestartDuration())
+                .isEqualTo(Duration.ofSeconds(5));
+        assertThat(legacy.getScalingRecords().get(when).getRealizerReturned()).isNull();
+
+        var request = new ScalingRecord();
+        request.setDecisionId("stable-decision");
+        request.setStartingParallelism(Map.of("vertex", "1"));
+        request.setRequestedParallelism(Map.of("vertex", "6"));
+        request.setRequestedProfiles(Map.of("vertex", "exact-profile"));
+        request.setRealizerReturned(true);
+        scalingTracking.addScalingRecord(when, request);
+        var loaded = mapper.readValue(mapper.writeValueAsString(scalingTracking), ScalingTracking.class);
+        assertThat(loaded.getScalingRecords().get(when)).isEqualTo(request);
+        assertThat(loaded.getScalingRecords().get(when).getRestartDuration()).isNull();
     }
 
     @Test

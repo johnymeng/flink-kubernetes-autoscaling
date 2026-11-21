@@ -17,11 +17,14 @@
 
 package org.apache.flink.autoscaler;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.CacheAction;
+
 import java.time.Duration;
+import java.util.Map;
+import java.util.Set;
 
 /**
  * Class for tracking scaling details, including time it took for the job to transition to the
@@ -29,7 +32,42 @@ import java.time.Duration;
  */
 @Data
 @NoArgsConstructor
-@AllArgsConstructor
 public class ScalingRecord {
     private Duration restartDuration;
+
+    // Nullable fields keep the existing history format readable.
+    private String decisionId;
+    private CacheAction requestMode;
+    private Map<String, String> startingParallelism;
+    private Map<String, String> requestedParallelism;
+    private Map<String, String> requestedProfiles;
+    private Map<String, String> configOverrides;
+    private Set<String> configRemovals;
+    private Boolean realizerReturned;
+
+    public ScalingRecord(Duration restartDuration) {
+        this.restartDuration = restartDuration;
+    }
+
+    static ScalingRecord requested(FinalScalingAction action) {
+        var record = new ScalingRecord();
+        record.decisionId = action.getDecisionId();
+        record.requestMode = action.getMode();
+        record.startingParallelism = action.getStartingParallelism();
+        record.requestedParallelism = action.getParallelismOverrides();
+        record.requestedProfiles = action.getResourceProfileOverrides();
+        record.configOverrides = action.getConfigOverrides();
+        record.configRemovals = action.getConfigRemovals();
+        record.realizerReturned = false;
+        return record;
+    }
+
+    boolean matchesRequest(FinalScalingAction action) {
+        return decisionId != null && requestMode == action.getMode()
+                && action.getStartingParallelism().equals(startingParallelism)
+                && action.getParallelismOverrides().equals(requestedParallelism)
+                && action.getResourceProfileOverrides().equals(requestedProfiles)
+                && action.getConfigOverrides().equals(configOverrides)
+                && action.getConfigRemovals().equals(configRemovals);
+    }
 }

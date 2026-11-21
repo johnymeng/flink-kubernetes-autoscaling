@@ -22,6 +22,7 @@ import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.FinalScalingAction.VertexRequest;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.AutoScalerEventHandler;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -53,10 +54,10 @@ import org.apache.flink.runtime.rest.messages.ClusterConfigurationInfoHeaders;
 import org.apache.flink.runtime.rest.messages.ConfigurationInfoEntry;
 import org.apache.flink.runtime.rest.messages.EmptyMessageParameters;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
-import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerDetailsHeaders;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerDetailsInfo;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagersHeaders;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsHeaders;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -136,8 +137,10 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             JobTopology jobTopology,
             DelayedScaleDown delayedScaleDown)
             throws Exception {
-        return scaleResource(context, evaluatedMetrics, scalingHistory, scalingTracking, now,
-                jobTopology, delayedScaleDown, null) == CacheAction.POLICY_REQUEST;
+        CacheAction action = scaleResource(context, evaluatedMetrics, scalingHistory, scalingTracking,
+                now, jobTopology, delayedScaleDown, null);
+        evaluatedMetrics.getCacheEvaluation().setAction(action);
+        return action == CacheAction.POLICY_REQUEST;
     }
 
     CacheAction scaleUpWithCurrentProfiles(
@@ -181,134 +184,356 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             return CacheAction.POLICY_NO_CHANGE;
         }
 
-        Map<JobVertexID, ResourceProfile> retainedProfiles = Map.of();
-        if (throughputOnly) {
-            var currentProfiles = new HashMap<JobVertexID, ResourceProfile>();
-            var profiles = preserveLiveProfiles(context, evaluatedMetrics, overloadObservations, currentProfiles);
-            if (profiles.isEmpty()) {
-                if (evaluatedMetrics.getCacheEvaluation().getHoldReason() == null) {
-                    evaluatedMetrics.getCacheEvaluation()
-                            .setHoldReason(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED);
-                }
-                return CacheAction.POLICY_HOLD;
-            }
-            retainedProfiles = profiles.get();
-            if (overloadWouldExceedResources(
-                    context, evaluatedMetrics, scalingSummaries, currentProfiles, retainedProfiles)) {
-                return CacheAction.POLICY_HOLD;
-            }
+        if (throughputOnly || (conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED))) {
+            return finalizeA4sRequest(context, evaluatedMetrics, scalingHistory, scalingTracking,
+                    now, jobTopology, delayedScaleDown, overloadObservations, scalingSummaries);
         }
 
         updateRecommendedParallelism(evaluatedMetrics.getVertexMetrics(), scalingSummaries);
-
-        if (!throughputOnly && checkIfBlockedAndTriggerScalingEvent(context, scalingSummaries, conf, now)) {
+        if (checkIfBlockedAndTriggerScalingEvent(context, scalingSummaries, conf, now)) {
             return CacheAction.POLICY_HOLD;
         }
-
-        var configOverrides = throughputOnly ? new ConfigChanges()
-                : MemoryTuning.tuneTaskManagerMemory(
-                        context,
-                        evaluatedMetrics,
-                        jobTopology,
-                        scalingSummaries,
-                        autoScalerEventHandler);
-
-        var tunedConfig = conf.get(MEMORY_TUNING_ENABLED) && !throughputOnly
+        var configOverrides = MemoryTuning.tuneTaskManagerMemory(
+                context, evaluatedMetrics, jobTopology, scalingSummaries, autoScalerEventHandler);
+        var tunedConfig = conf.get(MEMORY_TUNING_ENABLED)
                 ? configOverrides.newConfigWithOverrides(conf) : conf;
-        boolean useA4s = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
-        Map<JobVertexID, Decision> a4sDecisions = Map.of();
-        if (useA4s && !throughputOnly) {
-            LOG.debug("A4S: Evaluated Metrics: {}", evaluatedMetrics);
-            if (hasManagedRocksDb(conf, writeBufferRatio(conf))) {
-                a4sDecisions =
-                        new A4S(jobTopology, evaluatedMetrics, scalingSummaries).makeDecision(conf);
-            }
-            if (!resolveA4sManagedMemory(context, evaluatedMetrics, a4sDecisions)) {
-                return CacheAction.POLICY_HOLD;
-            }
-        }
-
-        if ((useA4s || throughputOnly)
-                && managedMemoryWouldExceedResources(
-                        context, tunedConfig, evaluatedMetrics, scalingSummaries, a4sDecisions)) {
-            return CacheAction.POLICY_HOLD;
-        }
-        if (!throughputOnly
-                && scalingWouldExceedMaxResources(
-                        tunedConfig, jobTopology, evaluatedMetrics, scalingSummaries, context)) {
+        if (scalingWouldExceedMaxResources(
+                tunedConfig, jobTopology, evaluatedMetrics, scalingSummaries, context)) {
             return CacheAction.POLICY_HOLD;
         }
 
-        if (throughputOnly && checkIfBlockedAndTriggerScalingEvent(context, scalingSummaries, conf, now)) {
-            return CacheAction.POLICY_HOLD;
-        }
-
-        addToScalingHistoryAndStore(
-                autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
-
+        addToScalingHistoryAndStore(autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
         scalingTracking.addScalingRecord(now, new ScalingRecord());
         autoScalerStateStore.storeScalingTracking(context, scalingTracking);
-
         var requestedParallelism =
                 getVertexParallelismOverrides(evaluatedMetrics.getVertexMetrics(), scalingSummaries);
-        autoScalerStateStore.storeParallelismOverrides(context, requestedParallelism);
-        Map<String, String> requestedProfiles = null;
-
-        if (throughputOnly) {
-            requestedProfiles = formatRetainedProfiles(retainedProfiles);
-            autoScalerStateStore.storeResourceProfileOverrides(context, requestedProfiles);
-            LOG.info("A4S job={} mode=THROUGHPUT_SCALE_UP_RETAINED_PROFILES vertices={} evaluationId={}",
-                    context.getJobID(), scalingSummaries.keySet(),
-                    evaluatedMetrics.getCacheEvaluation().getId());
-        } else if (conf.get(JUSTIN_ENABLED)) {
-            var currentScalingConf =
-                    scalingConfigurations.setCurrentConfiguration(
-                            context.getJobID(),
-                            evaluatedMetrics.getVertexMetrics(),
-                            scalingSummaries,
-                            periods.getOrDefault(context.getJobID(), 0));
-            
-            if (useA4s) {
-                applyA4sDecisions(currentScalingConf, a4sDecisions,
-                        evaluatedMetrics.getCacheEvaluation().getManagedMemoryDecisions());
-            } else {
-                policy(context, currentScalingConf, conf);
-            }
-            
+        if (conf.get(JUSTIN_ENABLED)) {
+            var currentScalingConf = scalingConfigurations.setCurrentConfiguration(
+                    context.getJobID(), evaluatedMetrics.getVertexMetrics(), scalingSummaries,
+                    periods.getOrDefault(context.getJobID(), 0));
+            policy(context, currentScalingConf, conf);
             LOG.info(scalingConfigurations.toString());
-
             requestedParallelism = getVertexParallelismOverrides(currentScalingConf);
-            autoScalerStateStore.storeParallelismOverrides(context, requestedParallelism);
+            autoScalerStateStore.storeResourceProfileOverrides(
+                    context, getVertexResourceProfileOverrides(context.getJobID(), scalingConfigurations, conf));
+        }
+        autoScalerStateStore.storeParallelismOverrides(context, requestedParallelism);
+        autoScalerStateStore.storeConfigChanges(context, configOverrides);
+        delayedScaleDown.clearAll();
+        return CacheAction.POLICY_REQUEST;
+    }
 
-            requestedProfiles =
-                    getVertexResourceProfileOverrides(context.getJobID(), this.scalingConfigurations, conf);
-            autoScalerStateStore.storeResourceProfileOverrides(context, requestedProfiles);
+    private CacheAction finalizeA4sRequest(
+            Context context,
+            EvaluatedMetrics evaluated,
+            Map<JobVertexID, SortedMap<Instant, ScalingSummary>> history,
+            ScalingTracking tracking,
+            Instant now,
+            JobTopology topology,
+            DelayedScaleDown delayedScaleDown,
+            @Nullable Map<JobVertexID, CacheObservationBatch> overloadObservations,
+            Map<JobVertexID, ScalingSummary> ordinary) throws Exception {
+        var conf = context.getConfiguration();
+        boolean throughputOnly = overloadObservations != null;
+        if (!throughputOnly && conf.get(A4S_ONLINE_CACHE_COSTS_ENABLED)
+                && !conf.get(A4S_ONLINE_CACHE_COSTS_SHADOW)) {
+            return CacheAction.ONLINE_CACHE_ONLY_ACTUATION_UNAVAILABLE;
+        }
+        var evaluation = evaluated.getCacheEvaluation();
+        if ((!conf.get(SCALING_ENABLED) || CalendarUtils.inExcludedPeriods(conf, now))
+                && checkIfBlockedAndTriggerScalingEvent(context, ordinary, conf, now)) {
+            return CacheAction.POLICY_HOLD;
+        }
+        var frozen = new HashSet<>(topology.getFinishedVertices());
+        evaluated.getVertexMetrics().keySet().stream()
+                .filter(id -> conf.get(VERTEX_EXCLUDE_IDS).contains(id.toHexString()))
+                .forEach(frozen::add);
+        ordinary = new HashMap<>(ordinary);
+        frozen.forEach(ordinary::remove);
+        if (ordinary.isEmpty()) {
+            return CacheAction.POLICY_NO_CHANGE;
         }
 
+        Map<JobVertexID, Decision> placement = Map.of();
+        if (!throughputOnly && hasManagedRocksDb(conf, writeBufferRatio(conf))) {
+            var curves = new HashMap<>(evaluated.getMemoryParallelismCurves());
+            frozen.forEach(curves::remove);
+            var placementInput = new EvaluatedMetrics(
+                    evaluated.getVertexMetrics(), evaluated.getGlobalMetrics(), curves);
+            placement = new A4S(topology, placementInput, ordinary).makeDecision(conf);
+        }
+
+        var parallelism = ResourceCheckUtils.computeNewParallelisms(
+                ordinary, evaluated.getVertexMetrics());
+        for (var entry : placement.entrySet()) {
+            parallelism.put(entry.getKey(), entry.getValue().getParallelism());
+        }
+        if (!validFinalParallelism(context, evaluated, topology, ordinary, parallelism, frozen)) {
+            evaluation.setHoldReason(Reason.FINAL_PARALLELISM_UNSUPPORTED);
+            return CacheAction.POLICY_HOLD;
+        }
+
+        Map<JobVertexID, ResourceProfile> profiles;
+        var observedProfiles = new HashMap<JobVertexID, ResourceProfile>();
+        if (throughputOnly) {
+            var resolved = preserveLiveProfiles(context, evaluated, overloadObservations, frozen, observedProfiles);
+            if (resolved.isEmpty()) {
+                if (evaluation.getHoldReason() == null) {
+                    evaluation.setHoldReason(Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED);
+                }
+                return CacheAction.POLICY_HOLD;
+            }
+            profiles = resolved.get();
+        } else {
+            var live = readCurrentRequirements(context);
+            if (live.isEmpty()
+                    || !live.get().getJobVertexParallelisms().keySet().equals(parallelism.keySet())) {
+                evaluation.setHoldReason(Reason.FINAL_PROFILE_UNVERIFIED);
+                return CacheAction.POLICY_HOLD;
+            }
+            for (var id : parallelism.keySet()) {
+                ResourceProfile profile = currentResourceProfile(live.get(), id, currentParallelism(evaluated, id));
+                if (profile == null || !FinalScalingAction.canEncode(profile)) {
+                    evaluation.setHoldReason(Reason.FINAL_PROFILE_UNVERIFIED);
+                    return CacheAction.POLICY_HOLD;
+                }
+                observedProfiles.put(id, profile);
+            }
+            if (!resolveA4sManagedMemory(context, evaluated, placement, frozen, observedProfiles)) {
+                return CacheAction.POLICY_HOLD;
+            }
+            profiles = new HashMap<>(observedProfiles);
+            var memories = evaluation.getManagedMemoryDecisions();
+            for (var entry : memories.entrySet()) {
+                var id = entry.getKey();
+                var memory = entry.getValue();
+                if (placement.containsKey(id) && memory.getUnconstrainedManagedBytes() != null
+                        && memory.getFinalManagedBytes() < memory.getUnconstrainedManagedBytes()) {
+                    evaluation.setHoldReason(Reason.FINAL_CACHE_CAPACITY_UNSUPPORTED);
+                    return CacheAction.POLICY_HOLD;
+                }
+                if (memory.getNominalNativeCacheBytes() != null) {
+                    profiles.put(id, ResourceProfile.newBuilder(observedProfiles.get(id))
+                            .setManagedMemory(new MemorySize(memory.getFinalManagedBytes())).build());
+                }
+            }
+        }
+
+        Map<JobVertexID, VertexRequest> vertices = new HashMap<>();
+        var summaries = new HashMap<JobVertexID, ScalingSummary>();
+        CacheAction mode = throughputOnly
+                ? CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES : CacheAction.POLICY_REQUEST;
+        var restartTime = tracking.getMaxRestartTimeOrDefault(conf);
+        for (var entry : parallelism.entrySet()) {
+            var id = entry.getKey();
+            int current = currentParallelism(evaluated, id);
+            int requested = entry.getValue();
+            var prior = observedProfiles.get(id);
+            var profile = profiles.get(id);
+            if (prior == null || profile == null || !FinalScalingAction.canEncode(profile)) {
+                evaluation.setHoldReason(Reason.FINAL_PROFILE_UNVERIFIED);
+                return CacheAction.POLICY_HOLD;
+            }
+
+            var metrics = evaluated.getVertexMetrics().get(id);
+            var memory = evaluation.getManagedMemoryDecisions().get(id);
+            var decision = evaluation.getVertices().get(id);
+            var reason = decision == null ? evaluated.getCacheCostFailures().get(id) : decision.getReason();
+            if (!throughputOnly && !placement.containsKey(id)
+                    && memory != null && memory.getNominalNativeCacheBytes() != null && reason == null) {
+                reason = Reason.CAPACITY_UNSUPPORTED;
+            }
+            double required = AutoScalerUtils.getRequiredProcessingCapacity(metrics, conf, restartTime);
+            if (placement.containsKey(id)
+                    && (!Double.isFinite(required)
+                            || Double.compare(evaluated.getMemoryParallelismCurves().get(id)
+                                    .getTargetThroughput(), required) != 0)) {
+                evaluation.setHoldReason(Reason.FINAL_CACHE_CAPACITY_UNSUPPORTED);
+                return CacheAction.POLICY_HOLD;
+            }
+            vertices.put(id, new VertexRequest(current, requested, profile,
+                    Double.isFinite(required) ? required : null,
+                    memory == null ? null : memory.getNominalNativeCacheBytes(), reason));
+
+            if (requested != current || (!frozen.contains(id) && prior != null && !profile.equals(prior))) {
+                var snapshot = new HashMap<>(metrics);
+                snapshot.put(RECOMMENDED_PARALLELISM, EvaluatedScalingMetric.of(requested));
+                var original = ordinary.get(id);
+                if (placement.containsKey(id) && (original == null
+                        || requested != original.getNewParallelism())) {
+                    snapshot.put(EXPECTED_PROCESSING_RATE, EvaluatedScalingMetric.of(required));
+                }
+                summaries.put(id, new ScalingSummary(current, requested, snapshot));
+            }
+        }
+
+        if (summaries.isEmpty()) {
+            return CacheAction.POLICY_NO_CHANGE;
+        }
+        updateRecommendedParallelism(evaluated.getVertexMetrics(), summaries);
+        if (checkIfBlockedAndTriggerScalingEvent(context, summaries, conf, now)) {
+            return CacheAction.POLICY_HOLD;
+        }
+
+        boolean profileOnly = summaries.values().stream()
+                .noneMatch(summary -> summary.getCurrentParallelism() != summary.getNewParallelism());
+        var configOverrides = throughputOnly || profileOnly ? new ConfigChanges()
+                : MemoryTuning.tuneTaskManagerMemory(
+                        context, evaluated, topology, summaries, autoScalerEventHandler);
+        var tunedConfig = !throughputOnly && conf.get(MEMORY_TUNING_ENABLED)
+                ? configOverrides.newConfigWithOverrides(conf) : conf;
+        var latest = tracking.getLatestScalingRecordEntry().orElse(null);
+        if (profileOnly && latest != null
+                && awaitsAppliedProfile(latest.getValue(), latest.getKey(), context, evaluated, observedProfiles)) {
+            evaluation.setHoldReason(Reason.FINAL_PROFILE_UNVERIFIED);
+            return CacheAction.POLICY_HOLD;
+        }
+        Instant requestedAt = latest != null && !now.isAfter(latest.getKey())
+                ? latest.getKey().plusNanos(1) : now;
+        var action = new FinalScalingAction(
+                evaluation.getId().toString(), requestedAt, mode, vertices, configOverrides);
+        if (managedMemoryWouldExceedResources(context, tunedConfig, evaluated, action)
+                || finalWorkerRequestExceedsResources(
+                        context, evaluated, summaries, observedProfiles, profiles, throughputOnly)) {
+            if (evaluation.getHoldReason() == null) {
+                evaluation.setHoldReason(Reason.FINAL_RESOURCE_LIMIT);
+            }
+            return CacheAction.POLICY_HOLD;
+        }
+
+        if (latest != null && latest.getValue().getRestartDuration() == null
+                && latest.getValue().matchesRequest(action)) {
+            // Repeat the same validated request under its original identity and history entry.
+            action = new FinalScalingAction(latest.getValue().getDecisionId(),
+                    latest.getKey(), mode, vertices, configOverrides);
+        } else {
+            var requestId = action.getDecisionId();
+            var requestedProfiles = action.getResourceProfileOverrides();
+            summaries.forEach((id, summary) -> {
+                summary.setDecisionId(requestId);
+                summary.setRequestedResourceProfile(requestedProfiles.get(id.toHexString()));
+            });
+            addToScalingHistoryAndStore(autoScalerStateStore, context, history, requestedAt, summaries);
+            tracking.addScalingRecord(requestedAt, ScalingRecord.requested(action));
+            autoScalerStateStore.storeScalingTracking(context, tracking);
+        }
+        var requestedParallelism = action.getParallelismOverrides();
+        var requestedProfiles = action.getResourceProfileOverrides();
+        autoScalerStateStore.storeParallelismOverrides(context, requestedParallelism);
+        autoScalerStateStore.storeResourceProfileOverrides(context, requestedProfiles);
         if (!throughputOnly) {
             autoScalerStateStore.storeConfigChanges(context, configOverrides);
         }
-        if (throughputOnly || useA4s) {
-            evaluatedMetrics.getCacheEvaluation()
-                    .recordRequestedOverrides(requestedParallelism, requestedProfiles);
-        }
-
-        // Try to clear all delayed scale down requests after scaling.
+        evaluation.recordRequestedOverrides(requestedParallelism, requestedProfiles);
+        evaluation.setFinalAction(action);
         delayedScaleDown.clearAll();
-
-        return throughputOnly
-                ? CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES : CacheAction.POLICY_REQUEST;
+        return mode;
     }
 
-    private boolean overloadWouldExceedResources(
+    private boolean awaitsAppliedProfile(
+            ScalingRecord record, Instant requestedAt, Context context, EvaluatedMetrics evaluated,
+            Map<JobVertexID, ResourceProfile> observedProfiles) {
+        if (!Boolean.TRUE.equals(record.getRealizerReturned())
+                || record.getStartingParallelism() == null
+                || !record.getStartingParallelism().equals(record.getRequestedParallelism())
+                || record.getRequestedProfiles() == null) {
+            return false;
+        }
+        var conf = context.getConfiguration();
+        var exempt = conf.get(A4S_CACHE_METRICS_EXEMPT_VERTICES);
+        long nowMillis = System.currentTimeMillis();
+        boolean observedCache = false;
+        for (var entry : observedProfiles.entrySet()) {
+            var vertex = entry.getKey();
+            var batch = evaluated.getCacheObservations().get(vertex);
+            if (exempt.contains(vertex.toHexString()) && configuredFloor(conf, vertex) == null
+                    && (batch == null || batch.status == CacheObservation.Status.ABSENT)) {
+                continue;
+            }
+            var profile = entry.getValue();
+            if (!FinalScalingAction.encodeProfile(profile).equals(record.getRequestedProfiles().get(vertex.toHexString()))
+                    || batch == null || !batch.hasPairedLocalObservations()
+                    || batch.subtasks.stream().anyMatch(row -> row.endpoint.appliedSlot == null
+                            || row.window.observedAtMillis < requestedAt.toEpochMilli())
+                    || !corroboratesManagedBudget(context.getJobID(), vertex,
+                            currentParallelism(evaluated, vertex), profile.getManagedMemory().getBytes(),
+                            writeBufferRatio(conf), batch, nowMillis)) {
+                return true;
+            }
+            observedCache = true;
+        }
+        return !observedCache;
+    }
+
+    private static int currentParallelism(EvaluatedMetrics evaluated, JobVertexID vertex) {
+        return (int) evaluated.getVertexMetrics().get(vertex).get(PARALLELISM).getCurrent();
+    }
+
+    private boolean validFinalParallelism(
+            Context context, EvaluatedMetrics evaluated, JobTopology topology,
+            Map<JobVertexID, ScalingSummary> ordinary, Map<JobVertexID, Integer> finalParallelism,
+            Set<JobVertexID> frozen) {
+        var conf = context.getConfiguration();
+        for (var entry : finalParallelism.entrySet()) {
+            var id = entry.getKey();
+            int requested = entry.getValue();
+            int current = currentParallelism(evaluated, id);
+            if (current <= 0 || requested <= 0) {
+                return false;
+            }
+            if (requested == current) {
+                continue;
+            }
+            var summary = ordinary.get(id);
+            if (summary == null || frozen.contains(id)
+                    || Integer.compare(requested, current)
+                            != Integer.compare(summary.getNewParallelism(), current)) {
+                return false;
+            }
+            var metrics = evaluated.getVertexMetrics().get(id);
+            var info = topology.get(id);
+            int maximum = Math.min(info.getMaxParallelism(), (int) metrics.get(MAX_PARALLELISM).getCurrent());
+            int partitions = (int) metrics.get(NUM_SOURCE_PARTITIONS).getCurrent();
+            if (info.getNumSourcePartitions() > 0) {
+                partitions = partitions > 0
+                        ? Math.min(partitions, info.getNumSourcePartitions()) : info.getNumSourcePartitions();
+            }
+            int lower = Math.min(current, conf.get(VERTEX_MIN_PARALLELISM));
+            int upper = Math.max(current, conf.get(VERTEX_MAX_PARALLELISM));
+            if (requested < Math.min(lower, maximum) || requested > Math.min(upper, maximum)
+                    || (partitions > 0 && requested > partitions)) {
+                return false;
+            }
+            if (requested != summary.getNewParallelism()) {
+                var inputs = info.getInputs().values();
+                double factor = requested > current
+                        ? 1 + conf.get(MAX_SCALE_UP_FACTOR) : 1 - conf.get(MAX_SCALE_DOWN_FACTOR);
+                int policyLimit = JobVertexScaler.scale(id, current, inputs, partitions, maximum,
+                        factor, lower, upper, autoScalerEventHandler, context);
+                boolean exceedsLimit = requested > current
+                        ? requested > policyLimit : requested < policyLimit;
+                if (exceedsLimit || requested != JobVertexScaler.scale(
+                        id, current, inputs, partitions, maximum,
+                        Math.nextDown((double) requested / current), lower, upper,
+                        autoScalerEventHandler, context)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean finalWorkerRequestExceedsResources(
             Context context,
             EvaluatedMetrics evaluated,
             Map<JobVertexID, ScalingSummary> summaries,
             Map<JobVertexID, ResourceProfile> currentProfiles,
-            Map<JobVertexID, ResourceProfile> profiles) {
+            Map<JobVertexID, ResourceProfile> profiles,
+            boolean throughputOnly) {
         var snapshot = readLiveWorkers(context);
         if (snapshot.isEmpty()) {
-            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_WORKER_SNAPSHOT_UNAVAILABLE);
+            evaluated.getCacheEvaluation().setHoldReason(throughputOnly
+                    ? Reason.OVERLOAD_WORKER_SNAPSHOT_UNAVAILABLE : Reason.FINAL_RESOURCE_LIMIT);
             return true;
         }
         var running = new HashMap<ResourceProfile, Long>();
@@ -324,7 +549,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         var estimate = RetainedProfileResourceAccounting.estimate(
                 context.getJobID(), snapshot.get(), running, requested);
         if (estimate.isEmpty()) {
-            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_RESOURCE_GEOMETRY_UNSUPPORTED);
+            evaluated.getCacheEvaluation().setHoldReason(throughputOnly
+                    ? Reason.OVERLOAD_RESOURCE_GEOMETRY_UNSUPPORTED : Reason.FINAL_RESOURCE_LIMIT);
             return true;
         }
         var allocation = estimate.get();
@@ -338,12 +564,14 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 || (memoryQuota.isPresent()
                         && allocation.requestedWorkers
                                 > memoryQuota.get().getBytes() / allocation.processMemory.getBytes())) {
-            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_RESOURCE_QUOTA);
+            evaluated.getCacheEvaluation().setHoldReason(throughputOnly
+                    ? Reason.OVERLOAD_RESOURCE_QUOTA : Reason.FINAL_RESOURCE_LIMIT);
             return true;
         }
         if (!resourceCheck.trySchedule(allocation.currentWorkers, allocation.requestedWorkers,
                 allocation.cpu.doubleValue(), allocation.processMemory)) {
-            evaluated.getCacheEvaluation().setHoldReason(Reason.OVERLOAD_CLUSTER_RESOURCES_UNAVAILABLE);
+            evaluated.getCacheEvaluation().setHoldReason(throughputOnly
+                    ? Reason.OVERLOAD_CLUSTER_RESOURCES_UNAVAILABLE : Reason.FINAL_RESOURCE_LIMIT);
             return true;
         }
         return false;
@@ -399,8 +627,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     private Optional<Map<JobVertexID, ResourceProfile>> preserveLiveProfiles(
             Context context,
             EvaluatedMetrics evaluated,
-            Map<JobVertexID, CacheObservationBatch> observations,
-            Map<JobVertexID, ResourceProfile> currentProfiles) throws Exception {
+            Map<JobVertexID, CacheObservationBatch> observations, Set<JobVertexID> frozen,
+            Map<JobVertexID, ResourceProfile> observedProfiles) throws InterruptedException {
         var conf = context.getConfiguration();
         double ratio = writeBufferRatio(conf);
         if (!hasManagedRocksDb(conf, ratio)) {
@@ -415,7 +643,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         if (!vertices.keySet().equals(evaluated.getVertexMetrics().keySet())) {
             return Optional.empty();
         }
-        var retainedProfiles = new HashMap<JobVertexID, ResourceProfile>();
+        var overrides = new HashMap<JobVertexID, ResourceProfile>();
         var cacheExempt = conf.get(A4S_CACHE_METRICS_EXEMPT_VERTICES);
         long nowMillis = System.currentTimeMillis();
         for (var entry : vertices.entrySet()) {
@@ -425,12 +653,10 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             if (profile == null || !profile.getExtendedResources().isEmpty()) {
                 return Optional.empty();
             }
-            List<MemorySize> memory = List.of(
-                    profile.getTaskHeapMemory(), profile.getTaskOffHeapMemory(),
-                    profile.getNetworkMemory());
-            if (memory.stream().anyMatch(size -> size.getBytes() % (1L << 20) != 0
-                    || size.getMebiBytes() > Integer.MAX_VALUE)) {
-                return Optional.empty();
+            observedProfiles.put(id, profile);
+            if (frozen.contains(id)) {
+                overrides.put(id, profile);
+                continue;
             }
             var batch = observations.get(id);
             boolean cacheFree = cacheExempt.contains(id.toHexString())
@@ -449,24 +675,15 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             if (!recordManagedMemoryDecision(evaluated, id, decision)) {
                 return Optional.empty();
             }
-            currentProfiles.put(id, profile);
-            retainedProfiles.put(id, ResourceProfile.newBuilder(profile)
-                    .setManagedMemory(new MemorySize(decision.getFinalManagedBytes())).build());
+            overrides.put(id, ResourceProfile.newBuilder()
+                    .setCpuCores(profile.getCpuCores())
+                    .setTaskHeapMemory(profile.getTaskHeapMemory())
+                    .setTaskOffHeapMemory(profile.getTaskOffHeapMemory())
+                    .setManagedMemory(new MemorySize(decision.getFinalManagedBytes()))
+                    .setNetworkMemory(profile.getNetworkMemory())
+                    .build());
         }
-        return Optional.of(retainedProfiles);
-    }
-
-    private static Map<String, String> formatRetainedProfiles(
-            Map<JobVertexID, ResourceProfile> profiles) {
-        var overrides = new HashMap<String, String>();
-        // Both existing realizers parse decimal MiB values, even for multi-GiB reservations.
-        profiles.forEach((id, profile) -> overrides.put(id.toString(),
-                "ResourceProfile{cpuCores=" + profile.getCpuCores().getValue()
-                        + ", taskHeapMemory=" + overrideMemory(profile.getTaskHeapMemory())
-                        + ", taskOffHeapMemory=" + overrideMemory(profile.getTaskOffHeapMemory())
-                        + ", managedMemory=" + overrideMemory(profile.getManagedMemory())
-                        + ", networkMemory=" + overrideMemory(profile.getNetworkMemory()) + "}"));
-        return overrides;
+        return Optional.of(overrides);
     }
 
     private static boolean corroboratesManagedBudget(
@@ -499,10 +716,6 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             }
         }
         return true;
-    }
-
-    private static String overrideMemory(MemorySize size) {
-        return size.getMebiBytes() + ".000mb (" + size.getBytes() + " bytes)";
     }
 
     @VisibleForTesting
@@ -544,14 +757,17 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     }
 
     private boolean resolveA4sManagedMemory(
-            Context context, EvaluatedMetrics evaluated, Map<JobVertexID, Decision> decisions)
-            throws InterruptedException {
+            Context context, EvaluatedMetrics evaluated, Map<JobVertexID, Decision> decisions,
+            Set<JobVertexID> frozen, Map<JobVertexID, ResourceProfile> observedProfiles) {
         var conf = context.getConfiguration();
         double ratio = writeBufferRatio(conf);
         var cacheVertices = new HashSet<JobVertexID>();
         for (var entry : evaluated.getVertexMetrics().entrySet()) {
             var id = entry.getKey();
             var observations = evaluated.getCacheObservations().get(id);
+            if (frozen.contains(id)) {
+                continue;
+            }
             if (configuredFloor(conf, id) != null
                     || evaluated.getMemoryParallelismCurves().containsKey(id)
                     || evaluated.getCacheCostFailures().containsKey(id)
@@ -560,22 +776,21 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 cacheVertices.add(id);
             }
         }
-        var requirements = cacheVertices.stream().anyMatch(id -> configuredFloor(conf, id) == null)
-                        && hasManagedRocksDb(conf, ratio)
-                ? readCurrentRequirements(context) : Optional.<JustinResourceRequirements>empty();
-
         long nowMillis = System.currentTimeMillis();
         double baseMiB = conf.get(A4S_MEMORY_BASE_MB);
         for (var entry : evaluated.getVertexMetrics().entrySet()) {
             var id = entry.getKey();
+            if (frozen.contains(id)) {
+                continue;
+            }
             var point = decisions.get(id);
             boolean cacheRequired = cacheVertices.contains(id);
             Double proposalMiB = point == null && cacheRequired
                     ? null : baseMiB + (point == null ? 0 : point.getMemoryMB());
             Long trustedManagedBytes = null;
-            if (cacheRequired && requirements.isPresent()) {
+            if (cacheRequired && configuredFloor(conf, id) == null) {
                 int current = (int) entry.getValue().get(PARALLELISM).getCurrent();
-                var profile = currentResourceProfile(requirements.get(), id, current);
+                var profile = observedProfiles.get(id);
                 if (profile != null && corroboratesManagedBudget(
                         context.getJobID(), id, current, profile.getManagedMemory().getBytes(),
                         ratio, evaluated.getCacheObservations().get(id), nowMillis)) {
@@ -730,42 +945,21 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     }
 
     private boolean managedMemoryWouldExceedResources(
-            Context context, Configuration conf, EvaluatedMetrics evaluated,
-            Map<JobVertexID, ScalingSummary> summaries, Map<JobVertexID, Decision> placement) {
-        var evaluation = evaluated.getCacheEvaluation();
+            Context context, Configuration conf, EvaluatedMetrics evaluated, FinalScalingAction action) {
         long perManagerBytes = configuredManagedMemoryLimit(conf, context);
         long remainingJobBytes = conf.getOptional(MEMORY_QUOTA)
                 .map(MemorySize::getBytes).orElse(Long.MAX_VALUE);
-        for (var entry : evaluation.getManagedMemoryDecisions().entrySet()) {
-            var id = entry.getKey();
-            long perTaskBytes = entry.getValue().getFinalManagedBytes();
-            var point = placement.get(id);
-            var summary = summaries.get(id);
-            int parallelism = point != null ? point.getParallelism()
-                    : summary != null ? summary.getNewParallelism()
-                    : (int) evaluated.getVertexMetrics().get(id).get(PARALLELISM).getCurrent();
+        for (var vertex : action.getVertices().values()) {
+            long perTaskBytes = vertex.getProfile().getManagedMemory().getBytes();
+            int parallelism = vertex.getParallelism();
             if (perTaskBytes > perManagerBytes
                     || (perTaskBytes > 0 && parallelism > remainingJobBytes / perTaskBytes)) {
-                evaluation.setHoldReason(Reason.MEMORY_BUDGET_INFEASIBLE);
+                evaluated.getCacheEvaluation().setHoldReason(Reason.MEMORY_BUDGET_INFEASIBLE);
                 return true;
             }
             remainingJobBytes -= parallelism * perTaskBytes;
         }
         return false;
-    }
-
-    private void applyA4sDecisions(
-            ScalingConfigurations.ScalingConfiguration scaling,
-            Map<JobVertexID, Decision> decisions,
-            Map<JobVertexID, ManagedMemoryDecision> memoryDecisions) {
-        scaling.getScaling().forEach((id, information) -> {
-            var decision = decisions.get(id);
-            if (decision != null) {
-                information.setParallelism(decision.getParallelism());
-            }
-            information.setManagedMemoryMB(
-                    memoryDecisions.get(id).getFinalManagedBytes() / (double) BYTES_PER_MIB);
-        });
     }
 
     private void updateRecommendedParallelism(

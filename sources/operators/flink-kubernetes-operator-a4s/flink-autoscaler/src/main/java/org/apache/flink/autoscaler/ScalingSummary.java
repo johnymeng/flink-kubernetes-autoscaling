@@ -42,6 +42,8 @@ public class ScalingSummary {
     private ResourceProfile newResourceProfile;
 
     private Map<ScalingMetric, EvaluatedScalingMetric> metrics;
+    private String decisionId;
+    private String requestedResourceProfile;
 
     public ScalingSummary(
             int currentParallelism,

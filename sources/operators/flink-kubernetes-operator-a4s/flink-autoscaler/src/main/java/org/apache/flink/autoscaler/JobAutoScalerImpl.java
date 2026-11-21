@@ -107,6 +107,7 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                         && ctx.getConfiguration().get(AutoScalerOptions.A4S_ENABLED);
         boolean applyOverrides = !strictCacheObservations;
         CacheAction action = CacheAction.POLICY_HOLD;
+        FinalScalingAction finalRequest = null;
         boolean enabled = ctx.getConfiguration().getBoolean(AUTOSCALER_ENABLED);
         try {
             if (!enabled) {
@@ -123,6 +124,10 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             }
 
             var evaluatedAction = runScalingLogic(ctx, autoscalerMetrics, strictCacheObservations);
+            if (strictCacheObservations) {
+                var evaluated = lastEvaluatedMetrics.get(ctx.getJobKey());
+                finalRequest = evaluated == null ? null : evaluated.getCacheEvaluation().getFinalAction();
+            }
             stateStore.flush(ctx);
             action = evaluatedAction;
             applyOverrides |= action == CacheAction.POLICY_REQUEST
@@ -140,7 +145,13 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             onError(ctx, autoscalerMetrics, e);
         } finally {
             try {
-                if (applyOverrides) {
+                if (strictCacheObservations) {
+                    if (applyOverrides && finalRequest != null && finalRequest.getMode() == action) {
+                        realizeFinalAction(ctx, finalRequest);
+                    } else if (enabled) {
+                        scalingRealizer.preserveAppliedResourceOverrides(ctx);
+                    }
+                } else if (applyOverrides) {
                     if (ctx.getConfiguration().getBoolean(JUSTIN_ENABLED)) {
                         applyResourceProfileOverrides(ctx);
                     } else {
@@ -226,6 +237,26 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         LOG.debug("Applying parallelism overrides: {}, {}", parallelismOverrides, resourceProfileOverrides);
 
         scalingRealizer.realizeParallelismOverrides(ctx, parallelismOverrides, resourceProfileOverrides);
+    }
+
+    private void realizeFinalAction(Context ctx, FinalScalingAction action) throws Exception {
+        scalingRealizer.realizeParallelismOverrides(
+                ctx, action.getParallelismOverrides(), action.getResourceProfileOverrides());
+        if (action.getMode() != CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES
+                && ctx.getConfiguration().get(AutoScalerOptions.MEMORY_TUNING_ENABLED)) {
+            scalingRealizer.realizeConfigOverrides(ctx, action.configChanges());
+        }
+
+        var tracking = stateStore.getScalingTracking(ctx);
+        var requested = tracking.getScalingRecords().get(action.getRequestedAt());
+        if (requested != null && action.getDecisionId().equals(requested.getDecisionId())
+                && !Boolean.TRUE.equals(requested.getRealizerReturned())) {
+            requested.setRealizerReturned(true);
+            stateStore.storeScalingTracking(ctx, tracking);
+            stateStore.flush(ctx);
+        }
+        LOG.debug("A4S realizer returned job={} decisionId={} appliedOverrides=unavailable",
+                ctx.getJobID(), action.getDecisionId());
     }
 
     @VisibleForTesting
@@ -346,9 +377,10 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
             parallelismChanged = scalingExecutor.scaleResource(
                     ctx, evaluatedMetrics, scalingHistory, scalingTracking, now, jobTopology,
                     delayedScaleDown);
-            action = parallelismChanged ? CacheAction.POLICY_REQUEST
-                    : cacheDecision.getHoldReason() != null
-                            ? CacheAction.POLICY_HOLD : CacheAction.POLICY_NO_CHANGE;
+            action = cacheDecision.getAction();
+            if (action == null) {
+                action = parallelismChanged ? CacheAction.POLICY_REQUEST : CacheAction.POLICY_NO_CHANGE;
+            }
         }
 
         if (delayedScaleDown.isUpdated()) {
@@ -436,12 +468,14 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         }
         LOG.info("A4S cache decision job={} evaluationId={} action={} cachePlacementEnabled={} holdReason={} "
                         + "observationHolds={} managedMemoryDecisions={} requestedParallelismOverrides={} "
-                        + "requestedResourceProfileOverrides={} appliedOverrides=unavailable",
+                        + "requestedResourceProfileOverrides={} requestedDecisionId={} "
+                        + "appliedOverrides=unavailable",
                 ctx.getJobID(), decision.getId(), action, decision.isCachePlacementEnabled(),
                 decision.getHoldReason(),
                 decision.getObservationHolds(), decision.getManagedMemoryDecisions(),
                 decision.getRequestedParallelismOverrides(),
-                decision.getRequestedResourceProfileOverrides());
+                decision.getRequestedResourceProfileOverrides(),
+                decision.getFinalAction() == null ? null : decision.getFinalAction().getDecisionId());
         decision.getObservationHolds().forEach((vertex, status) ->
                 LOG.info("A4S hold job={} vertex={} reason={} evaluationId={}",
                         ctx.getJobID(), vertex, status, decision.getId()));

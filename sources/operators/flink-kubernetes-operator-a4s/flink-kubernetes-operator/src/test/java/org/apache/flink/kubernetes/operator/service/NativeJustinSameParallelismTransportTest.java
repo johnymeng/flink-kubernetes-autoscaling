@@ -18,6 +18,7 @@
 package org.apache.flink.kubernetes.operator.service;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
 import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.client.program.rest.RestClusterClient;
@@ -28,6 +29,7 @@ import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.autoscaler.KubernetesScalingRealizer;
 import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
+import org.apache.flink.kubernetes.operator.exception.ReconciliationException;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -42,6 +44,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
@@ -66,7 +69,7 @@ class NativeJustinSameParallelismTransportTest {
     }
 
     @Test
-    void identicalNumericRequirementsDoNotIssueASecondRequest() {
+    void identicalNumericRequirementsDoNotIssueASecondRequest() throws Exception {
         assertTrue(updatesForSameParallelism(192L << 20).isEmpty());
     }
 
@@ -79,12 +82,23 @@ class NativeJustinSameParallelismTransportTest {
         assertEquals(234881061L, profile.getManagedMemory().getBytes());
     }
 
+    @Test
+    void profileOnlyRejectionCannotSignalRegularUpgradeFallback() {
+        assertThrows(ReconciliationException.class, () -> updatesForSameParallelism(224L << 20, true));
+    }
+
+    private static List<JustinResourceRequirementsBody> updatesForSameParallelism(long requestedManaged)
+            throws Exception {
+        return updatesForSameParallelism(requestedManaged, false);
+    }
+
     @SuppressWarnings("unchecked")
-    private static List<JustinResourceRequirementsBody> updatesForSameParallelism(long requestedManaged) {
+    private static List<JustinResourceRequirementsBody> updatesForSameParallelism(
+            long requestedManaged, boolean reject) throws Exception {
         var vertex = new JobVertexID();
         var unaffected = new JobVertexID();
         var configured = new Configuration();
-        var requested = new Configuration();
+        var requested = new Configuration().set(AutoScalerOptions.JUSTIN_ENABLED, true);
         var parallelism = Map.of(vertex.toHexString(), "2");
         var before = ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(192).build();
         var allRequirements = Map.of(
@@ -108,7 +122,9 @@ class NativeJustinSameParallelismTransportTest {
         List<JustinResourceRequirementsBody> updates = new ArrayList<>();
         doAnswer(call -> {
             updates.add(call.getArgument(2));
-            return CompletableFuture.completedFuture(EmptyResponseBody.getInstance());
+            return reject
+                    ? CompletableFuture.failedFuture(new IllegalStateException("fixture rejection"))
+                    : CompletableFuture.completedFuture(EmptyResponseBody.getInstance());
         }).when(client).sendRequest(any(), any(), any());
         var operatorConfig = FlinkOperatorConfiguration.fromConfiguration(new Configuration());
         var service = new NativeFlinkService(null, null, null, operatorConfig, mock(EventRecorder.class)) {
@@ -124,7 +140,7 @@ class NativeJustinSameParallelismTransportTest {
             }
         };
 
-        assertTrue(service.justin(context, requested));
+        assertTrue(service.scale(context, requested));
         return updates;
     }
 

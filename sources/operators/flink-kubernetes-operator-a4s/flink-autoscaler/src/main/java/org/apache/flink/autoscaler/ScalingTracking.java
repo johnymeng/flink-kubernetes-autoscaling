@@ -36,6 +36,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.SortedMap;
 import java.util.TreeMap;
@@ -88,12 +89,27 @@ public class ScalingTracking {
                             var value = entry.getValue();
                             var scalingTimestamp = entry.getKey();
                             if (value.getRestartDuration() == null) {
-                                var targetParallelism =
-                                        getTargetParallelismOfScaledVertices(
-                                                scalingTimestamp, scalingHistory);
+                                if (value.getDecisionId() != null
+                                        && (!Boolean.TRUE.equals(value.getRealizerReturned())
+                                                || value.getRequestedParallelism() == null
+                                                || value.getRequestedParallelism().isEmpty()
+                                                || !jobRunningTs.isAfter(scalingTimestamp)
+                                                || Objects.equals(
+                                                        value.getRequestedParallelism(),
+                                                        value.getStartingParallelism()))) {
+                                    return false;
+                                }
+                                var targetParallelism = value.getDecisionId() == null
+                                        ? getTargetParallelismOfScaledVertices(scalingTimestamp, scalingHistory)
+                                        : value.getRequestedParallelism().entrySet().stream().collect(
+                                                Collectors.toMap(
+                                                        item -> JobVertexID.fromHexString(item.getKey()),
+                                                        item -> Integer.parseInt(item.getValue())));
 
-                                if (targetParallelismMatchesActual(
-                                        targetParallelism, jobTopology.getVertexInfos())) {
+                                var actualVertices = jobTopology.getVertexInfos();
+                                if ((value.getDecisionId() == null
+                                                || targetParallelism.keySet().equals(actualVertices.keySet()))
+                                        && targetParallelismMatchesActual(targetParallelism, actualVertices)) {
                                     value.setRestartDuration(
                                             Duration.between(scalingTimestamp, jobRunningTs));
                                     LOG.debug(

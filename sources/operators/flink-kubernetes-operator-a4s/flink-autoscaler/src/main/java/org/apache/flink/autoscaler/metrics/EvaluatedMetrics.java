@@ -22,6 +22,7 @@ import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.autoscaler.a4s.OnlineCacheCost;
 import org.apache.flink.autoscaler.a4s.QuickMrcCostProjection;
 import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.autoscaler.FinalScalingAction;
 import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -123,6 +124,7 @@ public class EvaluatedMetrics {
                 new LinkedHashMap<>();
         private boolean cachePlacementEnabled;
         @Nullable private CacheAction action;
+        @Nullable private FinalScalingAction finalAction;
         @Nullable private OnlineCacheCost.Reason holdReason;
         @Nullable private Map<String, String> requestedParallelismOverrides;
         @Nullable private Map<String, String> requestedResourceProfileOverrides;

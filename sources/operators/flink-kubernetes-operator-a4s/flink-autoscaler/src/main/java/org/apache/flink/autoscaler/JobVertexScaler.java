@@ -303,8 +303,11 @@ public class JobVertexScaler<KEY, Context extends JobAutoScalerContext<KEY>> {
             ScalingSummary lastSummary) {
 
         double lastProcRate = lastSummary.getMetrics().get(TRUE_PROCESSING_RATE).getAverage();
-        double lastExpectedProcRate =
-                lastSummary.getMetrics().get(EXPECTED_PROCESSING_RATE).getCurrent();
+        var expected = lastSummary.getMetrics().get(EXPECTED_PROCESSING_RATE);
+        if (expected == null || !Double.isFinite(expected.getCurrent())) {
+            return false;
+        }
+        double lastExpectedProcRate = expected.getCurrent();
         var currentProcRate = evaluatedMetrics.get(TRUE_PROCESSING_RATE).getAverage();
 
         // To judge the effectiveness of the scale up operation we compute how much of the expected
