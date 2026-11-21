@@ -59,8 +59,12 @@ class JustinResourceRequirementsSerializationTest {
                 .setTaskHeapMemory(new MemorySize(142553906))
                 .setManagedMemoryMB(192)
                 .setNetworkMemory(new MemorySize(45665485)).build();
+        ResourceProfile legacyFallback = ResourceProfile.newBuilder().setCpuCores(1)
+                .setTaskHeapMemory(new MemorySize(140509184))
+                .setManagedMemory(new MemorySize(165675008))
+                .setNetworkMemory(new MemorySize(40894464)).build();
         JustinResourceRequirements request = JustinResourceRequirements.newBuilder()
-                .setParallelismForJobVertex(vertex, 1, 1, ResourceProfile.UNKNOWN).build();
+                .setParallelismForJobVertex(vertex, 1, 1, legacyFallback).build();
         AppliedSlotSnapshot applied = new AppliedSlotSnapshot(17L, Collections.singletonList(
                 new AppliedSlotSnapshot.Task(vertex.toHexString(), 0, "attempt", "worker",
                         "00000000000000000000000000000001", physical)));
@@ -72,7 +76,7 @@ class JustinResourceRequirementsSerializationTest {
 
         assertThat(restored.asJobResourceRequirements().get().getAppliedSlots()).isNull();
         JustinResourceRequirements observed = restored.asObservedRequirements().get();
-        assertThat(observed.getResourceProfile(vertex)).isEqualTo(ResourceProfile.UNKNOWN);
+        assertThat(observed.getResourceProfile(vertex)).isEqualTo(legacyFallback);
         assertThat(observed.getAppliedSlots().capturedAtMillis).isEqualTo(17L);
         assertThat(observed.getAppliedSlots().tasks.get(0).profile).isEqualTo(physical);
         assertThat(observed.getAppliedSlots().tasks.get(0).attempt).isEqualTo("attempt");

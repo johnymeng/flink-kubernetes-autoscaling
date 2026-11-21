@@ -87,6 +87,23 @@ class NativeJustinSameParallelismTransportTest {
     }
 
     @Test
+    void resourceRealizerReadsLegacyAndObservedGetResponsesWithoutEchoingObservedSlots() throws Exception {
+        var id = new JobVertexID();
+        var profile = NativeFlinkService.parseResourceProfile(encoded((224L << 20) + 37));
+        var requirements = new JustinVertexResourceRequirements(
+                new JustinVertexResourceRequirements.Parallelism(1, 2), profile);
+        var mapper = RestMapperUtils.getStrictObjectMapper();
+        var body = new JustinResourceRequirementsBody(new JustinResourceRequirements(Map.of(id, requirements)));
+        var getResponse = mapper.createObjectNode();
+        getResponse.setAll(mapper.valueToTree(body));
+        getResponse.putObject("appliedSlots").put("capturedAtMillis", 17L).putArray("tasks");
+
+        assertEquals(body, mapper.treeToValue(getResponse, JustinResourceRequirementsBody.class));
+        assertEquals(body, mapper.treeToValue(mapper.valueToTree(body), JustinResourceRequirementsBody.class));
+        assertTrue(!mapper.valueToTree(body).has("appliedSlots"));
+    }
+
+    @Test
     void identicalNumericRequirementsDoNotIssueASecondRequest() throws Exception {
         assertTrue(updatesForSameParallelism(192L << 20).isEmpty());
     }
