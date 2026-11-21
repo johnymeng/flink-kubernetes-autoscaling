@@ -36,6 +36,7 @@ import org.apache.flink.autoscaler.metrics.MetricAggregator;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.utils.AutoScalerUtils;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SCacheCostSample;
@@ -161,15 +162,58 @@ public class ScalingMetricEvaluatorTest {
     }
 
     @Test
+    void fixedCacheSizingUsesThroughputHeadroomAndCatchUp() {
+        var vertex = new JobVertexID();
+        var history = cacheCostHistory(vertex);
+        history.getMetricHistory().values().forEach(snapshot -> {
+            var metrics = new HashMap<>(snapshot.getVertexMetrics().get(vertex));
+            metrics.put(ScalingMetric.LAG, 600.0);
+            snapshot.setVertexMetrics(Map.of(vertex, metrics));
+        });
+        var config = new Configuration()
+                .set(TARGET_UTILIZATION, 0.5)
+                .set(CATCH_UP_DURATION, Duration.ofSeconds(60));
+        var restartTime = Duration.ofSeconds(6);
+        var result = evaluator.evaluate(config, history, restartTime);
+        var throughput = AutoScalerUtils.getRequiredProcessingCapacity(
+                result.getVertexMetrics().get(vertex), config, restartTime);
+        assertEquals(2110.0, throughput);
+        assertEquals(throughput,
+                result.getMemoryParallelismCurves().get(vertex).getTargetThroughput());
+        var decision = result.getCacheEvaluation().getVertices().get(vertex);
+        assertEquals(throughput, decision.getDemandRecordsPerSecond().doubleValue());
+    }
+
+    @Test
+    void fixedAndOnlineCacheSizingUseTheSameEvaluatedCapacity() {
+        var vertex = new JobVertexID();
+        var history = compatibleQuickMrcHistory(vertex);
+        var config = new Configuration().set(TARGET_UTILIZATION, 0.5);
+        var fixed = evaluator.evaluate(config, history, Duration.ZERO);
+        config.set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var online = evaluator.evaluate(config, history, Duration.ZERO);
+        assertEquals(CacheMode.ONLINE_QUALIFIED,
+                online.getCacheEvaluation().getVertices().get(vertex).getMode());
+        for (var result : List.of(fixed, online)) {
+            var metrics = result.getVertexMetrics().get(vertex);
+            assertEquals(2000.0, metrics.get(ScalingMetric.REQUIRED_PROCESSING_CAPACITY).getCurrent());
+            assertEquals(2000.0,
+                    result.getMemoryParallelismCurves().get(vertex).getTargetThroughput());
+        }
+    }
+
+    @Test
     void usesCalibratedCostsForTheConfiguredVertex() {
         var vertex = new JobVertexID();
         var history = cacheCostHistory(vertex);
-        var baseline = evaluator.evaluate(new Configuration(), history, Duration.ZERO);
+        var baseline = evaluator.evaluate(
+                new Configuration().set(TARGET_UTILIZATION, 1.0), history, Duration.ZERO);
         var config =
                 Configuration.fromMap(
                         Map.of(
                                 "job.autoscaler.a4s.calibrated-cache-costs",
-                                vertex.toHexString() + ":0.0015/0.001"));
+                                vertex.toHexString() + ":0.0015/0.001"))
+                        .set(TARGET_UTILIZATION, 1.0);
         var calibrated = evaluator.evaluate(config, history, Duration.ZERO);
 
         var legacyCurve = baseline.getMemoryParallelismCurves().get(vertex);
@@ -663,6 +707,7 @@ public class ScalingMetricEvaluatorTest {
         var conf = new Configuration();
 
         conf.set(CATCH_UP_DURATION, Duration.ofSeconds(2));
+        conf.set(TARGET_UTILIZATION, 0.5);
         var evaluatedMetrics =
                 evaluator
                         .evaluate(
@@ -695,6 +740,10 @@ public class ScalingMetricEvaluatorTest {
                 EvaluatedScalingMetric.of(1000),
                 evaluatedMetrics.get(source).get(ScalingMetric.LAG));
         assertFalse(evaluatedMetrics.get(sink).containsKey(ScalingMetric.LAG));
+        assertEquals(800.0, evaluatedMetrics.get(source)
+                .get(ScalingMetric.REQUIRED_PROCESSING_CAPACITY).getCurrent());
+        assertEquals(1600.0, evaluatedMetrics.get(sink)
+                .get(ScalingMetric.REQUIRED_PROCESSING_CAPACITY).getCurrent());
 
         conf.set(CATCH_UP_DURATION, Duration.ofSeconds(1));
         evaluatedMetrics =

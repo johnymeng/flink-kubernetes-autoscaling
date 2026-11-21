@@ -736,8 +736,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 || !Double.isFinite(catchUp.getCurrent()) || catchUp.getCurrent() < 0) {
             return false;
         }
-        double demand = AutoScalerUtils.getTargetProcessingCapacity(
-                metrics, conf, conf.get(TARGET_UTILIZATION), true, restartTime);
+        double demand = AutoScalerUtils.getRequiredProcessingCapacity(metrics, conf, restartTime);
         return Double.isFinite(demand) && demand > 0;
     }
 

@@ -94,6 +94,24 @@ public class JobVertexScalerTest {
         restartTime = conf.get(AutoScalerOptions.RESTART_TIME);
     }
 
+    @Test
+    void usesTheEvaluatedRequiredCapacityWhenAvailable() {
+        conf.set(AutoScalerOptions.TARGET_UTILIZATION, 1.0);
+        var metrics = evaluated(10, 100, 100);
+        metrics.put(ScalingMetric.REQUIRED_PROCESSING_CAPACITY, EvaluatedScalingMetric.of(200));
+
+        assertEquals(
+                ParallelismChange.build(20),
+                vertexScaler.computeScaleTargetParallelism(
+                        context,
+                        vertex,
+                        NOT_ADJUST_INPUTS,
+                        metrics,
+                        Collections.emptySortedMap(),
+                        restartTime,
+                        new DelayedScaleDown()));
+    }
+
     @ParameterizedTest
     @MethodSource("adjustmentInputsProvider")
     public void testParallelismScaling(Collection<ShipStrategy> inputShipStrategies) {

@@ -39,6 +39,9 @@ public enum ScalingMetric {
     /** Target processing rate of operators as derived from source inputs (records/sec). */
     TARGET_DATA_RATE(true),
 
+    /** Required processing capacity for this evaluation, including restart (records/sec). */
+    REQUIRED_PROCESSING_CAPACITY(false),
+
     /** Target processing rate of operators as derived from backlog (records/sec). */
     CATCH_UP_DATA_RATE(false),
 

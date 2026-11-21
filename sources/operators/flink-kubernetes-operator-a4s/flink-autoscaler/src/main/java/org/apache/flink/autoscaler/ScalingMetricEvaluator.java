@@ -109,19 +109,19 @@ public class ScalingMetricEvaluator {
         boolean processingBacklog = isProcessingBacklog(topology, metricsHistory, conf);
 
         for (var vertex : topology.getVerticesInTopologicalOrder()) {
-            scalingOutput.put(
-                    vertex,
+            var metrics =
                     evaluateMetrics(
-                            conf,
-                            scalingOutput,
-                            metricsHistory,
-                            topology,
-                            vertex,
-                            processingBacklog,
-                            restartTime));
+                            conf, scalingOutput, metricsHistory, topology, vertex, processingBacklog,
+                            restartTime);
+            var budget = AutoScalerUtils.calculateCapacityBudget(
+                    metrics, conf, conf.get(TARGET_UTILIZATION), true, restartTime);
+            double requiredCapacityRecordsPerSecond = budget.getRequiredRecordsPerSecond();
+            metrics.put(REQUIRED_PROCESSING_CAPACITY,
+                    EvaluatedScalingMetric.of(requiredCapacityRecordsPerSecond));
+            scalingOutput.put(vertex, metrics);
+            LOG.debug("A4S evaluationId={} vertex={} capacityBudget={}",
+                    result.getCacheEvaluation().getId(), vertex, budget);
 
-            // This relies on target data rate first being calculated       
-            LOG.debug("A4S: Evaluating metrics for vertex {}", vertex);
             MissRateCurve missRateCurve = collectedMissRateCurves.get(vertex);
             var batch = cacheObservation(latestCollectedMetrics, vertex);
             int parallelism = topology.get(vertex).getParallelism();
@@ -141,7 +141,8 @@ public class ScalingMetricEvaluator {
                                     cacheCostSamples(latestCollectedMetrics, vertex)),
                             null, null, status == CacheObservation.Status.AGGREGATE_RATE_SKEW
                                     ? OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED
-                                    : OnlineCacheCost.Reason.MISSING_OBSERVATIONS, null, null, null,
+                                    : OnlineCacheCost.Reason.MISSING_OBSERVATIONS,
+                            finite(requiredCapacityRecordsPerSecond), null, null,
                             null, null, null));
                 }
                 if (observationStatus == CacheObservation.Status.AGGREGATE_RATE_SKEW) {
@@ -152,11 +153,6 @@ public class ScalingMetricEvaluator {
             var points = hasAggregateCurve ? missRateCurve.getPoints() : List.<MissRateCurve.Point>of();
             Long observedMinBytes = hasAggregateCurve ? points.get(0).getCacheSizeBytes() : null;
             Long observedMaxBytes = hasAggregateCurve ? points.get(points.size() - 1).getCacheSizeBytes() : null;
-            var metrics = scalingOutput.get(vertex);
-            double targetRate = strictA4s || onlineCacheCosts
-                    ? AutoScalerUtils.getTargetProcessingCapacity(
-                            metrics, conf, conf.get(TARGET_UTILIZATION), true, restartTime)
-                    : metrics.get(TARGET_DATA_RATE).getAverage();
             String calibratedCosts = calibratedCacheCosts.get(vertex.toHexString());
             CacheMode configuredPolicy =
                     calibratedCosts == null ? CacheMode.LEGACY_FIXED : CacheMode.OFFLINE_CALIBRATED;
@@ -170,11 +166,13 @@ public class ScalingMetricEvaluator {
                 QuickMrcCostProjection.Recommendation recommendation = null;
                 if (reason == OnlineCacheCost.Reason.QUALIFIED) {
                     projection = QuickMrcCostProjection.project(
-                            fit.getFit(), fit.getAlignedCurve(), targetRate, fixedBaseline);
+                            fit.getFit(), fit.getAlignedCurve(),
+                            requiredCapacityRecordsPerSecond, fixedBaseline);
                     recommendation = projection.getRecommendation();
                     if (recommendation == null) {
                         reason = !shadow && QuickMrcCostProjection
-                                        .cannotMeetDemandAtCurrentParallelism(fit.getFit(), targetRate)
+                                        .cannotMeetDemandAtCurrentParallelism(
+                                                fit.getFit(), requiredCapacityRecordsPerSecond)
                                 ? OnlineCacheCost.Reason.INSUFFICIENT_CURRENT_PARALLELISM
                                 : OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED;
                     }
@@ -193,7 +191,7 @@ public class ScalingMetricEvaluator {
                 decisions.put(vertex, new CacheDecision(mode,
                         shadow ? (hasAggregateCurve ? configuredPolicy : null)
                                 : recommendation == null ? null : mode,
-                        observation, fitStart, fit, reason, finite(targetRate), observedMinBytes,
+                        observation, fitStart, fit, reason, finite(requiredCapacityRecordsPerSecond), observedMinBytes,
                         observedMaxBytes, projection,
                         shadow && configuredPolicy == CacheMode.LEGACY_FIXED ? fixedCosts : null,
                         fixedBaseline));
@@ -202,7 +200,8 @@ public class ScalingMetricEvaluator {
                         cacheCostFailures.put(vertex, reason);
                     } else {
                         memoryParallelismCurves.put(vertex,
-                                MemoryParallelismCurve.builder().targetThroughput(targetRate)
+                                MemoryParallelismCurve.builder()
+                                        .targetThroughput(requiredCapacityRecordsPerSecond)
                                         .addPoint(parallelism,
                                                 recommendation.getTotalNativeCacheBytes() / BYTES_PER_MIB)
                                         .build());
@@ -213,8 +212,9 @@ public class ScalingMetricEvaluator {
                 var observation = ObservationEvidence.capture(parallelism, observationStatus, batch,
                         cacheCostSamples(latestCollectedMetrics, vertex));
                 decisions.put(vertex, new CacheDecision(configuredPolicy, configuredPolicy,
-                        observation, null, null, null, finite(targetRate), observedMinBytes,
-                        observedMaxBytes, null, calibratedCosts == null ? fixedCosts : null, null));
+                        observation, null, null, null, finite(requiredCapacityRecordsPerSecond),
+                        observedMinBytes, observedMaxBytes, null,
+                        calibratedCosts == null ? fixedCosts : null, null));
             }
 
             if (!hasAggregateCurve) {
@@ -227,11 +227,14 @@ public class ScalingMetricEvaluator {
             int minParallelism = Math.max(1, Math.min(currentParallelism, vertexMinParallelism));
             int maxParallelism = Math.min(vertexInfo.getMaxParallelism(),
                     Math.max(currentParallelism, vertexMaxParallelism));
+            if (vertexInfo.getNumSourcePartitions() > 0) {
+                maxParallelism = Math.min(maxParallelism, vertexInfo.getNumSourcePartitions());
+            }
             MemoryParallelismCurve configuredCurve = calibratedCosts == null
                     ? MemoryParallelismCurve.fromMissRateCurve(
-                            targetRate, missLatencySec, hitLatencySec, minParallelism,
+                            requiredCapacityRecordsPerSecond, missLatencySec, hitLatencySec, minParallelism,
                             maxParallelism, missRateCurve)
-                    : calibratedCurve(vertex, calibratedCosts, targetRate, minParallelism,
+                    : calibratedCurve(vertex, calibratedCosts, requiredCapacityRecordsPerSecond, minParallelism,
                             maxParallelism, missRateCurve);
             if (configuredCurve == null || configuredCurve.getPoints().isEmpty()) {
                 cacheCostFailures.put(vertex, OnlineCacheCost.Reason.CAPACITY_UNSUPPORTED);

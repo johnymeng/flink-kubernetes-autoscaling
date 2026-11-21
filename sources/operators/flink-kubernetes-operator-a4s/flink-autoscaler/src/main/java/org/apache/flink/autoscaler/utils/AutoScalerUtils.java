@@ -23,6 +23,8 @@ import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
+import lombok.Value;
+
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -31,11 +33,36 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.TARGET_UTILIZATION;
 import static org.apache.flink.autoscaler.metrics.ScalingMetric.CATCH_UP_DATA_RATE;
+import static org.apache.flink.autoscaler.metrics.ScalingMetric.REQUIRED_PROCESSING_CAPACITY;
 import static org.apache.flink.autoscaler.metrics.ScalingMetric.TARGET_DATA_RATE;
 
 /** AutoScaler utilities. */
 public class AutoScalerUtils {
+
+    /** Terms of the ordinary throughput sizing budget, in records per second. */
+    @Value
+    public static class CapacityBudget {
+        double arrivalsRecordsPerSecond;
+        double atTargetUtilizationRecordsPerSecond;
+        double lagDrainRecordsPerSecond;
+        double restartBacklogRecordsPerSecond;
+        double requiredRecordsPerSecond;
+    }
+
+    public static double getRequiredProcessingCapacity(
+            Map<ScalingMetric, EvaluatedScalingMetric> evaluatedMetrics,
+            Configuration conf,
+            Duration restartTime) {
+        var budget = evaluatedMetrics.get(REQUIRED_PROCESSING_CAPACITY);
+        if (budget != null) {
+            return budget.getCurrent();
+        }
+        // Callers with metrics created outside the evaluator still use the ordinary formula.
+        return getTargetProcessingCapacity(
+                evaluatedMetrics, conf, conf.get(TARGET_UTILIZATION), true, restartTime);
+    }
 
     public static double getTargetProcessingCapacity(
             Map<ScalingMetric, EvaluatedScalingMetric> evaluatedMetrics,
@@ -43,36 +70,43 @@ public class AutoScalerUtils {
             double targetUtilization,
             boolean withRestart,
             Duration restartTime) {
+        return calculateCapacityBudget(
+                        evaluatedMetrics, conf, targetUtilization, withRestart, restartTime)
+                .getRequiredRecordsPerSecond();
+    }
 
-        // Target = Lag Catchup Rate + Restart Catchup Rate + Processing at utilization
-        // Target = LAG/CATCH_UP + INPUT_RATE*RESTART/CATCH_UP + INPUT_RATE/TARGET_UTIL
-
-        double lagCatchupTargetRate = evaluatedMetrics.get(CATCH_UP_DATA_RATE).getCurrent();
-        if (Double.isNaN(lagCatchupTargetRate)) {
-            return Double.NaN;
+    public static CapacityBudget calculateCapacityBudget(
+            Map<ScalingMetric, EvaluatedScalingMetric> evaluatedMetrics,
+            Configuration conf,
+            double targetUtilization,
+            boolean withRestart,
+            Duration restartTime) {
+        double lagDrain = evaluatedMetrics.get(CATCH_UP_DATA_RATE).getCurrent();
+        if (Double.isNaN(lagDrain)) {
+            return new CapacityBudget(Double.NaN, Double.NaN, lagDrain, Double.NaN, Double.NaN);
         }
 
-        double catchUpTargetSec = conf.get(AutoScalerOptions.CATCH_UP_DURATION).toSeconds();
-
-        targetUtilization = Math.max(0., targetUtilization);
-        targetUtilization = Math.min(1., targetUtilization);
-
-        double avgInputTargetRate = evaluatedMetrics.get(TARGET_DATA_RATE).getAverage();
-        if (Double.isNaN(avgInputTargetRate)) {
-            return Double.NaN;
+        double arrivals = evaluatedMetrics.get(TARGET_DATA_RATE).getAverage();
+        if (Double.isNaN(arrivals)) {
+            return new CapacityBudget(arrivals, Double.NaN, lagDrain, Double.NaN, Double.NaN);
         }
 
-        if (targetUtilization == 0) {
-            return Double.POSITIVE_INFINITY;
-        }
-
-        double restartCatchupRate =
-                !withRestart || catchUpTargetSec == 0
+        double catchUpSeconds = conf.get(AutoScalerOptions.CATCH_UP_DURATION).toSeconds();
+        targetUtilization = Math.min(1., Math.max(0., targetUtilization));
+        double restartBacklog =
+                !withRestart || catchUpSeconds == 0
                         ? 0
-                        : (avgInputTargetRate * restartTime.toSeconds()) / catchUpTargetSec;
-        double inputTargetAtUtilization = avgInputTargetRate / targetUtilization;
+                        : (arrivals * restartTime.toSeconds()) / catchUpSeconds;
+        if (targetUtilization == 0) {
+            return new CapacityBudget(
+                    arrivals, Double.POSITIVE_INFINITY, lagDrain, restartBacklog,
+                    Double.POSITIVE_INFINITY);
+        }
 
-        return Math.round(lagCatchupTargetRate + restartCatchupRate + inputTargetAtUtilization);
+        double atTargetUtilization = arrivals / targetUtilization;
+        double required = Math.round(lagDrain + restartBacklog + atTargetUtilization);
+        return new CapacityBudget(
+                arrivals, atTargetUtilization, lagDrain, restartBacklog, required);
     }
 
     /**
