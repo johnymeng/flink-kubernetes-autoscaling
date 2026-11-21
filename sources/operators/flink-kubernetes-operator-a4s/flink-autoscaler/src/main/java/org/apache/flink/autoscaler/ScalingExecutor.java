@@ -431,7 +431,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 long managedBytes = profile.getManagedMemory().getBytes();
                 long expectedCache = (long) ((3 - ratio) * managedBytes / 3);
                 var batch = observations.get(id);
-                if (managedBytes <= 0 || batch == null || batch.subtasks.size() != current
+                if (managedBytes <= 0 || batch == null || !CacheObservation.supportsVersion(batch.version)
+                        || batch.subtasks.size() != current
                         || batch.subtasks.stream().anyMatch(observation -> observation.window == null
                                 || observation.window.capacityBytes != expectedCache
                                 || !CacheObservation.isFresh(

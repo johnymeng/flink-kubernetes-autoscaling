@@ -67,6 +67,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -83,6 +84,9 @@ import static org.apache.flink.util.Preconditions.checkState;
 /** Metric collector using flink rest api. */
 public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerContext<KEY>> {
     private static final Logger LOG = LoggerFactory.getLogger(ScalingMetricCollector.class);
+    // Keep the added process-local endpoint arrays bounded per job as well as by the
+    // existing metrics window. This uses the existing 16 MiB vertex wire budget.
+    private static final long MAX_RETAINED_ENDPOINT_BYTES = 16L * 1024 * 1024;
 
     private final Map<KEY, Map<JobVertexID, Map<String, FlinkMetric>>> availableVertexMetricNames =
             new ConcurrentHashMap<>();
@@ -194,10 +198,11 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
             }
         }
         metricHistory.put(now, scalingMetrics);
+        boundEndpoints(metricHistory, MAX_RETAINED_ENDPOINT_BYTES);
 
         if (isStabilizing) {
             LOG.info("Stabilizing until {}", readable(stableTime));
-            stateStore.storeCollectedMetrics(ctx, metricHistory);
+            stateStore.storeCollectedMetrics(ctx, persistedHistory(metricHistory));
             return new CollectedMetricHistory(topology, Collections.emptySortedMap(), jobRunningTs);
         }
 
@@ -209,8 +214,49 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
             // Trim metrics outside the metric window from metrics history
             metricHistory.headMap(now.minus(metricWindowSize)).clear();
         }
-        stateStore.storeCollectedMetrics(ctx, metricHistory);
+        stateStore.storeCollectedMetrics(ctx, persistedHistory(metricHistory));
         return collectedMetrics;
+    }
+
+    static void boundEndpoints(SortedMap<Instant, CollectedMetrics> history, long remainingBytes) {
+        var snapshots = new java.util.ArrayList<>(history.values());
+        for (int i = snapshots.size() - 1; i >= 0; i--) {
+            var metrics = snapshots.get(i);
+            var batches = metrics.getCacheObservations();
+            if (batches == null) {
+                continue;
+            }
+            // Keep full vertex batches or remove their endpoints together.
+            var retained = new HashMap<JobVertexID, CacheObservationBatch>();
+            for (var entry : new TreeMap<>(batches).entrySet()) {
+                long bytes = entry.getValue().endpointBytes();
+                if (bytes <= remainingBytes) {
+                    remainingBytes -= bytes;
+                    retained.put(entry.getKey(), entry.getValue());
+                } else {
+                    retained.put(entry.getKey(), entry.getValue().withoutEndpoints());
+                }
+            }
+            metrics.setCacheObservations(retained);
+        }
+    }
+
+    static SortedMap<Instant, CollectedMetrics> persistedHistory(
+            SortedMap<Instant, CollectedMetrics> history) {
+        var result = new TreeMap<Instant, CollectedMetrics>();
+        history.forEach((time, metrics) -> {
+            var batches = metrics.getCacheObservations();
+            if (batches == null || batches.values().stream().noneMatch(batch -> batch.endpointBytes() > 0)) {
+                result.put(time, metrics);
+            } else {
+                var stripped = new HashMap<JobVertexID, CacheObservationBatch>();
+                batches.forEach((vertex, batch) -> stripped.put(vertex, batch.withoutEndpoints()));
+                result.put(time, new CollectedMetrics(
+                        metrics.getVertexMetrics(), metrics.getGlobalMetrics(), metrics.getMissRateCurves(),
+                        metrics.getCacheCostSamples(), stripped));
+            }
+        });
+        return result;
     }
 
     protected abstract Map<FlinkMetric, Metric> queryJmMetrics(Context ctx) throws Exception;

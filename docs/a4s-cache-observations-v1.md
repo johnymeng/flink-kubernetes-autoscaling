@@ -20,13 +20,16 @@ Its deterministic fixtures cover the same population and byte units.
    in bytes, process-local monotonic interval, wall time, and exact native interval counts.
    The histogram provides sampled reference counts, cold misses and rounded charge quanta.
    Its nominal coordinate range runs from one bin through the last emitted bin, inclusive.
+   An aligned v2 observation also carries a cumulative histogram and exact counts at the
+   native snapshot, its ownership generation and the paired ABI 3 task/DB timing read.
 4. Query `GET /jobs/<job>/vertices/<vertex>/a4s-metrics` using
    `get=cacheObservations,cacheCostSamples,cacheCostCompaction`. The current execution graph
    provides every expected running attempt. Match each response's `cacheObservations.subtasks`
    against job, vertex, subtask, attempt and `window.process/cacheId/epoch/sequence`. Inspect
    `status`, `expectedSubtasks`, `oldestAgeMillis` and `wireBytes` before reading `scaledMrc`.
    The sibling `scaledMrcCapacityAxis` labels versioned aggregate coordinates as
-   `NOMINAL_ROUNDED_4K`. Missing or unknown axes are unverified.
+   `NOMINAL_ROUNDED_4K`. Missing or unknown axes are unverified. Roster handling finishes
+   before the corresponding metric dumps update the store, even when roster discovery fails.
 5. The autoscaler stores the most recent batch, constituent observations, and independent timing
    samples in `CollectedMetrics`. Under Justin+A4S every unfinished vertex requires a complete
    observation unless explicitly exempted by its vertex ID in
@@ -90,13 +93,20 @@ Monotonic duration is local to each process. REST accepts 9–30 s windows with 
 skew at most 5 s and end age at most 30 s. The skew check assumes synchronized worker wall clocks.
 `IDLE`, `ABSENT`, `WARMUP`, `SHARED_CACHE`, `INCOMPLETE`, `COUNTER_RESET` and
 `CACHE_CHANGED` all withhold a curve. Unknown schema versions, unknown populations, mismatched
-attempts and incompatible bins are explicit invalid states. ABI-3 timing fields are carried on
-their existing separately selected path. Timing wire version 3 appends the process UUID and
-monotonic capture time to the existing ABI-3 counter sequence. The versioned REST selector
-exposes them as process and observedAtNanos while retaining timingAbi 3. They bind timing to the
-QuickMRC cache and allow elapsed windows within one process. Older timing payloads remain
-readable for diagnostics. A timing sample's presence alone does not establish a
-compatible MRC window or population.
+attempts and incompatible bins are explicit invalid states. ABI 3 keeps its existing sample
+classification and counter units. The aligned endpoint brackets the native, task and per-DB
+reads on the publisher's monotonic clock with a 100 ms acquisition limit. The REST receiver
+binds the timing to the selected attempt and checks it against the same endpoint's native
+identity and cumulative counters. Process-local monotonic clocks are never compared across
+TaskManagers.
+
+The operator differences compatible cumulative endpoints over the actual timing fit and validation
+intervals. A missing poll is acceptable when compatible endpoints bound the full interval. Fit and
+holdout are adjacent and share exactly one endpoint. A short, latest histogram and a longer
+timing fit do not establish coverage. Legacy timing and oversized observations that only carry
+a v1 interval remain readable as diagnostics. The 16 MiB per-job endpoint budget keeps or
+evicts a vertex population together. Endpoints are excluded from persisted history, so a
+restart needs fresh observations.
 
 The codec preserves small JSON and sends larger values as `a4s-gzip-v1:<base64>`, with an
 explicit omission sentinel. Encoded gauges fit the 65,535 modified-UTF byte ceiling. Decoding

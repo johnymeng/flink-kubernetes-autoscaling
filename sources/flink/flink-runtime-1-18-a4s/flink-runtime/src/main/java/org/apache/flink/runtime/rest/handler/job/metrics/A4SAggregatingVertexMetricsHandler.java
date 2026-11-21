@@ -185,6 +185,7 @@ public class A4SAggregatingVertexMetricsHandler
         // MetricStore views are backed by concurrent maps. Copy just the relevant gauge strings,
         // then decode and build curves without holding the global metric lock.
         Map<Integer, List<String>> observationGauges = new TreeMap<>();
+        java.util.Set<Integer> independentTiming = new java.util.HashSet<>();
         synchronized (store) {
             expected.forEach(
                     (subtask, attempt) -> {
@@ -206,6 +207,11 @@ public class A4SAggregatingVertexMetricsHandler
                         }
                         observationGauges.put(subtask, matching);
                         if (includeCacheCosts) {
+                            if (metrics.metrics.entrySet().stream().anyMatch(entry ->
+                                    entry.getKey().endsWith("." + A4SCacheCostSample.METRIC_NAME)
+                                            && !entry.getValue().isEmpty())) {
+                                independentTiming.add(subtask);
+                            }
                             A4SCacheCostSample sample = readCacheCostSample(
                                     subtask, metrics.metrics, now, true, true);
                             if (sample != null && sample.attempt.equals(expectedIds.get(subtask))) {
@@ -270,6 +276,36 @@ public class A4SAggregatingVertexMetricsHandler
                         ? A4SCacheObservationAggregator.aggregate(
                                 job, vertex, expectedIds, observations, now)
                         : new A4SCacheObservationAggregator.Result(transportStatus);
+        if (includeCacheCosts && observations.stream()
+                .anyMatch(observation -> observation.version == CacheObservation.ALIGNED_VERSION)) {
+            // Never mix independently collected legacy timings with paired boundaries.
+            samples.clear();
+            if (aggregated.status == Status.VALID && !independentTiming.isEmpty()) {
+                aggregated = new A4SCacheObservationAggregator.Result(Status.DUPLICATE);
+            }
+            if (aggregated.status == Status.VALID) {
+                for (CacheObservation observation : observations) {
+                    CacheObservation.Endpoint endpoint = observation.endpoint;
+                    if (endpoint == null) {
+                        aggregated = new A4SCacheObservationAggregator.Result(Status.INCOMPLETE);
+                        break;
+                    }
+                    if (!endpoint.withinAcquisitionBound()) {
+                        aggregated = new A4SCacheObservationAggregator.Result(Status.SKEWED);
+                        break;
+                    }
+                    A4SCacheCostSample timing = A4SCacheCostSample.fromEndpoint(observation, now);
+                    if (timing == null) {
+                        aggregated = new A4SCacheObservationAggregator.Result(Status.INCOMPATIBLE);
+                        break;
+                    }
+                    samples.add(timing);
+                }
+            }
+            if (aggregated.status != Status.VALID) {
+                samples.clear();
+            }
+        }
         if (aggregated.status != Status.VALID) {
             log.debug(
                     "A4S cache observations job={} vertex={} status={} coverage={}/{} ageMs={} wireBytes={}",

@@ -20,8 +20,11 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.a4s.core.CacheObservation;
 import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.autoscaler.a4s.A4S;
+import org.apache.flink.autoscaler.a4s.A4SAlignedCacheWindow;
+import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.autoscaler.a4s.OnlineCacheCost;
 import org.apache.flink.autoscaler.a4s.QuickMrcOnlineCacheCostTest;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
@@ -35,6 +38,7 @@ import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SCacheCostSample;
 
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +49,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.IntStream;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.CATCH_UP_DURATION;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.PREFER_TRACKED_RESTART_TIME;
@@ -189,6 +194,16 @@ public class ScalingMetricEvaluatorTest {
     }
 
     @Test
+    void legacyShortHistogramCannotQualifyLongTimingWindow() {
+        var vertex = new JobVertexID();
+        var history = cacheHistory(vertex, false);
+        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var result = evaluator.evaluate(config, history, Duration.ZERO);
+        assertFalse(result.getMemoryParallelismCurves().containsKey(vertex));
+        assertEquals(OnlineCacheCost.Reason.UNBOUND_TIMING, result.getCacheCostFailures().get(vertex));
+    }
+
+    @Test
     void usesAQualifiedQuickMrcFitOnlyAtTheMeasuredParallelism() {
         var vertex = new JobVertexID();
         var history = compatibleQuickMrcHistory(vertex);
@@ -207,6 +222,8 @@ public class ScalingMetricEvaluatorTest {
         assertEquals(8_192, decision.getRecommendation().getTotalNativeCacheBytes());
         assertEquals(60, decision.getFit().getAttemptedWindow().getStart().getEpochSecond());
         assertEquals(120, decision.getFit().getAttemptedWindow().getEnd().getEpochSecond());
+        assertEquals(60_000_000_000L,
+                decision.getFit().getAlignedCurve().subtasks.get(0).window.durationNanos());
         assertEquals(1, decision.getObservation().getReceivedSubtasks());
         assertEquals(3, decision.getObservation().getExpectedTimingAbi());
         assertEquals(3, decision.getObservation().getTimingEndpoints().get(0).getTimingAbi());
@@ -282,6 +299,8 @@ public class ScalingMetricEvaluatorTest {
         sample.setSampledMisses(
                 snapshots.get(Instant.ofEpochSecond(60)).getCacheCostSamples().get(vertex).get(0)
                         .getSampledMisses() + 63);
+        latest.setCacheObservations(Map.of(vertex, pair(
+                latest.getCacheObservations().get(vertex), latest.getCacheCostSamples().get(vertex))));
         var sparse = evaluator.evaluate(config, history, Duration.ZERO)
                 .getCacheEvaluation().getVertices().get(vertex);
         // The earlier 120-second candidate can fit. It has no independent prior window.
@@ -334,6 +353,10 @@ public class ScalingMetricEvaluatorTest {
     }
 
     private static CollectedMetricHistory compatibleQuickMrcHistory(JobVertexID vertex) {
+        return cacheHistory(vertex, true);
+    }
+
+    private static CollectedMetricHistory cacheHistory(JobVertexID vertex, boolean paired) {
         var history = cacheCostHistory(vertex);
         var snapshots = history.getMetricHistory();
         var curve = snapshots.get(snapshots.lastKey()).getMissRateCurves().get(vertex);
@@ -346,12 +369,129 @@ public class ScalingMetricEvaluatorTest {
                             ScalingMetric.LAG, 0.0,
                             ScalingMetric.LOAD, 0.8)),
                     Map.of(), Map.of(vertex, curve));
-            metrics.setCacheObservations(Map.of(vertex, QuickMrcOnlineCacheCostTest.batch(i, 0)));
-            metrics.setCacheCostSamples(Map.of(
-                    vertex, List.of(QuickMrcOnlineCacheCostTest.sample(i, 0, 0, 0))));
+            var samples = List.of(QuickMrcOnlineCacheCostTest.sample(i, 0, 0, 0));
+            var batch = QuickMrcOnlineCacheCostTest.batch(i, 0);
+            metrics.setCacheObservations(Map.of(vertex, paired ? pair(batch, samples) : batch));
+            metrics.setCacheCostSamples(Map.of(vertex, samples));
             snapshots.put(Instant.ofEpochSecond(60L * i), metrics);
         }
         return history;
+    }
+
+    private static CacheObservationBatch pair(CacheObservationBatch batch, List<CacheCostSample> samples) {
+        var rows = batch.subtasks.stream().map(observation -> {
+            var timing = samples.get(observation.subtask);
+            long scale = observation.window.sequence - 1;
+            long nativeNanos = timing.getObservedAtNanos();
+            var cumulative = new StackDistanceHistogram(
+                    new long[] {10 * scale, 40 * scale, 25 * scale}, 25 * scale, 1, 1, 4096);
+            String metric = new A4SCacheCostSample(
+                    timing.getSubtask(), timing.getAttempt(), timing.getCacheId(),
+                    timing.getCapacityBytes(), timing.getCacheEpoch(), timing.getLookups(),
+                    timing.getMisses(), timing.getCoveredHits(), timing.getCoveredMisses(),
+                    timing.getSampledHits(), timing.getSampledMisses(), timing.getHitNanos(),
+                    timing.getMissNanos(), timing.getRecordsIn(), timing.getBusyMillis(),
+                    timing.getObservedAtMillis(), timing.getTimingAbi(), timing.getCompactionHits(),
+                    timing.getCompactionMisses(), timing.getProcess(), timing.getObservedAtNanos())
+                    .toMetricString();
+            return new CacheObservation(
+                    CacheObservation.ALIGNED_VERSION, observation.job, observation.vertex,
+                    observation.subtask, observation.attempt, observation.status,
+                    observation.window, observation.histogram,
+                    new CacheObservation.Endpoint(2, nativeNanos - 1, nativeNanos, nativeNanos + 1,
+                            timing.getLookups(), timing.getMisses(), cumulative, metric));
+        }).collect(java.util.stream.Collectors.toList());
+        return new CacheObservationBatch(batch.version, batch.status, batch.expectedSubtasks,
+                batch.wireBytes, batch.oldestAgeMillis, rows);
+    }
+
+    @Test
+    void qualifiesAtTheNewParallelismOnlyAfterFreshCompatibleWindows() {
+        var vertex = new JobVertexID();
+        var config = new Configuration().set(AutoScalerOptions.A4S_ONLINE_CACHE_COSTS_ENABLED, true);
+        var previous = compatibleQuickMrcHistory(vertex);
+        var original = evaluator.evaluate(config, previous, Duration.ZERO);
+        assertTrue(original.getMemoryParallelismCurves().get(vertex)
+                .getMemoryMbForParallelism(1).isPresent());
+
+        var snapshots = previous.getMetricHistory();
+        var observed = new CollectedMetricHistory(new JobTopology(new VertexInfo(vertex, Map.of(), 4, 24)),
+                snapshots, Instant.ofEpochSecond(120));
+        var transition = evaluator.evaluate(config, observed, Duration.ZERO);
+        assertEquals(OnlineCacheCost.Reason.MISSING_TIMING, transition.getCacheCostFailures().get(vertex));
+        assertFalse(transition.getMemoryParallelismCurves().containsKey(vertex));
+
+        var curve = snapshots.get(snapshots.lastKey()).getMissRateCurves().get(vertex);
+        for (int poll = 2; poll <= 4; poll++) {
+            var current = new CollectedMetrics(
+                    Map.of(vertex, Map.of(
+                            ScalingMetric.NUM_RECORDS_IN, 60_000.0 * poll,
+                            ScalingMetric.NUM_RECORDS_OUT, 60_000.0 * poll,
+                            ScalingMetric.LAG, 0.0, ScalingMetric.LOAD, 0.8)),
+                    Map.of(), Map.of(vertex, curve));
+            int window = poll;
+            var samples = IntStream.range(0, 4)
+                    .mapToObj(i -> QuickMrcOnlineCacheCostTest.sample(window, 1, 0, i))
+                    .collect(java.util.stream.Collectors.toList());
+            var one = QuickMrcOnlineCacheCostTest.batch(poll, 1).subtasks.get(0);
+            var observations = samples.stream().map(sample -> new CacheObservation(
+                    one.version, one.job, one.vertex, sample.getSubtask(), sample.getAttempt(), one.status,
+                    new CacheObservation.Window(one.window.process, sample.getCacheId(), one.window.epoch,
+                            one.window.sequence, one.window.owners, one.window.population,
+                            one.window.chargePolicy, one.window.cachePolicy, one.window.samplingRate,
+                            one.window.capacityBytes, one.window.startNanos, one.window.endNanos,
+                            one.window.observedAtMillis, one.window.references, one.window.misses),
+                    one.histogram)).collect(java.util.stream.Collectors.toList());
+            current.setCacheCostSamples(Map.of(vertex, samples));
+            current.setCacheObservations(Map.of(vertex, pair(new CacheObservationBatch(
+                    CacheObservation.VERSION, CacheObservation.Status.VALID, 4, 256, 0, observations), samples)));
+            snapshots.put(Instant.ofEpochSecond(60L * poll), current);
+            var result = evaluator.evaluate(config, observed, Duration.ZERO);
+            if (poll < 4) {
+                assertFalse(result.getMemoryParallelismCurves().containsKey(vertex));
+            } else {
+                var p4 = result.getMemoryParallelismCurves().get(vertex);
+                assertTrue(p4.getMemoryMbForParallelism(4).isPresent());
+                assertTrue(p4.getMemoryMbForParallelism(1).isEmpty());
+                assertEquals(4, result.getCacheEvaluation().getVertices().get(vertex)
+                        .getFit().getFit().getIdentities().size());
+            }
+        }
+
+        var interrupted = new CollectedMetrics();
+        interrupted.setCacheObservations(Map.of(vertex, QuickMrcOnlineCacheCostTest.batch(2, 0)));
+        snapshots.put(Instant.ofEpochSecond(150), interrupted);
+        var invalid = ScalingMetricEvaluator.selectOnlineFit(snapshots, vertex, 4);
+        assertEquals(OnlineCacheCost.Reason.MISSING_HOLDOUT, invalid.getReason());
+        assertEquals(CacheObservation.Status.CACHE_CHANGED, invalid.getHoldout().getPriorObservationStatus());
+    }
+
+    @Test
+    void boundedEndpointsStayInMemoryOnlyAndMissingEndpointsHold() {
+        var vertex = new JobVertexID();
+        var history = compatibleQuickMrcHistory(vertex).getMetricHistory();
+        var first = history.get(history.firstKey());
+        var last = history.get(history.lastKey());
+        var firstBatch = first.getCacheObservations().get(vertex);
+        var lastBatch = last.getCacheObservations().get(vertex);
+        var persisted = ScalingMetricCollector.persistedHistory(history);
+        assertNull(persisted.get(history.lastKey()).getCacheObservations().get(vertex).subtasks.get(0).endpoint);
+        assertTrue(lastBatch.endpointBytes() > 0);
+
+        var delta = A4SAlignedCacheWindow.between(firstBatch, first.getCacheCostSamples().get(vertex),
+                lastBatch, last.getCacheCostSamples().get(vertex));
+        assertEquals(CacheObservation.Status.VALID, delta.status);
+        assertEquals(120_000_000_000L, delta.batch.subtasks.get(0).window.durationNanos());
+        assertEquals(80, delta.batch.subtasks.get(0).histogram.getFrequency(1));
+        assertEquals(CacheObservation.Status.DUPLICATE,
+                A4SAlignedCacheWindow.between(lastBatch, last.getCacheCostSamples().get(vertex),
+                        lastBatch, last.getCacheCostSamples().get(vertex)).status);
+        ScalingMetricCollector.boundEndpoints(history, lastBatch.endpointBytes());
+        assertNull(first.getCacheObservations().get(vertex).subtasks.get(0).endpoint);
+        assertEquals(CacheObservation.Status.INCOMPLETE,
+                A4SAlignedCacheWindow.between(first.getCacheObservations().get(vertex),
+                        first.getCacheCostSamples().get(vertex),
+                        lastBatch, last.getCacheCostSamples().get(vertex)).status);
     }
 
     @Test

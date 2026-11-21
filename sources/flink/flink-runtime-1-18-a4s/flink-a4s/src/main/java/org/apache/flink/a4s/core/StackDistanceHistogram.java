@@ -120,6 +120,27 @@ public class StackDistanceHistogram implements Serializable {
         return completeMisses;
     }
 
+    /** Difference cumulative same-cache samples without extrapolating zero-tail support. */
+    public StackDistanceHistogram deltaFrom(StackDistanceHistogram before) {
+        if (numPartitions != 1 || before.numPartitions != 1
+                || bucketSizeScaling != before.bucketSizeScaling
+                || cacheItemSizeBytes != before.cacheItemSizeBytes
+                || completeMisses < before.completeMisses
+                || bucketCounts.length < before.bucketCounts.length) {
+            throw new IllegalArgumentException("Incompatible cumulative histograms");
+        }
+        long[] counts = Arrays.copyOf(bucketCounts, bucketCounts.length);
+        for (int i = 0; i < before.bucketCounts.length; i++) {
+            counts[i] -= before.bucketCounts[i];
+        }
+        int size = counts.length;
+        while (size > 0 && counts[size - 1] == 0) {
+            size--;
+        }
+        return new StackDistanceHistogram(Arrays.copyOf(counts, size),
+                completeMisses - before.completeMisses, 1, bucketSizeScaling, cacheItemSizeBytes);
+    }
+
     public long getHistogramFingerprint() {
         long h = 0xcbf29ce484222325L;
         final long prime = 0x100000001b3L;

@@ -28,6 +28,7 @@ import org.apache.flink.api.common.time.Time;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.runtime.accumulators.StringifiedAccumulatorResult;
+import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.ArchivedExecution;
@@ -38,13 +39,18 @@ import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
 import org.apache.flink.runtime.executiongraph.ExecutionHistory;
 import org.apache.flink.runtime.executiongraph.ExecutionGraphID;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.messages.webmonitor.JobDetails;
+import org.apache.flink.runtime.messages.webmonitor.JobDetails.CurrentAttempts;
+import org.apache.flink.runtime.messages.webmonitor.MultipleJobsDetails;
 import org.apache.flink.runtime.metrics.A4SHistogramMetricCodec;
+import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization;
 import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization.MetricDumpDeserializer;
 import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization.MetricDumpSerializer;
 import org.apache.flink.runtime.metrics.dump.MetricDumpSerialization.MetricSerializationResult;
 import org.apache.flink.runtime.metrics.dump.QueryScopeInfo;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricFetcher;
+import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricFetcherImpl;
 import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricStore;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
@@ -54,20 +60,24 @@ import org.apache.flink.runtime.rest.messages.job.metrics.A4SCacheCostSample;
 import org.apache.flink.runtime.rest.util.RestMapperUtils;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
+import org.apache.flink.runtime.webmonitor.retriever.MetricQueryServiceGateway;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Proxy;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -112,6 +122,200 @@ class A4SCacheObservationTransportTest {
         assertEquals(wire.length(), response.getCacheObservations().wireBytes);
         assertEquals(bins.length, response.getScaledMrc().getPoints().size());
         assertEquals(raw, response.getCacheObservations().subtasks.get(0).toMetricString());
+    }
+
+    @Test
+    void transportsOnePairedEndpointForTheCurrentAttemptAndRejectsInvalidAcquisition() throws Exception {
+        long now = System.currentTimeMillis();
+        long[] bins = new long[40_000];
+        bins[0] = 7;
+        CacheObservation original = observation(0, 0, bins, now);
+        CacheObservation paired = paired(original, now, 1, 3);
+        String wire = A4SHistogramMetricCodec.encode(paired.toMetricString());
+        assertTrue(wire.startsWith("a4s-gzip-v1:"));
+        assertTrue(!A4SHistogramMetricCodec.isOmitted(wire));
+        addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, wire);
+        A4SAggregatedMetricsResponseBody matched = response(Collections.singletonMap(0, attempt(0, 0)));
+        assertEquals(Status.VALID, matched.getCacheObservations().status);
+        assertEquals(1, matched.getCacheCostSamples().size());
+        CacheObservation.Endpoint endpoint = matched.getCacheObservations().subtasks.get(0).endpoint;
+        assertEquals(40_000, endpoint.cumulativeHistogram.getNumBuckets());
+        assertEquals(3L, endpoint.ownershipGeneration);
+        assertEquals(1_000L, endpoint.totalLookups);
+        assertEquals(Status.INCOMPLETE, response(expectedAttempts(0, 0, 1, 2, 3)).getCacheObservations().status);
+        assertEquals(Status.ABSENT, response(Collections.singletonMap(0, attempt(0, 1))).getCacheObservations().status);
+
+        addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME,
+                A4SHistogramMetricCodec.encode(paired(original, now, 100_000_000L, 3).toMetricString()));
+        A4SAggregatedMetricsResponseBody skewed = response(Collections.singletonMap(0, attempt(0, 0)));
+        assertEquals(Status.SKEWED, skewed.getCacheObservations().status);
+        assertTrue(skewed.getCacheCostSamples().isEmpty());
+
+        addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME,
+                A4SHistogramMetricCodec.encode(paired(original, now, 1, 2).toMetricString()));
+        A4SAggregatedMetricsResponseBody incompatible = response(Collections.singletonMap(0, attempt(0, 0)));
+        assertEquals(Status.INCOMPATIBLE, incompatible.getCacheObservations().status);
+        assertTrue(incompatible.getCacheCostSamples().isEmpty());
+
+        addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, wire);
+        addGauge(0, 0, "another-db", A4SCacheCostSample.METRIC_NAME, paired.endpoint.timing);
+        A4SAggregatedMetricsResponseBody unmatched = response(Collections.singletonMap(0, attempt(0, 0)));
+        assertEquals(Status.DUPLICATE, unmatched.getCacheObservations().status);
+        assertTrue(unmatched.getCacheCostSamples().isEmpty());
+        addGauge(0, 0, "another-db", A4SCacheCostSample.METRIC_NAME, "");
+        addGauge(0, 0, "another-db", CacheObservation.METRIC_NAME, wire);
+        A4SAggregatedMetricsResponseBody duplicate = response(Collections.singletonMap(0, attempt(0, 0)));
+        assertEquals(Status.DUPLICATE, duplicate.getCacheObservations().status);
+        assertTrue(duplicate.getCacheCostSamples().isEmpty());
+    }
+
+    private CacheObservation paired(CacheObservation row, long now, long afterNanos, int abi) {
+        long nativeNanos = row.window.endNanos;
+        String timing = abi == 3
+                ? "3:" + now + ":" + row.attempt
+                        + ":" + row.window.cacheId
+                        + ":1048576:0:1000:300:700:300:8:4:1800:24000:400:82.0:23:179:process:"
+                        + nativeNanos
+                : "1:" + now + ":" + row.attempt
+                        + ":1:1048576:0:1000:300:700:300:8:4:1800:24000:400:82.0";
+        return new CacheObservation(CacheObservation.ALIGNED_VERSION, row.job, row.vertex,
+                row.subtask, row.attempt, row.status, row.window, row.histogram,
+                new CacheObservation.Endpoint(
+                        3, nativeNanos - 1, nativeNanos, nativeNanos + afterNanos,
+                        1_000, 300, row.histogram, timing));
+    }
+
+    @Test
+    void delayedPreResizeRosterCannotRemoveReplacementTimingEndpoint() throws Exception {
+        assertReplacementSurvivesRoster(2, false, false);
+    }
+
+    @Test
+    void replacementDumpThatArrivesBeforeItsRosterStaysAvailable() throws Exception {
+        assertReplacementSurvivesRoster(1, false, false);
+    }
+
+    @Test
+    void rosterFailureDoesNotDiscardSuccessfulReplacementDump() throws Exception {
+        assertReplacementSurvivesRoster(1, true, false);
+    }
+
+    @Test
+    void synchronousQueryFailureStillWaitsForTheOutstandingRoster() throws Exception {
+        assertReplacementSurvivesRoster(1, false, true);
+    }
+
+    private void assertReplacementSurvivesRoster(
+            int replacementQuery, boolean rosterFails, boolean firstQueryThrows) throws Exception {
+        long now = System.currentTimeMillis();
+        CacheObservation replacement = paired(observation(1, 1, new long[] {7}, now), now, 1, 3);
+        CacheObservation existingSubtask = paired(observation(0, 1, new long[] {7}, now), now, 1, 3);
+        CompletableFuture<MultipleJobsDetails> oldRoster = new CompletableFuture<MultipleJobsDetails>();
+        AtomicInteger rosterRequests = new AtomicInteger();
+        AtomicInteger queryRequests = new AtomicInteger();
+        AtomicInteger discoveryRequests = new AtomicInteger();
+        ResourceID taskManager = ResourceID.generate();
+        RestfulGateway gateway = (RestfulGateway) Proxy.newProxyInstance(
+                RestfulGateway.class.getClassLoader(), new Class<?>[] {RestfulGateway.class},
+                (ignored, method, args) -> {
+                    switch (method.getName()) {
+                        case "requestMultipleJobDetails":
+                            return rosterRequests.incrementAndGet() == 1
+                                    ? oldRoster : CompletableFuture.completedFuture(roster(1));
+                        case "requestMetricQueryServiceAddresses":
+                            return CompletableFuture.completedFuture(Collections.emptyList());
+                        case "requestTaskManagerMetricQueryServiceAddresses":
+                            if (discoveryRequests.incrementAndGet() == 1 && firstQueryThrows) {
+                                throw new IllegalStateException("fixture discovery failure");
+                            }
+                            return CompletableFuture.completedFuture(Collections.singletonList(Tuple2.of(taskManager, "tm")));
+                        default:
+                            throw new UnsupportedOperationException(method.getName());
+                    }
+                });
+        MetricQueryServiceGateway service = new MetricQueryServiceGateway() {
+            @Override
+            public String getAddress() {
+                return "tm";
+            }
+
+            @Override
+            public String getHostname() {
+                return "tm";
+            }
+
+            @Override
+            public CompletableFuture<MetricDumpSerialization.MetricSerializationResult> queryMetrics(
+                    Time timeout) {
+                MetricDumpSerializer serializer = new MetricDumpSerializer();
+                try {
+                    if (queryRequests.incrementAndGet() == replacementQuery) {
+                        Gauge<String> gauge = () -> A4SHistogramMetricCodec.encode(replacement.toMetricString());
+                        QueryScopeInfo.OperatorQueryScopeInfo scope = new QueryScopeInfo.OperatorQueryScopeInfo(
+                                job.toString(), vertex.toString(), 1, 1, "operator", "rocksdb");
+                        Gauge<String> otherGauge = () ->
+                                A4SHistogramMetricCodec.encode(existingSubtask.toMetricString());
+                        QueryScopeInfo.OperatorQueryScopeInfo otherScope = new QueryScopeInfo.OperatorQueryScopeInfo(
+                                job.toString(), vertex.toString(), 0, 1, "operator", "rocksdb");
+                        Map<Gauge<?>, Tuple2<QueryScopeInfo, String>> gauges = new HashMap<>();
+                        gauges.put(gauge, Tuple2.of(scope, CacheObservation.METRIC_NAME));
+                        gauges.put(otherGauge, Tuple2.of(otherScope, CacheObservation.METRIC_NAME));
+                        return CompletableFuture.completedFuture(serializer.serialize(
+                                Collections.emptyMap(), gauges, Collections.emptyMap(), Collections.emptyMap()));
+                    }
+                    return CompletableFuture.completedFuture(
+                            serializer.serialize(Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap(), Collections.emptyMap()));
+                } finally {
+                    serializer.close();
+                }
+            }
+        };
+        MetricFetcherImpl<RestfulGateway> fetcher = new MetricFetcherImpl<>(
+                () -> CompletableFuture.completedFuture(gateway),
+                ignored -> CompletableFuture.completedFuture(service), Runnable::run, Time.seconds(1), 1);
+        fetcher.update();
+        nextFetch(fetcher);
+        assertNull(fetcher.getMetricStore().getSubtaskAttemptMetricStore(
+                job.toString(), vertex.toString(), 1, 1));
+        assertEquals(1, rosterRequests.get());
+        assertEquals(firstQueryThrows ? 0 : 1, queryRequests.get());
+        if (rosterFails) {
+            oldRoster.completeExceptionally(new java.util.concurrent.TimeoutException("fixture"));
+        } else {
+            oldRoster.complete(roster(0));
+        }
+        nextFetch(fetcher);
+        A4SAggregatingVertexMetricsHandler rest = new A4SAggregatingVertexMetricsHandler(
+                () -> CompletableFuture.completedFuture(gateway), Time.seconds(1), Collections.emptyMap(),
+                Runnable::run, fetcher);
+        A4SAggregatedMetricsResponseBody response =
+                rest.processVersionedRequest(job.toString(), vertex.toString(),
+                        expectedAttempts(1, 0, 1), true);
+        assertEquals(Status.VALID, response.getCacheObservations().status);
+        assertEquals(2, response.getCacheCostSamples().size());
+        assertEquals(replacement.attempt, response.getCacheCostSamples().get(1).attempt);
+        assertEquals(replacement.window.sequence, response.getCacheObservations().subtasks.get(1).window.sequence);
+    }
+
+    private MultipleJobsDetails roster(int attemptNumber) {
+        CurrentAttempts active = new CurrentAttempts(attemptNumber, Collections.singleton(attemptNumber), false);
+        Map<Integer, CurrentAttempts> subtasks = new HashMap<>();
+        subtasks.put(0, active);
+        if (attemptNumber != 0) {
+            subtasks.put(1, active);
+        }
+        return new MultipleJobsDetails(Collections.singletonList(new JobDetails(
+                job, "job", 0, 0, 0, JobStatus.RUNNING, 0,
+                new int[ExecutionState.values().length], subtasks.size(),
+                Collections.singletonMap(vertex.toString(), subtasks))));
+    }
+
+    private static void nextFetch(MetricFetcherImpl<?> fetcher) throws Exception {
+        // Advance the scheduling gate without sleeping or changing production timeouts.
+        Field lastUpdate = MetricFetcherImpl.class.getDeclaredField("lastUpdateTime");
+        lastUpdate.setAccessible(true);
+        lastUpdate.setLong(fetcher, 0L);
+        fetcher.update();
     }
 
     @Test
@@ -202,7 +406,7 @@ class A4SCacheObservationTransportTest {
         assertEquals(Status.UNSUPPORTED_VERSION,
                 response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
         String unknown = observation(0, 0, new long[] {1}, System.currentTimeMillis())
-                .toMetricString().replace("\"version\":1", "\"version\":2");
+                .toMetricString().replace("\"version\":1", "\"version\":99");
         addGauge(0, 0, "rocksdb", CacheObservation.METRIC_NAME, unknown);
         assertEquals(Status.UNSUPPORTED_VERSION,
                 response(Collections.singletonMap(0, attempt(0, 0))).getCacheObservations().status);
@@ -232,6 +436,14 @@ class A4SCacheObservationTransportTest {
         assertEquals(raw, A4SHistogramMetricCodec.decode(encoded));
         assertThrows(IllegalArgumentException.class,
                 () -> A4SHistogramMetricCodec.decode(encoded.substring(0, encoded.length() - 8)));
+    }
+
+    private Map<Integer, ExecutionAttemptID> expectedAttempts(int number, int... subtasks) {
+        Map<Integer, ExecutionAttemptID> attempts = new HashMap<>();
+        for (int subtask : subtasks) {
+            attempts.put(subtask, attempt(subtask, number));
+        }
+        return attempts;
     }
 
     private ExecutionAttemptID attempt(int subtask, int number) {

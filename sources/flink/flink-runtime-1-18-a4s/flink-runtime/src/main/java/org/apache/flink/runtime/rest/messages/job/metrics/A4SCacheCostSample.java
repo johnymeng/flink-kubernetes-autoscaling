@@ -18,6 +18,9 @@
 
 package org.apache.flink.runtime.rest.messages.job.metrics;
 
+import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.StackDistanceHistogram;
+
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
@@ -164,6 +167,37 @@ public final class A4SCacheCostSample {
             snapshot += ":" + compactionHits + ":" + compactionMisses;
         }
         return includesProcess ? snapshot + ":" + process + ":" + observedAtNanos : snapshot;
+    }
+
+    @Nullable
+    public static A4SCacheCostSample fromEndpoint(CacheObservation observation, long nowMillis) {
+        CacheObservation.Endpoint endpoint = observation.endpoint;
+        CacheObservation.Window window = observation.window;
+        if (observation.version != CacheObservation.ALIGNED_VERSION || endpoint == null
+                || window == null || endpoint.ownershipGeneration <= 0
+                || !endpoint.withinAcquisitionBound()) {
+            return null;
+        }
+        StackDistanceHistogram cumulative = endpoint.cumulativeHistogram;
+        StackDistanceHistogram interval = observation.histogram;
+        if (cumulative.getNumPartitions() != 1 || cumulative.getCacheItemSizeBytes() != 4096
+                || (interval != null && (interval.getNumPartitions() != 1
+                        || interval.getBucketSizeScaling() != cumulative.getBucketSizeScaling()
+                        || interval.getCacheItemSizeBytes() != cumulative.getCacheItemSizeBytes()))) {
+            return null;
+        }
+        A4SCacheCostSample sample = fromMetricString(observation.subtask, endpoint.timing, nowMillis, true, true);
+        return sample != null && Integer.valueOf(3).equals(sample.timingAbi)
+                        && observation.attempt.equals(sample.attempt)
+                        && window.process.equals(sample.process)
+                        && window.cacheId == sample.cacheId
+                        && window.capacityBytes == sample.capacityBytes
+                        && window.epoch == sample.cacheEpoch
+                        && sample.observedAtMillis == window.observedAtMillis
+                        && Long.valueOf(endpoint.nativeNanos).equals(sample.observedAtNanos)
+                        && endpoint.totalLookups == sample.lookups
+                        && endpoint.totalMisses == sample.misses
+                ? sample : null;
     }
 
     @Nullable

@@ -146,7 +146,7 @@ final class A4SCacheObservationAggregator {
     }
 
     private static Status validate(CacheObservation observation, long now) {
-        if (observation.version != CacheObservation.VERSION) {
+        if (!CacheObservation.supportsVersion(observation.version)) {
             return Status.UNSUPPORTED_VERSION;
         }
         if (observation.status != Status.VALID) {

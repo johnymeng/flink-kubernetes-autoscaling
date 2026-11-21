@@ -21,6 +21,7 @@ package org.apache.flink.a4s.core;
 import org.apache.flink.util.jackson.JacksonMapperFactory;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonParser;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
@@ -37,6 +38,8 @@ import java.util.Objects;
 public final class CacheObservation {
     public static final String METRIC_NAME = "a4s-cache-observation";
     public static final int VERSION = 1;
+    public static final int ALIGNED_VERSION = 2;
+    public static final long MAX_ACQUISITION_SKEW_NANOS = 100_000_000L;
     public static final long MAX_AGE_MILLIS = 30_000;
     public static final long MAX_CLOCK_SKEW_MILLIS = 5_000;
     public static final String QUICK_MRC = "quickmrc-resident-lookup-v1";
@@ -89,6 +92,9 @@ public final class CacheObservation {
     public final Status status;
     @Nullable public final Window window;
     @Nullable public final StackDistanceHistogram histogram;
+    @JsonProperty("endpoint")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Nullable public final Endpoint endpoint;
 
     @JsonCreator
     public CacheObservation(
@@ -100,6 +106,13 @@ public final class CacheObservation {
             @JsonProperty("status") Status status,
             @JsonProperty("window") @Nullable Window window,
             @JsonProperty("histogram") @Nullable StackDistanceHistogram histogram) {
+        this(version, job, vertex, subtask, attempt, status, window, histogram, null);
+    }
+
+    public CacheObservation(
+            int version, String job, String vertex, int subtask, String attempt, Status status,
+            @Nullable Window window, @Nullable StackDistanceHistogram histogram,
+            @Nullable Endpoint endpoint) {
         this.version = version;
         this.job = Objects.requireNonNull(job);
         this.vertex = Objects.requireNonNull(vertex);
@@ -108,6 +121,11 @@ public final class CacheObservation {
         this.status = Objects.requireNonNull(status);
         this.window = window;
         this.histogram = histogram;
+        this.endpoint = endpoint;
+    }
+
+    public static boolean supportsVersion(int version) {
+        return version == VERSION || version == ALIGNED_VERSION;
     }
 
     public static boolean isFresh(long observedAtMillis, long nowMillis) {
@@ -118,7 +136,51 @@ public final class CacheObservation {
     public CacheObservation withoutHistogram() {
         return histogram == null
                 ? this
-                : new CacheObservation(version, job, vertex, subtask, attempt, status, window, null);
+                : new CacheObservation(version, job, vertex, subtask, attempt, status, window, null, endpoint);
+    }
+
+    public CacheObservation withoutEndpoint() {
+        return endpoint == null ? this
+                : new CacheObservation(version, job, vertex, subtask, attempt, status, window, histogram);
+    }
+
+    /** Cumulative cache data and the task/DB read acquired at the same boundary. */
+    public static final class Endpoint {
+        public final long ownershipGeneration;
+        public final long acquisitionStartNanos;
+        public final long nativeNanos;
+        public final long acquisitionEndNanos;
+        public final long totalLookups;
+        public final long totalMisses;
+        public final StackDistanceHistogram cumulativeHistogram;
+        public final String timing;
+
+        @JsonCreator
+        public Endpoint(
+                @JsonProperty("ownershipGeneration") long ownershipGeneration,
+                @JsonProperty("acquisitionStartNanos") long acquisitionStartNanos,
+                @JsonProperty("nativeNanos") long nativeNanos,
+                @JsonProperty("acquisitionEndNanos") long acquisitionEndNanos,
+                @JsonProperty("totalLookups") long totalLookups,
+                @JsonProperty("totalMisses") long totalMisses,
+                @JsonProperty("cumulativeHistogram") StackDistanceHistogram cumulativeHistogram,
+                @JsonProperty("timing") String timing) {
+            this.ownershipGeneration = ownershipGeneration;
+            this.acquisitionStartNanos = acquisitionStartNanos;
+            this.nativeNanos = nativeNanos;
+            this.acquisitionEndNanos = acquisitionEndNanos;
+            this.totalLookups = totalLookups;
+            this.totalMisses = totalMisses;
+            this.cumulativeHistogram = Objects.requireNonNull(cumulativeHistogram);
+            this.timing = Objects.requireNonNull(timing);
+        }
+
+        public boolean withinAcquisitionBound() {
+            long before = nativeNanos - acquisitionStartNanos;
+            long after = acquisitionEndNanos - nativeNanos;
+            return before >= 0 && after >= 0 && before <= MAX_ACQUISITION_SKEW_NANOS
+                    && after <= MAX_ACQUISITION_SKEW_NANOS - before;
+        }
     }
 
     public String toMetricString() {

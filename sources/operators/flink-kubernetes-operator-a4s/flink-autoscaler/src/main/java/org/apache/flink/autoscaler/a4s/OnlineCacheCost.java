@@ -87,9 +87,10 @@ public class OnlineCacheCost {
         @Nullable TimingCounts timingCounts;
         @Nullable FitWindow attemptedWindow;
         @Nullable Holdout holdout;
+        @Nullable CacheObservationBatch alignedCurve;
 
         public FitResult(Reason reason, @Nullable Fit fit) {
-            this(reason, fit, null, null, null, null, null);
+            this(reason, fit, null, null, null, null, null, null);
         }
 
         public static FitResult rejected(Reason reason) {
@@ -333,7 +334,7 @@ public class OnlineCacheCost {
     private static Status bindingStatus(
             CacheObservation observation, @Nullable CacheCostSample sample) {
         CacheObservation.Window window = observation.window;
-        if (observation.version != CacheObservation.VERSION) {
+        if (!CacheObservation.supportsVersion(observation.version)) {
             return Status.UNSUPPORTED_VERSION;
         }
         if (observation.status != Status.VALID) {

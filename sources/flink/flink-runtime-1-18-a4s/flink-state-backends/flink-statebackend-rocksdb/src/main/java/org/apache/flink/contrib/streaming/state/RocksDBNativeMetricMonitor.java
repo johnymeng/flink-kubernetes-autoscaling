@@ -45,7 +45,6 @@ import javax.annotation.Nullable;
 import javax.annotation.concurrent.GuardedBy;
 
 import java.io.Closeable;
-import java.lang.reflect.Method;
 import java.math.BigInteger;
 import java.util.Locale;
 import java.util.Map;
@@ -77,6 +76,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     @Nullable private final A4SCacheTelemetry.Lease cacheMonitor;
 
     @Nullable private A4SBlockLatencyWindow a4sBlockLatency;
+    @Nullable private A4SCacheTelemetry.TimingReader cacheTiming;
 
     public RocksDBNativeMetricMonitor(
             @Nonnull RocksDBNativeMetricOptions options,
@@ -93,8 +93,8 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         this.cacheMonitor = A4SCacheTelemetry.attachMonitor(lruCache);
         try {
             registerStatistics();
-            registerStackDistanceHistogram();
             registerA4SBlockLatency();
+            registerStackDistanceHistogram();
         } catch (RuntimeException | Error failure) {
             closeNativeMetrics();
             throw failure;
@@ -149,7 +149,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             metricGroup.gauge(
                     prefix + "_seconds", () -> window.latest(System.nanoTime()).meanSeconds(kind));
         }
-        if (abiVersion >= 2
+        if (abiVersion == 3
                 && lruCache != null
                 && metricGroup instanceof InternalOperatorMetricGroup) {
             registerCacheCostSample(
@@ -160,7 +160,6 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     private void registerCacheCostSample(
             InternalOperatorMetricGroup operator, HistogramType[] histograms, int abiVersion) {
         try {
-            Method readCache = LRUCache.class.getMethod("getA4SCacheLookupSnapshot");
             TickerType coveredHits = TickerType.valueOf("A4S_BLOCK_LATENCY_COVERED_HIT");
             TickerType coveredMisses = TickerType.valueOf("A4S_BLOCK_LATENCY_COVERED_MISS");
             TickerType compactionHits =
@@ -169,22 +168,11 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                     abiVersion >= 3 ? TickerType.valueOf("A4S_BLOCK_LATENCY_COMPACTION_MISS") : null;
             String attempt = operator.getAllVariables().get(ScopeFormat.SCOPE_TASK_ATTEMPT_ID);
             if (attempt != null) {
-                metricGroup.addGroup("rocksdb")
-                        .gauge(
-                                A4SCacheCostSample.METRIC_NAME,
-                                () ->
-                                        readCacheCostSample(
-                                                operator,
-                                                attempt,
-                                                histograms,
-                                                readCache,
-                                                coveredHits,
-                                                coveredMisses,
-                                                compactionHits,
-                                                compactionMisses,
-                                                abiVersion));
+                cacheTiming = (state, wallTime, nativeNanos) -> readCacheCostSample(
+                        operator, attempt, histograms, state, wallTime, nativeNanos,
+                        coveredHits, coveredMisses, compactionHits, compactionMisses, abiVersion);
             }
-        } catch (ReflectiveOperationException | IllegalArgumentException | LinkageError e) {
+        } catch (IllegalArgumentException | LinkageError e) {
             LOG.warn("A4S online cache cost telemetry is unavailable.", e);
         }
     }
@@ -193,28 +181,19 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             InternalOperatorMetricGroup operator,
             String attempt,
             HistogramType[] histograms,
-            Method readCache,
+            long[] cache,
+            long observedAtMillis,
+            long observedAtNanos,
             TickerType coveredHits,
             TickerType coveredMisses,
             @Nullable TickerType compactionHits,
             @Nullable TickerType compactionMisses,
             int abiVersion) {
-        synchronized (lock) {
-            if (statistics == null || lruCache == null || cacheMonitor == null) {
-                return "";
-            }
-            long ownershipGeneration = cacheMonitor.exclusiveGeneration();
-            if (ownershipGeneration < 0) {
+            // Invoked under the monitor and publisher locks for the sole active DB.
+            if (statistics == null || cacheMonitor == null) {
                 return "";
             }
             try {
-                long observedAtMillis = System.currentTimeMillis();
-                long observedAtNanos = System.nanoTime();
-                long[] cache = (long[]) readCache.invoke(lruCache);
-                if (cache == null || cache.length != 7 || cache[0] != 1 || cache[4] != 1
-                        || cache[1] != cacheMonitor.cacheId()) {
-                    return "";
-                }
                 IOMetrics task = operator.getTaskIOMetricGroup().createSnapshot();
                 HistogramData hit = statistics.getHistogramData(histograms[0]);
                 long missSamples = 0;
@@ -230,18 +209,14 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                         compactionHits == null ? null : statistics.getTickerCount(compactionHits);
                 Long compactionMissCount =
                         compactionMisses == null ? null : statistics.getTickerCount(compactionMisses);
-                if (cacheMonitor.exclusiveGeneration() != ownershipGeneration
-                        || System.nanoTime() - observedAtNanos > 100_000_000) {
-                    return "";
-                }
                 return new A4SCacheCostSample(
                                 0,
                                 attempt,
                                 cache[1],
                                 cache[2],
                                 cache[3],
-                                cache[5],
                                 cache[6],
+                                cache[7],
                                 hitCount,
                                 missCount,
                                 hit.getCount(),
@@ -257,11 +232,10 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                                 cacheMonitor.process(),
                                 observedAtNanos)
                         .toMetricString();
-            } catch (ReflectiveOperationException | RuntimeException | LinkageError e) {
+            } catch (RuntimeException | LinkageError e) {
                 LOG.debug("Could not read the A4S online cache cost sample.", e);
                 return "";
             }
-        }
     }
 
     private class A4SBlockLatencyGauge implements View, Gauge<Double> {
@@ -328,7 +302,8 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                 status = CacheObservation.Status.UNSUPPORTED_NATIVE;
             } else {
                 try {
-                    return cacheMonitor.metric(job, vertex, subtask, attempt, System.nanoTime());
+                    return cacheMonitor.metric(
+                            job, vertex, subtask, attempt, System.nanoTime(), cacheTiming);
                 } catch (RuntimeException error) {
                     LOG.debug("Could not publish cache observation", error);
                     status = CacheObservation.Status.MALFORMED;

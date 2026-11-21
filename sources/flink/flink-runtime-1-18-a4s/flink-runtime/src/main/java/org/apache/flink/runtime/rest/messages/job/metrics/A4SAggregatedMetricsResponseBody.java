@@ -93,6 +93,11 @@ public class A4SAggregatedMetricsResponseBody implements ResponseBody {
     public MissRateCurve getScaledMrc() {
         return scaledMrc;
     }
+
+    public List<A4SCacheCostSample> getCacheCostSamples() {
+        return cacheCostSamples == null ? Collections.emptyList() : cacheCostSamples;
+    }
+
     @Nullable
     public CacheObservationBatch getCacheObservations() {
         return cacheObservations;

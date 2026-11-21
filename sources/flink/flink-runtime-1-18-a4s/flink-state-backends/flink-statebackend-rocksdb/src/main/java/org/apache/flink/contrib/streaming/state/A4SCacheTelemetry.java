@@ -117,9 +117,10 @@ final class A4SCacheTelemetry {
     }
 
     private synchronized String metric(
-            long monitor, String job, String vertex, int subtask, String attempt, long nowNanos) {
+            long monitor, String job, String vertex, int subtask, String attempt, long nowNanos,
+            @Nullable TimingReader timing) {
         A4SCacheSnapshots.Publication<Interval> publication =
-                snapshots.poll(monitor, nowNanos, this::readInterval);
+                snapshots.poll(monitor, nowNanos, () -> capture(monitor, timing));
         Interval interval = publication.value;
         Status status = !compatible ? Status.INCOMPATIBLE
                 : publication.ownershipChanged ? Status.SHARED_CACHE
@@ -147,10 +148,44 @@ final class A4SCacheTelemetry {
                     interval.references,
                     interval.misses);
         }
-        return A4SHistogramMetricCodec.encode(
+        CacheObservation.Endpoint endpoint =
+                window != null && status == Status.VALID ? interval.endpoint : null;
+        String wire = A4SHistogramMetricCodec.encode(
                 new CacheObservation(
-                        CacheObservation.VERSION, job, vertex, subtask, attempt, status, window,
-                        status == Status.VALID ? interval.histogram : null).toMetricString());
+                        endpoint == null ? CacheObservation.VERSION : CacheObservation.ALIGNED_VERSION,
+                        job, vertex, subtask, attempt, status, window,
+                        status == Status.VALID ? interval.histogram : null, endpoint).toMetricString());
+        if (endpoint == null || !A4SHistogramMetricCodec.isOmitted(wire)) {
+            return wire;
+        }
+        // Preserve a transportable interval for diagnostics and memory corroboration.
+        // Consumers cannot qualify a learned fit without the paired endpoint.
+        return A4SHistogramMetricCodec.encode(new CacheObservation(
+                CacheObservation.VERSION, job, vertex, subtask, attempt, status, window,
+                interval.histogram).toMetricString());
+    }
+
+    private Interval capture(long monitor, @Nullable TimingReader timing) {
+        long start = System.nanoTime();
+        Interval interval = readInterval();
+        long nativeNanos = System.nanoTime();
+        long ownerGeneration = snapshots.exclusiveGeneration(monitor);
+        if (timing == null || ownerGeneration < 0 || interval.status != Status.VALID
+                || interval.state.length - SNAPSHOT_HEADER > MAX_BUCKETS) {
+            return interval;
+        }
+        long[] state = interval.state;
+        String counters = timing.read(state, interval.wallTime, nativeNanos);
+        long end = System.nanoTime();
+        if (counters.isEmpty()) {
+            return interval;
+        }
+        return interval.withEndpoint(new CacheObservation.Endpoint(
+                    ownerGeneration, start, nativeNanos, end, state[6], state[7],
+                    new StackDistanceHistogram(
+                            Arrays.copyOfRange(state, SNAPSHOT_HEADER, state.length),
+                            state[8], 1, binItems, 4096),
+                    counters));
     }
 
     private Interval readInterval() {
@@ -405,7 +440,12 @@ final class A4SCacheTelemetry {
         }
 
         String metric(String job, String vertex, int subtask, String attempt, long nowNanos) {
-            return publisher.metric(owner, job, vertex, subtask, attempt, nowNanos);
+            return metric(job, vertex, subtask, attempt, nowNanos, null);
+        }
+
+        String metric(String job, String vertex, int subtask, String attempt, long nowNanos,
+                @Nullable TimingReader timing) {
+            return publisher.metric(owner, job, vertex, subtask, attempt, nowNanos, timing);
         }
 
         @Override
@@ -414,13 +454,19 @@ final class A4SCacheTelemetry {
         }
     }
 
+    @FunctionalInterface
+    interface TimingReader {
+        String read(long[] state, long wallTimeMillis, long nativeNanos);
+    }
+
     private static final class Interval {
         private final Status status;
         @Nullable private final long[] state;
         private final long references;
         private final long misses;
         @Nullable private final StackDistanceHistogram histogram;
-        private final long wallTime = System.currentTimeMillis();
+        @Nullable private final CacheObservation.Endpoint endpoint;
+        private final long wallTime;
 
         private Interval(Status status) {
             this(status, null, 0, 0, null);
@@ -428,11 +474,23 @@ final class A4SCacheTelemetry {
 
         private Interval(Status status, @Nullable long[] state, long references, long misses,
                 @Nullable StackDistanceHistogram histogram) {
+            this(status, state, references, misses, histogram, null, System.currentTimeMillis());
+        }
+
+        private Interval(Status status, @Nullable long[] state, long references, long misses,
+                @Nullable StackDistanceHistogram histogram,
+                @Nullable CacheObservation.Endpoint endpoint, long wallTime) {
             this.status = status;
             this.state = state;
             this.references = references;
             this.misses = misses;
             this.histogram = histogram;
+            this.endpoint = endpoint;
+            this.wallTime = wallTime;
+        }
+
+        private Interval withEndpoint(CacheObservation.Endpoint endpoint) {
+            return new Interval(status, state, references, misses, histogram, endpoint, wallTime);
         }
     }
 }

@@ -38,6 +38,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.a4s.core.CacheObservation;
 import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.a4s.A4SAlignedCacheWindow;
 import org.apache.flink.autoscaler.a4s.CacheCostSample;
 import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.a4s.OnlineCacheCost;
@@ -158,7 +159,7 @@ public class ScalingMetricEvaluator {
                 QuickMrcCostProjection.Recommendation recommendation = null;
                 if (reason == OnlineCacheCost.Reason.QUALIFIED) {
                     projection = QuickMrcCostProjection.project(
-                            fit.getFit(), batch, targetRate, fixedBaseline);
+                            fit.getFit(), fit.getAlignedCurve(), targetRate, fixedBaseline);
                     recommendation = projection.getRecommendation();
                     if (recommendation == null) {
                         reason = !shadow && QuickMrcCostProjection
@@ -385,6 +386,7 @@ public class ScalingMetricEvaluator {
             SortedMap<Instant, CollectedMetrics> history, JobVertexID vertex, Instant start, Instant end) {
         var before = history.get(start);
         var after = history.get(end);
+        var startBatch = cacheObservation(before, vertex);
         var window = new OnlineCacheCost.FitWindow(start, end);
         var initialSamples = cacheCostSamples(before, vertex);
         var previous = initialSamples;
@@ -398,6 +400,13 @@ public class ScalingMetricEvaluator {
                                         ? OnlineCacheCost.Reason.COUNTER_RESET
                                         : OnlineCacheCost.Reason.CONTEXT_CHANGED)
                         .withObservationStatus(batch.status).withAttemptedWindow(window);
+            }
+            if (startBatch != null && batch != null && batch.status == CacheObservation.Status.VALID
+                    && batch.expectedSubtasks > 0 && batch.subtasks.size() == batch.expectedSubtasks
+                    && batch.expectedSubtasks != startBatch.expectedSubtasks) {
+                return OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.CONTEXT_CHANGED)
+                        .withObservationStatus(CacheObservation.Status.CACHE_CHANGED)
+                        .withAttemptedWindow(window);
             }
             var samples = cacheCostSamples(entry, vertex);
             if (!samples.isEmpty() && samples.size() == previous.size()) {
@@ -416,9 +425,17 @@ public class ScalingMetricEvaluator {
                 return discontinuity.get().withAttemptedWindow(window);
             }
         }
-        return OnlineCacheCost.fitQuickMrc(
-                cacheObservation(before, vertex), cacheCostSamples(before, vertex),
-                cacheObservation(after, vertex), current).withAttemptedWindow(window);
+        var endBatch = cacheObservation(after, vertex);
+        var fit = OnlineCacheCost.fitQuickMrc(startBatch, initialSamples, endBatch, current);
+        if (fit.getFit() == null) {
+            return fit.withAttemptedWindow(window);
+        }
+        var aligned = A4SAlignedCacheWindow.between(startBatch, initialSamples, endBatch, current);
+        return (aligned.batch == null
+                        ? OnlineCacheCost.FitResult.rejected(OnlineCacheCost.Reason.UNBOUND_TIMING)
+                                .withObservationStatus(aligned.status)
+                        : fit.withAlignedCurve(aligned.batch))
+                .withAttemptedWindow(window);
     }
 
     private static CacheObservationBatch cacheObservation(CollectedMetrics metrics, JobVertexID vertex) {

@@ -62,6 +62,22 @@ public final class CacheObservationBatch {
                 subtasks.stream().map(CacheObservation::withoutHistogram).collect(Collectors.toList()));
     }
 
+    public CacheObservationBatch withoutEndpoints() {
+        return new CacheObservationBatch(
+                version, status, expectedSubtasks, wireBytes, oldestAgeMillis,
+                subtasks.stream().map(CacheObservation::withoutEndpoint).collect(Collectors.toList()));
+    }
+
+    /** Conservative byte accounting for the extra, process-local endpoint payload. */
+    public long endpointBytes() {
+        return subtasks.stream()
+                .filter(observation -> observation.endpoint != null)
+                .mapToLong(observation ->
+                        2L * observation.endpoint.timing.length() + 256
+                                + Long.BYTES * (long) observation.endpoint.cumulativeHistogram.getNumBuckets())
+                .sum();
+    }
+
     public static CacheObservationBatch invalid(CacheObservation.Status status) {
         return new CacheObservationBatch(CacheObservation.VERSION, status, 0, 0, -1, Collections.emptyList());
     }

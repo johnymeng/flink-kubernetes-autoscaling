@@ -130,6 +130,7 @@ public class MetricFetcherImpl<T extends RestfulGateway> implements MetricFetche
     private CompletableFuture<Void> fetchMetrics() {
         LOG.debug("Start fetching metrics.");
 
+        List<CompletableFuture<Void>> waitingMetricsFutures = new ArrayList<>();
         try {
             Optional<T> optionalLeaderGateway = retriever.getNow();
             if (optionalLeaderGateway.isPresent()) {
@@ -141,24 +142,27 @@ public class MetricFetcherImpl<T extends RestfulGateway> implements MetricFetche
                 CompletableFuture<MultipleJobsDetails> jobDetailsFuture =
                         leaderGateway.requestMultipleJobDetails(timeout);
 
-                jobDetailsFuture.whenCompleteAsync(
+                CompletableFuture<Void> rosterApplied = jobDetailsFuture.handleAsync(
                         (MultipleJobsDetails jobDetails, Throwable throwable) -> {
                             if (throwable != null) {
                                 LOG.debug("Fetching of JobDetails failed.", throwable);
-                            } else {
+                            } else if (jobDetails != null) {
                                 ArrayList<String> toRetain =
                                         new ArrayList<>(jobDetails.getJobs().size());
                                 for (JobDetails job : jobDetails.getJobs()) {
                                     toRetain.add(job.getJobId().toString());
                                 }
-                                metrics.retainJobs(toRetain);
-                                metrics.updateCurrentExecutionAttempts(jobDetails.getJobs());
+                                synchronized (metrics) {
+                                    metrics.retainJobs(toRetain);
+                                    metrics.updateCurrentExecutionAttempts(jobDetails.getJobs());
+                                }
                             }
+                            return null;
                         },
                         executor);
 
-                List<CompletableFuture<Void>> waitingMetricsFutures = new ArrayList<>();
-                CompletableFuture<Void> jmMetricsFuture = queryJmMetricsFuture(leaderGateway);
+                waitingMetricsFutures.add(rosterApplied);
+                CompletableFuture<Void> jmMetricsFuture = queryJmMetricsFuture(leaderGateway, rosterApplied);
                 waitingMetricsFutures.add(jmMetricsFuture);
                 jmMetricsFuture.whenCompleteAsync(
                         (ignore, throwable) -> {
@@ -167,7 +171,7 @@ public class MetricFetcherImpl<T extends RestfulGateway> implements MetricFetche
                             }
                         },
                         executor);
-                CompletableFuture<Void> tmMetricsFuture = queryTmMetricsFuture(leaderGateway);
+                CompletableFuture<Void> tmMetricsFuture = queryTmMetricsFuture(leaderGateway, rosterApplied);
                 waitingMetricsFutures.add(tmMetricsFuture);
                 tmMetricsFuture.whenCompleteAsync(
                         (ignore, throwable) -> {
@@ -176,30 +180,33 @@ public class MetricFetcherImpl<T extends RestfulGateway> implements MetricFetche
                             }
                         },
                         executor);
-                return FutureUtils.waitForAll(waitingMetricsFutures);
+                return FutureUtils.completeAll(waitingMetricsFutures);
             }
         } catch (Exception e) {
             LOG.debug("Exception while fetching metrics.", e);
-            return FutureUtils.completedExceptionally(e);
+            waitingMetricsFutures.add(FutureUtils.completedExceptionally(e));
+            return FutureUtils.completeAll(waitingMetricsFutures);
         }
         return FutureUtils.completedVoidFuture();
     }
 
-    private CompletableFuture<Void> queryJmMetricsFuture(T leaderGateway) {
+    private CompletableFuture<Void> queryJmMetricsFuture(
+            T leaderGateway, CompletableFuture<Void> rosterApplied) {
         CompletableFuture<Collection<String>> queryServiceAddressesFuture =
                 leaderGateway.requestMetricQueryServiceAddresses(timeout);
         return queryServiceAddressesFuture.thenComposeAsync(
                 (Collection<String> queryServiceAddresses) -> {
                     List<CompletableFuture<Void>> queryMetricFutures = new ArrayList<>();
                     for (String queryServiceAddress : queryServiceAddresses) {
-                        queryMetricFutures.add(retrieveAndQueryMetrics(queryServiceAddress));
+                        queryMetricFutures.add(retrieveAndQueryMetrics(queryServiceAddress, rosterApplied));
                     }
-                    return FutureUtils.waitForAll(queryMetricFutures);
+                    return FutureUtils.completeAll(queryMetricFutures);
                 },
                 executor);
     }
 
-    private CompletableFuture<Void> queryTmMetricsFuture(T leaderGateway) {
+    private CompletableFuture<Void> queryTmMetricsFuture(
+            T leaderGateway, CompletableFuture<Void> rosterApplied) {
         // TODO: Once the old code has been ditched, remove the explicit TaskManager query
         // service discovery
         // TODO: and return it as part of requestMetricQueryServiceAddresses. Moreover,
@@ -219,15 +226,15 @@ public class MetricFetcherImpl<T extends RestfulGateway> implements MetricFetche
                                                 queryMetricFutures.add(
                                                         queryServiceRetriever
                                                                 .retrieveService(tuple.f1)
-                                                                .thenComposeAsync(
-                                                                        this::queryMetrics,
+                                                                .thenComposeAsync(gateway ->
+                                                                        queryMetrics(gateway, rosterApplied),
                                                                         executor));
                                                 return tuple.f0.getResourceIdString();
                                             })
                                     .collect(Collectors.toList());
 
                     metrics.retainTaskManagers(taskManagersToRetain);
-                    return FutureUtils.waitForAll(queryMetricFutures);
+                    return FutureUtils.completeAll(queryMetricFutures);
                 },
                 executor);
     }
@@ -237,12 +244,14 @@ public class MetricFetcherImpl<T extends RestfulGateway> implements MetricFetche
      *
      * @param queryServiceAddress specifying the QueryServiceGateway
      */
-    private CompletableFuture<Void> retrieveAndQueryMetrics(String queryServiceAddress) {
+    private CompletableFuture<Void> retrieveAndQueryMetrics(
+            String queryServiceAddress, CompletableFuture<Void> rosterApplied) {
         LOG.debug("Retrieve metric query service gateway for {}", queryServiceAddress);
 
         final CompletableFuture<MetricQueryServiceGateway> queryServiceGatewayFuture =
                 queryServiceRetriever.retrieveService(queryServiceAddress);
-        return queryServiceGatewayFuture.thenComposeAsync(this::queryMetrics, executor);
+        return queryServiceGatewayFuture.thenComposeAsync(
+                gateway -> queryMetrics(gateway, rosterApplied), executor);
     }
 
     /**
@@ -251,16 +260,16 @@ public class MetricFetcherImpl<T extends RestfulGateway> implements MetricFetche
      * @param queryServiceGateway to query for metrics
      */
     private CompletableFuture<Void> queryMetrics(
-            final MetricQueryServiceGateway queryServiceGateway) {
+            final MetricQueryServiceGateway queryServiceGateway, CompletableFuture<Void> rosterApplied) {
         LOG.debug("Query metrics for {}.", queryServiceGateway.getAddress());
 
         return queryServiceGateway
                 .queryMetrics(timeout)
-                .thenComposeAsync(
-                        (MetricDumpSerialization.MetricSerializationResult result) -> {
-                            metrics.addAll(deserializer.deserialize(result));
-                            return FutureUtils.completedVoidFuture();
-                        },
+                // The execution roster can be returned after a dump already contains
+                // replacement subtasks. Prune first to avoid discarding that newer dump.
+                .thenAcceptBothAsync(
+                        rosterApplied,
+                        (result, ignored) -> metrics.addAll(deserializer.deserialize(result)),
                         executor);
     }
 
