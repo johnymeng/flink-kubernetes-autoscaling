@@ -50,6 +50,7 @@ import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.HardwareDescription;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobgraph.justin.AppliedSlotSnapshot;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.rest.messages.ResourceProfileInfo;
 import org.apache.flink.runtime.rest.messages.taskmanager.SlotInfo;
@@ -885,6 +886,32 @@ class A4SCacheObservationHoldTest {
     }
 
     @Test
+    void sharedPhysicalProfilesOverrideSyntheticRequestedGeometryForOrdinaryRecovery() throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.CAPACITY_UNSUPPORTED, 2);
+        replay.setExactEvidence("current");
+        replay.autoscaler.scale(replay.context);
+
+        assertEquals(1, replay.requests.get());
+        assertEquals(CacheAction.THROUGHPUT_SCALE_UP_RETAINED_PROFILES,
+                replay.evaluation().getCacheEvaluation().getAction());
+        assertThat(replay.realizedProfiles.get(replay.join.toHexString()))
+                .contains("142553906 bytes", "201326592 bytes", "45665485 bytes");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"stale-attempt", "stale-snapshot", "pending", "rounded", "overcommit"})
+    void unsafePhysicalEvidenceKeepsRecoveryHeld(String defect) throws Exception {
+        var replay = new OverloadFixture(160L << 20, Reason.CAPACITY_UNSUPPORTED, 2);
+        replay.setExactEvidence(defect);
+        replay.assertNoRequest();
+
+        var expected = defect.startsWith("stale")
+                ? Reason.OVERLOAD_LIVE_PROFILE_UNVERIFIED
+                : Reason.OVERLOAD_RESOURCE_GEOMETRY_UNSUPPORTED;
+        assertEquals(expected, replay.evaluation().getCacheEvaluation().getHoldReason());
+    }
+
+    @Test
     void overloadRejectsUnrepresentableRequestedSlotCount() {
         var profile = OverloadFixture.resourceProfile(192);
         var differentProfile = OverloadFixture.resourceProfile(158);
@@ -1108,6 +1135,7 @@ class A4SCacheObservationHoldTest {
         private boolean curveAvailable = true;
         private CacheObservation.Status batchStatus = CacheObservation.Status.VALID;
         private boolean profileUnavailable;
+        private AppliedSlotSnapshot appliedSlots;
         private long sourceCacheBytes;
         private int observedJoinParallelism = 1;
         private int joinCurveParallelism = 1;
@@ -1241,11 +1269,14 @@ class A4SCacheObservationHoldTest {
                     if (profileUnavailable) {
                         throw new TimeoutException();
                     }
-                    return Optional.of(JustinResourceRequirements.newBuilder()
-                            .setParallelismForJobVertex(join, 1, observedJoinParallelism, resourceProfile(192))
+                    var profile = appliedSlots == null ? resourceProfile(192) : resourceProfile(158);
+                    var requested = JustinResourceRequirements.newBuilder()
+                            .setParallelismForJobVertex(join, 1, observedJoinParallelism, profile)
                             .setParallelismForJobVertex(source, 1, edgeParallelism, resourceProfile(158))
                             .setParallelismForJobVertex(sink, 1, edgeParallelism, resourceProfile(158))
-                            .build());
+                            .build();
+                    return Optional.of(new JustinResourceRequirements(
+                            requested.getJobVertexParallelisms(), appliedSlots));
                 }
 
                 @Override
@@ -1317,16 +1348,7 @@ class A4SCacheObservationHoldTest {
                 String target, String firstWorkerId, long firstTaskHeapBytes) {
             // Worker geometry and REST encodings from the c167 scout. Retained profiles use
             // exact MiB, but TaskManager heap and network capacities have byte remainders.
-            var deployed = Configuration.fromMap(Map.of(
-                    "execution.target", target,
-                    "kubernetes.cluster-id", "flink",
-                    "kubernetes.namespace", "scout",
-                    "kubernetes.taskmanager.cpu.amount", "4.0",
-                    "taskmanager.cpu.cores", "4",
-                    "taskmanager.memory.process.size", "2220 mb",
-                    "taskmanager.memory.managed.fraction", "0.4",
-                    "taskmanager.memory.managed.size", "768m",
-                    "taskmanager.numberOfTaskSlots", "4"));
+            var deployed = observedDeployment(target);
             var total = new ResourceProfileInfo(4.0, 543, 0, 768, 174, Map.of());
             var first = worker(new ResourceID(firstWorkerId), total,
                     new ResourceProfileInfo(0.0, 7, 0, 102, 18, Map.of()),
@@ -1337,6 +1359,73 @@ class A4SCacheObservationHoldTest {
                     new ResourceProfileInfo(3.0, 409, 0, 610, 135, Map.of()),
                     observedMemoryConfiguration(570215624L), List.of(resourceProfile(158)));
             return new RetainedProfileResourceAccounting.WorkerSnapshot(deployed, List.of(first, second));
+        }
+
+        private static Configuration observedDeployment(String target) {
+            return Configuration.fromMap(Map.of(
+                    "execution.target", target,
+                    "kubernetes.cluster-id", "flink",
+                    "kubernetes.namespace", "scout",
+                    "kubernetes.taskmanager.cpu.amount", "4.0",
+                    "taskmanager.cpu.cores", "4",
+                    "taskmanager.memory.process.size", "2220 mb",
+                    "taskmanager.memory.managed.fraction", "0.4",
+                    "taskmanager.memory.managed.size", "768m",
+                    "taskmanager.numberOfTaskSlots", "4"));
+        }
+
+        private void setExactEvidence(String defect) {
+            var firstId = new ResourceID("flink-taskmanager-1-1");
+            var secondId = new ResourceID("flink-taskmanager-1-2");
+            var profile = ResourceProfile.newBuilder().setCpuCores(1)
+                    .setTaskHeapMemory(new MemorySize(142553906))
+                    .setManagedMemoryMB(192).setNetworkMemory(new MemorySize(45665485)).build();
+            var tasks = List.of(
+                    appliedTask(join, 0, defect.equals("stale-attempt") ? "old-attempt" : "attempt-0",
+                            firstId, 1, profile),
+                    appliedTask(source, 0, "source-0", firstId, 1, profile),
+                    appliedTask(sink, 0, "sink-0", firstId, 1, profile),
+                    appliedTask(source, 1, "source-1", secondId, 5, profile),
+                    appliedTask(sink, 1, "sink-1", secondId, 5, profile));
+            long now = System.currentTimeMillis();
+            appliedSlots = new AppliedSlotSnapshot(
+                    defect.equals("stale-snapshot") ? now - 90_000 : now, tasks);
+            var capacity = ResourceProfile.newBuilder().setCpuCores(4)
+                    .setTaskHeapMemory(new MemorySize(570215624))
+                    .setManagedMemoryMB(768).setNetworkMemory(new MemorySize(182661941)).build();
+            var firstSlots = IntStream.rangeClosed(1, 4)
+                    .mapToObj(i -> new SlotInfo(context.getJobID(), profile, slotId(i)))
+                    .collect(Collectors.toCollection(ArrayList::new));
+            if (defect.equals("pending")) {
+                firstSlots.set(0, new SlotInfo(context.getJobID(), profile));
+            }
+            if (defect.equals("rounded")) {
+                firstSlots.set(0, new SlotInfo(context.getJobID(), resourceProfile(192), slotId(1)));
+            }
+            if (defect.equals("overcommit")) {
+                firstSlots.add(new SlotInfo(context.getJobID(), profile, slotId(6)));
+            }
+            var deployed = observedDeployment("embedded");
+            var total = ResourceProfileInfo.fromResrouceProfile(capacity);
+            var memory = observedMemoryConfiguration(570215624L);
+            var first = workerWithSlots(firstId, total,
+                    new ResourceProfileInfo(0, 0, 0, 0, 0, Map.of()), memory, firstSlots);
+            var second = workerWithSlots(secondId, total,
+                    ResourceProfileInfo.fromResrouceProfile(capacity.subtract(profile)), memory,
+                    List.of(new SlotInfo(context.getJobID(), profile, slotId(5))));
+            workers = Optional.of(new RetainedProfileResourceAccounting.WorkerSnapshot(
+                    deployed, List.of(first, second)));
+        }
+
+        private static String slotId(int index) {
+            return String.format("%032x", index);
+        }
+
+        private static AppliedSlotSnapshot.Task appliedTask(
+                JobVertexID vertex, int subtask, String attempt, ResourceID worker, int slot,
+                ResourceProfile profile) {
+            return new AppliedSlotSnapshot.Task(vertex.toHexString(), subtask, attempt,
+                    worker.getResourceIdString(), slotId(slot), profile);
         }
 
         private static TaskExecutorMemoryConfiguration observedMemoryConfiguration(long taskHeapBytes) {
@@ -1361,7 +1450,14 @@ class A4SCacheObservationHoldTest {
                 TaskExecutorMemoryConfiguration memory, List<ResourceProfile> profiles) {
             var slots = profiles.stream().map(profile -> new SlotInfo(context.getJobID(), profile))
                     .collect(Collectors.toList());
-            return new TaskManagerDetailsInfo(id, "worker", 0, 0, 0, 4, 4 - profiles.size(), total, free,
+            return workerWithSlots(id, total, free, memory, slots);
+        }
+
+        private TaskManagerDetailsInfo workerWithSlots(
+                ResourceID id, ResourceProfileInfo total, ResourceProfileInfo free,
+                TaskExecutorMemoryConfiguration memory, List<SlotInfo> slots) {
+            return new TaskManagerDetailsInfo(id, "worker", 0, 0, 0, 4,
+                    Math.max(0, 4 - slots.size()), total, free,
                     new HardwareDescription(4, 0, 0, 0), memory, false,
                     slots,
                     new TaskManagerMetricsInfo(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,

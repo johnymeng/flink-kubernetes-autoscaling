@@ -17,13 +17,20 @@
  */
 package org.apache.flink.runtime.jobgraph.justin;
 
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.dispatcher.SingleJobJobGraphStore;
 import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsBody;
+import org.apache.flink.runtime.rest.util.RestMapperUtils;
 import org.apache.flink.util.InstantiationUtil;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.junit.jupiter.api.Test;
+
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -43,6 +50,32 @@ class JustinResourceRequirementsSerializationTest {
         assertThat(before).isNotEqualTo(after);
         JustinVertexResourceRequirements restored = InstantiationUtil.clone(after);
         assertThat(restored).isEqualTo(after).hasSameHashCodeAs(after);
+    }
+
+    @Test
+    void exposesExactPhysicalProfileSeparatelyAndNeverAcceptsItAsAnUpdate() throws Exception {
+        JobVertexID vertex = new JobVertexID();
+        ResourceProfile physical = ResourceProfile.newBuilder().setCpuCores(1)
+                .setTaskHeapMemory(new MemorySize(142553906))
+                .setManagedMemoryMB(192)
+                .setNetworkMemory(new MemorySize(45665485)).build();
+        JustinResourceRequirements request = JustinResourceRequirements.newBuilder()
+                .setParallelismForJobVertex(vertex, 1, 1, ResourceProfile.UNKNOWN).build();
+        AppliedSlotSnapshot applied = new AppliedSlotSnapshot(17L, Collections.singletonList(
+                new AppliedSlotSnapshot.Task(vertex.toHexString(), 0, "attempt", "worker",
+                        "00000000000000000000000000000001", physical)));
+        JustinResourceRequirements report = new JustinResourceRequirements(
+                request.getJobVertexParallelisms(), applied);
+        ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
+        JustinResourceRequirementsBody restored = mapper.readValue(mapper.writeValueAsBytes(new JustinResourceRequirementsBody(
+                InstantiationUtil.clone(report))), JustinResourceRequirementsBody.class);
+
+        assertThat(restored.asJobResourceRequirements().get().getAppliedSlots()).isNull();
+        JustinResourceRequirements observed = restored.asObservedRequirements().get();
+        assertThat(observed.getResourceProfile(vertex)).isEqualTo(ResourceProfile.UNKNOWN);
+        assertThat(observed.getAppliedSlots().capturedAtMillis).isEqualTo(17L);
+        assertThat(observed.getAppliedSlots().tasks.get(0).profile).isEqualTo(physical);
+        assertThat(observed.getAppliedSlots().tasks.get(0).attempt).isEqualTo("attempt");
     }
 
     @Test

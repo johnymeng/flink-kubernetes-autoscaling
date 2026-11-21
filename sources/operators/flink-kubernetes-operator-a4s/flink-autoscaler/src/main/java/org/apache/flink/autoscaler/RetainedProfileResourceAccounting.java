@@ -17,6 +17,8 @@
 
 package org.apache.flink.autoscaler;
 
+import org.apache.flink.a4s.core.CacheObservation;
+import org.apache.flink.a4s.core.CacheObservationBatch;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.configuration.ClusterOptions;
 import org.apache.flink.configuration.Configuration;
@@ -27,9 +29,13 @@ import org.apache.flink.configuration.ResourceManagerOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.TaskExecutorProcessUtils;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobgraph.justin.AppliedSlotSnapshot;
 import org.apache.flink.runtime.resourcemanager.WorkerResourceSpec;
 import org.apache.flink.runtime.rest.messages.ResourceProfileInfo;
 import org.apache.flink.runtime.rest.messages.taskmanager.TaskManagerDetailsInfo;
+
+import javax.annotation.Nullable;
 
 import java.math.BigDecimal;
 import java.util.HashMap;
@@ -38,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /** Accounts for explicit, per-subtask profiles against the deployed fine-grained worker geometry. */
@@ -48,8 +55,15 @@ final class RetainedProfileResourceAccounting {
     static Optional<Allocation> estimate(
             JobID job, WorkerSnapshot snapshot, Map<ResourceProfile, Long> running,
             Map<ResourceProfile, Long> requested) {
-        if (snapshot.workers.isEmpty() || running.isEmpty()
-                || requested.isEmpty()) {
+        return estimate(job, snapshot, running, requested, null);
+    }
+
+    static Optional<Allocation> estimate(
+            JobID job, WorkerSnapshot snapshot, Map<ResourceProfile, Long> running,
+            Map<ResourceProfile, Long> requested, @Nullable AppliedSlotSnapshot appliedSlots) {
+        if (snapshot.workers.isEmpty() || running.isEmpty() || requested.isEmpty()
+                || (appliedSlots != null && !CacheObservation.isFresh(
+                        appliedSlots.capturedAtMillis, System.currentTimeMillis()))) {
             return Optional.empty();
         }
         try {
@@ -81,8 +95,13 @@ final class RetainedProfileResourceAccounting {
                     || !representableMebibytes(capacity.getTaskHeapMemory())
                     || !representableMebibytes(capacity.getTaskOffHeapMemory())
                     || !representableMebibytes(capacity.getManagedMemory())
-                    || !representableMebibytes(capacity.getNetworkMemory())
-                    || !matchesWorkers(job, capacity, processMemory, snapshot.workers, running)) {
+                    || !representableMebibytes(capacity.getNetworkMemory())) {
+                return Optional.empty();
+            }
+            boolean verified = appliedSlots == null
+                    ? matchesWorkers(job, capacity, processMemory, snapshot.workers, running)
+                    : matchesExactWorkerAllocations(job, capacity, processMemory, snapshot.workers, appliedSlots);
+            if (!verified) {
                 return Optional.empty();
             }
 
@@ -96,6 +115,66 @@ final class RetainedProfileResourceAccounting {
                 | ArithmeticException e) {
             return Optional.empty();
         }
+    }
+
+    @Nullable
+    static Map<JobVertexID, Map<Integer, AppliedSlotSnapshot.Task>> groupTasks(
+            AppliedSlotSnapshot snapshot, Set<JobVertexID> vertices, long nowMillis) {
+        if (!CacheObservation.isFresh(snapshot.capturedAtMillis, nowMillis)) {
+            return null;
+        }
+        var byVertex = new HashMap<JobVertexID, Map<Integer, AppliedSlotSnapshot.Task>>();
+        var byId = new HashMap<String, JobVertexID>();
+        vertices.forEach(vertex -> byId.put(vertex.toHexString(), vertex));
+        var attempts = new HashSet<String>();
+        for (var task : snapshot.tasks) {
+            var vertex = byId.get(task.vertex);
+            if (vertex == null || task.subtask < 0 || task.attempt == null || task.attempt.isBlank()
+                    || task.worker == null || task.worker.isBlank() || task.allocation == null
+                    || !task.allocation.matches("[0-9a-f]{32}") || task.profile == null
+                    || !FinalScalingAction.canEncodeExact(task.profile) || !attempts.add(task.attempt)
+                    || byVertex.computeIfAbsent(vertex, id -> new HashMap<>())
+                            .putIfAbsent(task.subtask, task) != null) {
+                return null;
+            }
+        }
+        return byVertex.keySet().equals(vertices) ? byVertex : null;
+    }
+
+    @Nullable
+    static ResourceProfile verifiedProfile(Map<Integer, AppliedSlotSnapshot.Task> tasks, int parallelism) {
+        if (parallelism <= 0 || tasks.size() != parallelism || !tasks.containsKey(0)) {
+            return null;
+        }
+        var profile = tasks.get(0).profile;
+        for (int i = 1; i < parallelism; i++) {
+            var task = tasks.get(i);
+            if (task == null || !profile.equals(task.profile)) {
+                return null;
+            }
+        }
+        return profile;
+    }
+
+    static boolean matchesCacheAttempts(
+            Map<Integer, AppliedSlotSnapshot.Task> tasks, @Nullable CacheObservationBatch batch) {
+        if (batch == null) {
+            return true;
+        }
+        for (var observation : batch.subtasks) {
+            var task = tasks.get(observation.subtask);
+            if (task == null || !task.attempt.equals(observation.attempt)) {
+                return false;
+            }
+            if (observation.endpoint != null && observation.endpoint.appliedSlot != null) {
+                var slot = observation.endpoint.appliedSlot;
+                if (!task.allocation.equals(slot.allocationId)
+                        || task.profile.getManagedMemory().getBytes() != slot.managedMemoryBytes) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static boolean isNativeApplication(
@@ -136,16 +215,9 @@ final class RetainedProfileResourceAccounting {
         if (profiles.size() != running.size()) {
             return false;
         }
-        var expectedTotal = ResourceProfileInfo.fromResrouceProfile(capacity);
         for (var worker : workers) {
-            var memory = worker.getMemoryConfiguration();
-            if (!identities.add(worker.getResourceId()) || worker.getBlocked()
-                    || !expectedTotal.equals(worker.getTotalResource())
-                    || !Objects.equals(memory.getTotalProcessMemory(), processMemory.getBytes())
-                    || !Objects.equals(memory.getTaskHeap(), capacity.getTaskHeapMemory().getBytes())
-                    || !Objects.equals(memory.getTaskOffHeap(), capacity.getTaskOffHeapMemory().getBytes())
-                    || !Objects.equals(memory.getManagedMemoryTotal(), capacity.getManagedMemory().getBytes())
-                    || !Objects.equals(memory.getNetworkMemory(), capacity.getNetworkMemory().getBytes())) {
+            if (!identities.add(worker.getResourceId())
+                    || !matchesWorkerCapacity(worker, capacity, processMemory)) {
                 return false;
             }
             var free = capacity;
@@ -168,6 +240,60 @@ final class RetainedProfileResourceAccounting {
             }
         }
         return occupied.equals(running);
+    }
+
+    private static boolean matchesWorkerCapacity(
+            TaskManagerDetailsInfo worker, ResourceProfile capacity, MemorySize processMemory) {
+        var memory = worker.getMemoryConfiguration();
+        return !worker.getBlocked()
+                && ResourceProfileInfo.fromResrouceProfile(capacity).equals(worker.getTotalResource())
+                && Objects.equals(memory.getTotalProcessMemory(), processMemory.getBytes())
+                && Objects.equals(memory.getTaskHeap(), capacity.getTaskHeapMemory().getBytes())
+                && Objects.equals(memory.getTaskOffHeap(), capacity.getTaskOffHeapMemory().getBytes())
+                && Objects.equals(memory.getManagedMemoryTotal(), capacity.getManagedMemory().getBytes())
+                && Objects.equals(memory.getNetworkMemory(), capacity.getNetworkMemory().getBytes());
+    }
+
+    static boolean matchesExactWorkerAllocations(
+            JobID job, ResourceProfile capacity, MemorySize processMemory,
+            List<TaskManagerDetailsInfo> workers, AppliedSlotSnapshot snapshot) {
+        var byAllocation = new HashMap<String, AppliedSlotSnapshot.Task>();
+        for (var task : snapshot.tasks) {
+            var prior = byAllocation.putIfAbsent(task.allocation, task);
+            if (prior != null && (!prior.worker.equals(task.worker) || !prior.profile.equals(task.profile))) {
+                return false;
+            }
+        }
+        var workerIds = new HashSet<String>();
+        var reservations = new HashSet<String>();
+        for (var worker : workers) {
+            var workerId = worker.getResourceId().getResourceIdString();
+            if (!workerIds.add(workerId) || !matchesWorkerCapacity(worker, capacity, processMemory)) {
+                return false;
+            }
+            var free = capacity;
+            for (var slot : worker.getAllocatedSlots()) {
+                var allocation = slot.getAllocationId();
+                var profile = slot.getExactProfile();
+                if (allocation == null || profile == null || !allocation.matches("[0-9a-f]{32}")
+                        || !job.equals(slot.getJobId()) || !reservations.add(allocation)
+                        || !FinalScalingAction.canEncodeExact(profile)
+                        || !ResourceProfileInfo.fromResrouceProfile(profile).equals(slot.getResource())
+                        || !free.allFieldsNoLessThan(profile)) {
+                    return false;
+                }
+                var used = byAllocation.remove(allocation);
+                if (used != null && (!workerId.equals(used.worker) || !profile.equals(used.profile))) {
+                    return false;
+                }
+                free = free.subtract(profile);
+            }
+            if (!ResourceProfileInfo.fromResrouceProfile(free).equals(worker.getFreeResource())) {
+                return false;
+            }
+        }
+        // Reserved but unused slots consume worker capacity, without becoming running tasks.
+        return !snapshot.tasks.isEmpty() && byAllocation.isEmpty();
     }
 
     static long estimateRequestedWorkers(

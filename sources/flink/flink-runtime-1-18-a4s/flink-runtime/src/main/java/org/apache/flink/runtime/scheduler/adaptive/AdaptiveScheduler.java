@@ -55,6 +55,7 @@ import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.executiongraph.DefaultVertexAttemptNumberStore;
 import org.apache.flink.runtime.executiongraph.ExecutionAttemptID;
+import org.apache.flink.runtime.executiongraph.Execution;
 import org.apache.flink.runtime.executiongraph.ExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.ExecutionVertex;
@@ -74,6 +75,7 @@ import org.apache.flink.runtime.jobgraph.JobType;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.jobgraph.justin.AppliedSlotSnapshot;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
 import org.apache.flink.runtime.jobmanager.scheduler.NoResourceAvailableException;
@@ -930,7 +932,41 @@ public class AdaptiveScheduler
                     vertex.getParallelism(),
                     rp);
         }
-        return builder.build();
+        return new JustinResourceRequirements(
+                builder.build().getJobVertexParallelisms(), captureAppliedSlots());
+    }
+
+    private AppliedSlotSnapshot captureAppliedSlots() {
+        final long capturedAtMillis = System.currentTimeMillis();
+        final List<AppliedSlotSnapshot.Task> tasks = new ArrayList<>();
+        if (state instanceof Executing) {
+            final Map<AllocationID, SlotInfo> slots = new HashMap<>();
+            for (SlotInfo slot : declarativeSlotPool.getAllSlotsInformation()) {
+                slots.put(slot.getAllocationId(), slot);
+            }
+            final ExecutionGraph graph = ((Executing) state).getExecutionGraph();
+            for (ExecutionVertex vertex : graph.getAllExecutionVertices()) {
+                final Execution execution = vertex.getCurrentExecutionAttempt();
+                final AllocationID allocation = execution.getAssignedAllocationID();
+                final SlotInfo slot = slots.get(allocation);
+                if (vertex.getCurrentExecutions().size() != 1
+                        || execution.getState() != ExecutionState.RUNNING
+                        || slot == null
+                        || declarativeSlotPool.containsFreeSlot(allocation)
+                        || execution.getAssignedResourceLocation() == null
+                        || !slot.getTaskManagerLocation().getResourceID().equals(
+                                execution.getAssignedResourceLocation().getResourceID())) {
+                    return new AppliedSlotSnapshot(capturedAtMillis, Collections.emptyList());
+                }
+                tasks.add(new AppliedSlotSnapshot.Task(
+                        vertex.getJobvertexId().toHexString(),
+                        vertex.getParallelSubtaskIndex(),
+                        execution.getAttemptId().toString(),
+                        slot.getTaskManagerLocation().getResourceID().getResourceIdString(),
+                        allocation.toHexString(), slot.getResourceProfile()));
+            }
+        }
+        return new AppliedSlotSnapshot(capturedAtMillis, tasks);
     }
 
     @Override

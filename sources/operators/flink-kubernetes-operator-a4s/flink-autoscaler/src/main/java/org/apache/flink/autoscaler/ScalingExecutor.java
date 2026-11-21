@@ -49,6 +49,7 @@ import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobgraph.justin.AppliedSlotSnapshot;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.rest.messages.ClusterConfigurationInfoHeaders;
 import org.apache.flink.runtime.rest.messages.ConfigurationInfoEntry;
@@ -275,6 +276,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
         Map<JobVertexID, ResourceProfile> profiles;
         var observedProfiles = new HashMap<JobVertexID, ResourceProfile>();
+        AppliedSlotSnapshot appliedSlots = null;
         if (throughputOnly) {
             var resolved = preserveLiveProfiles(context, evaluated, overloadObservations, frozen, observedProfiles);
             if (resolved.isEmpty()) {
@@ -283,7 +285,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 }
                 return CacheAction.POLICY_HOLD;
             }
-            profiles = resolved.get();
+            profiles = resolved.get().profiles;
+            appliedSlots = resolved.get().appliedSlots;
         } else {
             var live = readCurrentRequirements(context);
             if (live.isEmpty()
@@ -330,7 +333,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             int requested = entry.getValue();
             var prior = observedProfiles.get(id);
             var profile = profiles.get(id);
-            if (prior == null || profile == null || !FinalScalingAction.canEncode(profile)) {
+            if (prior == null || profile == null || !(throughputOnly && appliedSlots != null
+                    ? FinalScalingAction.canEncodeExact(profile) : FinalScalingAction.canEncode(profile))) {
                 evaluation.setHoldReason(Reason.FINAL_PROFILE_UNVERIFIED);
                 return CacheAction.POLICY_HOLD;
             }
@@ -394,7 +398,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 evaluation.getId().toString(), requestedAt, mode, vertices, configOverrides);
         if (managedMemoryWouldExceedResources(context, tunedConfig, evaluated, action)
                 || finalWorkerRequestExceedsResources(
-                        context, evaluated, summaries, observedProfiles, profiles, throughputOnly)) {
+                        context, evaluated, summaries, observedProfiles, profiles, throughputOnly, appliedSlots)) {
             if (evaluation.getHoldReason() == null) {
                 evaluation.setHoldReason(Reason.FINAL_RESOURCE_LIMIT);
             }
@@ -529,7 +533,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             Map<JobVertexID, ScalingSummary> summaries,
             Map<JobVertexID, ResourceProfile> currentProfiles,
             Map<JobVertexID, ResourceProfile> profiles,
-            boolean throughputOnly) {
+            boolean throughputOnly, @Nullable AppliedSlotSnapshot appliedSlots) {
         var snapshot = readLiveWorkers(context);
         if (snapshot.isEmpty()) {
             evaluated.getCacheEvaluation().setHoldReason(throughputOnly
@@ -547,7 +551,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                     profile, summary == null ? current : summary.getNewParallelism(), Math::addExact);
         });
         var estimate = RetainedProfileResourceAccounting.estimate(
-                context.getJobID(), snapshot.get(), running, requested);
+                context.getJobID(), snapshot.get(), running, requested, appliedSlots);
         if (estimate.isEmpty()) {
             evaluated.getCacheEvaluation().setHoldReason(throughputOnly
                     ? Reason.OVERLOAD_RESOURCE_GEOMETRY_UNSUPPORTED : Reason.FINAL_RESOURCE_LIMIT);
@@ -624,7 +628,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         }
     }
 
-    private Optional<Map<JobVertexID, ResourceProfile>> preserveLiveProfiles(
+    private Optional<RetainedProfiles> preserveLiveProfiles(
             Context context,
             EvaluatedMetrics evaluated,
             Map<JobVertexID, CacheObservationBatch> observations, Set<JobVertexID> frozen,
@@ -646,10 +650,18 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         var overrides = new HashMap<JobVertexID, ResourceProfile>();
         var cacheExempt = conf.get(A4S_CACHE_METRICS_EXEMPT_VERTICES);
         long nowMillis = System.currentTimeMillis();
+        var appliedSlots = requirements.get().getAppliedSlots();
+        var appliedByVertex = appliedSlots == null ? null
+                : RetainedProfileResourceAccounting.groupTasks(appliedSlots, vertices.keySet(), nowMillis);
+        if (appliedSlots != null && appliedByVertex == null) {
+            return Optional.empty();
+        }
         for (var entry : vertices.entrySet()) {
             var id = entry.getKey();
             int current = (int) evaluated.getVertexMetrics().get(id).get(PARALLELISM).getCurrent();
-            var profile = currentResourceProfile(requirements.get(), id, current);
+            var tasks = appliedByVertex == null ? null : appliedByVertex.get(id);
+            var profile = tasks == null ? currentResourceProfile(requirements.get(), id, current)
+                    : RetainedProfileResourceAccounting.verifiedProfile(tasks, current);
             if (profile == null || !profile.getExtendedResources().isEmpty()) {
                 return Optional.empty();
             }
@@ -668,6 +680,9 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                     || profile.getManagedMemory().getMebiBytes() > Integer.MAX_VALUE)) {
                 return Optional.empty();
             }
+            if (tasks != null && !RetainedProfileResourceAccounting.matchesCacheAttempts(tasks, batch)) {
+                return Optional.empty();
+            }
             Long trustedManagedBytes = cacheFree || corroboratesManagedBudget(
                     context.getJobID(), id, current, managedBytes, ratio, batch, nowMillis)
                     ? managedBytes : null;
@@ -683,7 +698,18 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                     .setNetworkMemory(profile.getNetworkMemory())
                     .build());
         }
-        return Optional.of(overrides);
+        return Optional.of(new RetainedProfiles(overrides, appliedSlots));
+    }
+
+    private static final class RetainedProfiles {
+        private final Map<JobVertexID, ResourceProfile> profiles;
+        @Nullable private final AppliedSlotSnapshot appliedSlots;
+
+        private RetainedProfiles(
+                Map<JobVertexID, ResourceProfile> profiles, @Nullable AppliedSlotSnapshot appliedSlots) {
+            this.profiles = profiles;
+            this.appliedSlots = appliedSlots;
+        }
     }
 
     private static boolean corroboratesManagedBudget(
@@ -726,7 +752,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         parameters.jobPathParameter.resolve(context.getJobID());
         try (var client = context.getRestClusterClient()) {
             return client.sendRequest(headers, parameters, EmptyRequestBody.getInstance())
-                    .get(10, TimeUnit.SECONDS).asJobResourceRequirements();
+                    .get(10, TimeUnit.SECONDS).asObservedRequirements();
         }
     }
 

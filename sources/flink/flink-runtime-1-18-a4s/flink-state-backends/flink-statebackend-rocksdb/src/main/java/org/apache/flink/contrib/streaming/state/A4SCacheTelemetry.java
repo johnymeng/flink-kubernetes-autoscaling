@@ -25,6 +25,7 @@ import org.apache.flink.runtime.metrics.A4SHistogramMetricCodec;
 
 import org.rocksdb.Cache;
 import org.rocksdb.LRUCache;
+import org.rocksdb.WriteBufferManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -48,8 +49,10 @@ final class A4SCacheTelemetry {
     private static final long INTERVAL_NANOS = TimeUnit.SECONDS.toNanos(10);
     private static final int MAX_BUCKETS = 65_536;
     private static final int SNAPSHOT_HEADER = 10;
-    private static final Method LOOKUP_SNAPSHOT = method("getA4SCacheLookupSnapshot");
-    private static final Method QUICK_MRC_SNAPSHOT = method("getA4SQuickMrcSnapshot");
+    private static final Method LOOKUP_SNAPSHOT = method(LRUCache.class, "getA4SCacheLookupSnapshot");
+    private static final Method QUICK_MRC_SNAPSHOT = method(LRUCache.class, "getA4SQuickMrcSnapshot");
+    private static final Method WRITE_BUFFER_BUDGET =
+            method(WriteBufferManager.class, "getBufferSizeBytesV1");
 
     private final String process;
     private final long cacheId;
@@ -59,6 +62,8 @@ final class A4SCacheTelemetry {
     private final Map<Source, Integer> sources = new LinkedHashMap<>();
 
     private boolean compatible = true;
+    private boolean writeBufferCompatible = true;
+    @Nullable private WriteBufferManager writeBufferManager;
     private boolean sampled;
     @Nullable private long[] previous;
 
@@ -69,11 +74,12 @@ final class A4SCacheTelemetry {
         this.binItems = binItems;
     }
 
-    static void register(Cache cache, double sampleRate, int binItems) {
+    static void register(
+            Cache cache, WriteBufferManager writeBufferManager, double sampleRate, int binItems) {
         if (sampleRate > 0 && binItems > 0) {
             Source source = nativeSource(cache);
             if (source != null) {
-                LIVE.register(cache, source, sampleRate, binItems);
+                LIVE.register(cache, source, sampleRate, binItems, writeBufferManager);
             }
         }
     }
@@ -177,6 +183,8 @@ final class A4SCacheTelemetry {
             return interval;
         }
         long[] state = interval.state;
+        CacheObservation.WriteBufferBudget writeBufferBudget = writeBufferCompatible
+                ? readWriteBufferBudget(writeBufferManager) : null;
         String counters = timing.read(state, interval.wallTime, nativeNanos);
         long end = System.nanoTime();
         if (counters.isEmpty()) {
@@ -187,7 +195,7 @@ final class A4SCacheTelemetry {
                     new StackDistanceHistogram(
                             Arrays.copyOfRange(state, SNAPSHOT_HEADER, state.length),
                             state[8], 1, binItems, 4096),
-                    counters, appliedSlot));
+                    counters, appliedSlot, writeBufferBudget));
     }
 
     private Interval readInterval() {
@@ -322,10 +330,26 @@ final class A4SCacheTelemetry {
     }
 
     @Nullable
-    private static Method method(String name) {
+    private static Method method(Class<?> type, String name) {
         try {
-            return LRUCache.class.getMethod(name);
+            return type.getMethod(name);
         } catch (NoSuchMethodException | LinkageError unavailable) {
+            return null;
+        }
+    }
+
+    @Nullable
+    static CacheObservation.WriteBufferBudget readWriteBufferBudget(
+            @Nullable WriteBufferManager manager) {
+        if (manager == null || WRITE_BUFFER_BUDGET == null) {
+            return null;
+        }
+        try {
+            long bytes = (Long) WRITE_BUFFER_BUDGET.invoke(manager);
+            return bytes >= 0 ? new CacheObservation.WriteBufferBudget(
+                    CacheObservation.WriteBufferBudget.VERSION, bytes) : null;
+        } catch (ReflectiveOperationException | LinkageError unavailable) {
+            // Closed managers and mismatched JNI bindings cannot attest a native budget.
             return null;
         }
     }
@@ -354,16 +378,24 @@ final class A4SCacheTelemetry {
         }
 
         synchronized void register(Object allocation, Source source, double sampleRate, int binItems) {
+            register(allocation, source, sampleRate, binItems, null);
+        }
+
+        synchronized void register(
+                Object allocation, Source source, double sampleRate, int binItems,
+                @Nullable WriteBufferManager writeBufferManager) {
             if (allocations.putIfAbsent(allocation, source) != null) {
                 return;
             }
             A4SCacheTelemetry publisher = live.computeIfAbsent(source.cacheId, id -> {
                 A4SCacheTelemetry created = new A4SCacheTelemetry(process, id, sampleRate, binItems);
                 created.markRegistration(source);
+                created.writeBufferManager = writeBufferManager;
                 return created;
             });
             synchronized (publisher) {
                 publisher.compatible &= publisher.sampleRate == sampleRate && publisher.binItems == binItems;
+                publisher.writeBufferCompatible &= publisher.writeBufferManager == writeBufferManager;
                 publisher.sources.merge(source, 1, Integer::sum);
             }
         }

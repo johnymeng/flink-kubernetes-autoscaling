@@ -16,6 +16,7 @@ patches=(
     frocksdb-a4s-cache-lookup-v1
     frocksdb-a4s-quickmrc-snapshot-v1
     frocksdb-a4s-no-sampled-hit-log
+    frocksdb-a4s-write-buffer-budget-v1
 )
 for patch in "${patches[@]}"; do
     git -C "$build_dir/source" apply --no-index "$REPO_ROOT/sources/libs/patches/$patch.patch"

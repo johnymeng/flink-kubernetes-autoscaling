@@ -1,0 +1,52 @@
+diff --git a/java/src/main/java/org/rocksdb/WriteBufferManager.java b/java/src/main/java/org/rocksdb/WriteBufferManager.java
+--- a/java/src/main/java/org/rocksdb/WriteBufferManager.java
++++ b/java/src/main/java/org/rocksdb/WriteBufferManager.java
+@@ -27,6 +27,25 @@
+     super(newWriteBufferManager(bufferSizeBytes, cache.nativeHandle_));
+   }
+
++  /**
++   * Reads the current native write-buffer budget in bytes (capacity readback ABI 1).
++   *
++   * @throws IllegalStateException if this manager has been closed
++   */
++  public synchronized long getBufferSizeBytesV1() {
++    if (!isOwningHandle()) {
++      throw new IllegalStateException("WriteBufferManager is closed");
++    }
++    return getBufferSizeBytesNativeV1(nativeHandle_);
++  }
++
++  @Override
++  public synchronized void close() {
++    super.close();
++  }
++
++  private static native long getBufferSizeBytesNativeV1(final long handle);
++
+   private native static long newWriteBufferManager(final long bufferSizeBytes, final long cacheHandle);
+   @Override
+   protected native void disposeInternal(final long handle);
+diff --git a/java/rocksjni/write_buffer_manager.cc b/java/rocksjni/write_buffer_manager.cc
+--- a/java/rocksjni/write_buffer_manager.cc
++++ b/java/rocksjni/write_buffer_manager.cc
+@@ -29,6 +29,19 @@
+
+ /*
+  * Class:     org_rocksdb_WriteBufferManager
++ * Method:    getBufferSizeBytesNativeV1
++ * Signature: (J)J
++ */
++jlong Java_org_rocksdb_WriteBufferManager_getBufferSizeBytesNativeV1(
++        JNIEnv* /*env*/, jclass /*jclazz*/, jlong jhandle) {
++  const auto* write_buffer_manager =
++      reinterpret_cast<const std::shared_ptr<ROCKSDB_NAMESPACE::WriteBufferManager>*>(
++          jhandle);
++  return static_cast<jlong>((*write_buffer_manager)->buffer_size());
++}
++
++/*
++ * Class:     org_rocksdb_WriteBufferManager
+  * Method:    disposeInternal
+  * Signature: (J)V
+  */

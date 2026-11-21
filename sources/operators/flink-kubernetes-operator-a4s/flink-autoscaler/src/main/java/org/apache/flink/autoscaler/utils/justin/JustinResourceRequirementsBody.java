@@ -12,6 +12,7 @@ import org.apache.flink.runtime.rest.messages.json.JobVertexIDKeySerializer;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnyGetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnySetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonSerialize;
 
@@ -24,6 +25,7 @@ import java.util.Optional;
 
 /** Body for change job requests. */
 @FlinkJsonSchema.AdditionalFields(type = JustinVertexResourceRequirements.class)
+@JsonIgnoreProperties("appliedSlots")
 public class JustinResourceRequirementsBody implements RequestBody, ResponseBody {
 
     @JsonAnySetter

@@ -100,13 +100,18 @@ public class FinalScalingAction {
     }
 
     static boolean canEncode(ResourceProfile profile) {
+        return canEncodeExact(profile) && List.of(profile.getTaskHeapMemory(),
+                        profile.getTaskOffHeapMemory(), profile.getManagedMemory(), profile.getNetworkMemory())
+                .stream().allMatch(memory -> memory.getBytes() % BYTES_PER_MIB == 0);
+    }
+
+    static boolean canEncodeExact(ResourceProfile profile) {
         return !ResourceProfile.UNKNOWN.equals(profile) && !ResourceProfile.ANY.equals(profile)
                 && profile.getExtendedResources().isEmpty()
                 && profile.getCpuCores().getValue().signum() > 0
                 && List.of(profile.getTaskHeapMemory(), profile.getTaskOffHeapMemory(),
                                 profile.getManagedMemory(), profile.getNetworkMemory())
-                        .stream().allMatch(memory -> memory.getBytes() % BYTES_PER_MIB == 0
-                                && memory.getMebiBytes() <= Integer.MAX_VALUE);
+                        .stream().allMatch(memory -> memory.getMebiBytes() <= Integer.MAX_VALUE);
     }
 
     static String encodeProfile(ResourceProfile profile) {

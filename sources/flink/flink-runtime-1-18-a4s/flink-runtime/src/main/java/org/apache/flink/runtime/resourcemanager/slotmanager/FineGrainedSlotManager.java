@@ -804,7 +804,10 @@ public class FineGrainedSlotManager implements SlotManager {
         return taskManagerTracker.getRegisteredTaskManager(instanceID)
                 .map(TaskManagerInfo::getAllocatedSlots).map(Map::values)
                 .orElse(Collections.emptyList()).stream()
-                .map(slot -> new SlotInfo(slot.getJobId(), slot.getResourceProfile()))
+                .map(slot -> slot.getState() == SlotState.ALLOCATED
+                        ? new SlotInfo(slot.getJobId(), slot.getResourceProfile(),
+                                slot.getAllocationId().toHexString())
+                        : new SlotInfo(slot.getJobId(), slot.getResourceProfile()))
                 .collect(Collectors.toList());
     }
 

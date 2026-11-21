@@ -19,6 +19,7 @@ package org.apache.flink.runtime.rest.messages.job.justin;
 
 import org.apache.flink.annotation.docs.FlinkJsonSchema;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobgraph.justin.AppliedSlotSnapshot;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.jobgraph.justin.JustinVertexResourceRequirements;
 import org.apache.flink.runtime.rest.messages.RequestBody;
@@ -29,6 +30,8 @@ import org.apache.flink.runtime.rest.messages.json.JobVertexIDKeySerializer;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnyGetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnySetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonSerialize;
 
@@ -48,6 +51,10 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
     @JsonDeserialize(keyUsing = JobVertexIDKeyDeserializer.class)
     private final Map<JobVertexID, JustinVertexResourceRequirements> jobVertexResourceRequirements;
 
+    @JsonProperty("appliedSlots")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Nullable private AppliedSlotSnapshot appliedSlots;
+
     public JustinResourceRequirementsBody() {
         this(null);
     }
@@ -56,6 +63,7 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
             @Nullable JustinResourceRequirements jobResourceRequirements) {
         if (jobResourceRequirements != null) {
             this.jobVertexResourceRequirements = jobResourceRequirements.getJobVertexParallelisms();
+            this.appliedSlots = jobResourceRequirements.getAppliedSlots();
         } else {
             this.jobVertexResourceRequirements = new HashMap<>();
         }
@@ -67,6 +75,11 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
             return Optional.empty();
         }
         return Optional.of(new JustinResourceRequirements(jobVertexResourceRequirements));
+    }
+
+    public Optional<JustinResourceRequirements> asObservedRequirements() {
+        return asJobResourceRequirements().map(requested ->
+                new JustinResourceRequirements(requested.getJobVertexParallelisms(), appliedSlots));
     }
 
     @Override

@@ -242,6 +242,29 @@ class A4SCacheObservationTransportTest {
     }
 
     @Test
+    void optionalNativeBudgetSurvivesTransportWithoutChangingCacheOrTimingIdentity() {
+        long now = System.currentTimeMillis();
+        CacheObservation row = paired(observation(0, 0, new long[] {7}, now), now, 1, 3);
+        assertNull(CacheObservation.fromMetricString(row.toMetricString()).endpoint.writeBufferBudget);
+        for (int version : new int[] {1, 2}) {
+            CacheObservation.Endpoint nativeEndpoint = new CacheObservation.Endpoint(
+                    row.endpoint.ownershipGeneration, row.endpoint.acquisitionStartNanos,
+                    row.endpoint.nativeNanos, row.endpoint.acquisitionEndNanos,
+                    row.endpoint.totalLookups, row.endpoint.totalMisses,
+                    row.endpoint.cumulativeHistogram, row.endpoint.timing, null,
+                    new CacheObservation.WriteBufferBudget(version, 67_108_864L));
+            CacheObservation observed = new CacheObservation(row.version, row.job, row.vertex,
+                    row.subtask, row.attempt, row.status, row.window, row.histogram, nativeEndpoint);
+            CacheObservation decoded = CacheObservation.fromMetricString(observed.toMetricString());
+            assertEquals(row.version, decoded.version);
+            assertEquals(row.window.capacityBytes, decoded.window.capacityBytes);
+            assertEquals(row.endpoint.timing, decoded.endpoint.timing);
+            assertEquals(67_108_864L, decoded.endpoint.writeBufferBudget.bytes);
+            assertEquals(version == 1, decoded.endpoint.writeBufferBudget.supportsReadback());
+        }
+    }
+
+    @Test
     void delayedPreResizeRosterCannotRemoveReplacementTimingEndpoint() throws Exception {
         assertReplacementSurvivesRoster(2, false, false);
     }

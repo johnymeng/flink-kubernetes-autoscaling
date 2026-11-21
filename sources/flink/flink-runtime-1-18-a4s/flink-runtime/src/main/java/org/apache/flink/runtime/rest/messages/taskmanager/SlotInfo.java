@@ -28,9 +28,12 @@ import org.apache.flink.util.Preconditions;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonSerialize;
+
+import javax.annotation.Nullable;
 
 import java.io.Serializable;
 import java.util.Objects;
@@ -53,17 +56,49 @@ public class SlotInfo implements ResponseBody, Serializable {
     @JsonSerialize(using = JobIDSerializer.class)
     private final JobID jobId;
 
+    @JsonProperty("allocationId")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Nullable private final String allocationId;
+
+    @JsonProperty("exactProfile")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @Nullable private final ResourceProfile exactProfile;
+
+    public SlotInfo(JobID jobId, ResourceProfileInfo resource) {
+        this(jobId, resource, null, null);
+    }
+
     @JsonCreator
     public SlotInfo(
             @JsonDeserialize(using = JobIDDeserializer.class) @JsonProperty(FIELD_NAME_JOB_ID)
                     JobID jobId,
-            @JsonProperty(FIELD_NAME_RESOURCE) ResourceProfileInfo resource) {
+            @JsonProperty(FIELD_NAME_RESOURCE) ResourceProfileInfo resource,
+            @JsonProperty("allocationId") @Nullable String allocationId,
+            @JsonProperty("exactProfile") @Nullable ResourceProfile exactProfile) {
+        this.allocationId = allocationId;
+        this.exactProfile = exactProfile;
         this.jobId = Preconditions.checkNotNull(jobId);
         this.resource = Preconditions.checkNotNull(resource);
     }
 
     public SlotInfo(JobID jobId, ResourceProfile resource) {
         this(jobId, ResourceProfileInfo.fromResrouceProfile(resource));
+    }
+
+    public SlotInfo(JobID jobId, ResourceProfile resource, String allocationId) {
+        this(jobId, ResourceProfileInfo.fromResrouceProfile(resource), allocationId, resource);
+    }
+
+    @JsonIgnore
+    @Nullable
+    public String getAllocationId() {
+        return allocationId;
+    }
+
+    @JsonIgnore
+    @Nullable
+    public ResourceProfile getExactProfile() {
+        return exactProfile;
     }
 
     @JsonIgnore
@@ -85,11 +120,13 @@ public class SlotInfo implements ResponseBody, Serializable {
             return false;
         }
         SlotInfo that = (SlotInfo) o;
-        return Objects.equals(jobId, that.jobId) && Objects.equals(resource, that.resource);
+        return Objects.equals(jobId, that.jobId) && Objects.equals(resource, that.resource)
+                && Objects.equals(allocationId, that.allocationId)
+                && Objects.equals(exactProfile, that.exactProfile);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(jobId, resource);
+        return Objects.hash(jobId, resource, allocationId, exactProfile);
     }
 }

@@ -109,7 +109,8 @@ public class RocksDBMemoryControllerUtils {
                 writeBufferManagerCapacity,
                 usingPartitionedIndexFilters);
         if (quickMrcEnabled) {
-            A4SCacheTelemetry.register(cache, quickMrcSamplingRate, quickMrcHistogramBinSize);
+            A4SCacheTelemetry.register(
+                    cache, wbm, quickMrcSamplingRate, quickMrcHistogramBinSize);
         }
         return new RocksDBSharedResources(
                 cache, wbm, writeBufferManagerCapacity, usingPartitionedIndexFilters);

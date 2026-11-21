@@ -48,6 +48,7 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.CoreMatchers.not;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.fail;
 
 /** Tests to guard {@link RocksDBResourceContainer}. */
@@ -61,6 +62,19 @@ public class RocksDBResourceContainerTest {
     }
 
     // ------------------------------------------------------------------------
+
+    @Test
+    public void testWriteBufferBudgetBelongsToTheLiveManager() {
+        assertNull(A4SCacheTelemetry.readWriteBufferBudget(null));
+        try (LRUCache cache = new LRUCache(16L << 20, 0);
+                WriteBufferManager initial = new WriteBufferManager((1L << 20) + 37, cache);
+                WriteBufferManager replacement = new WriteBufferManager((2L << 20) + 61, cache)) {
+            assertThat(A4SCacheTelemetry.readWriteBufferBudget(initial).bytes, is((1L << 20) + 37));
+            initial.close();
+            assertNull(A4SCacheTelemetry.readWriteBufferBudget(initial));
+            assertThat(A4SCacheTelemetry.readWriteBufferBudget(replacement).bytes, is((2L << 20) + 61));
+        }
+    }
 
     @Test
     public void testFreeDBOptionsAfterClose() throws Exception {

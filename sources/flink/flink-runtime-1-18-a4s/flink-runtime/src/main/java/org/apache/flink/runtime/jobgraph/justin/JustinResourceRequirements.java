@@ -5,6 +5,8 @@ import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.util.InstantiationUtil;
 
+import javax.annotation.Nullable;
+
 import java.io.IOException;
 import java.io.Serializable;
 import java.util.ArrayList;
@@ -181,11 +183,24 @@ public class JustinResourceRequirements implements Serializable {
     }
 
     private final Map<JobVertexID, JustinVertexResourceRequirements> vertexResources;
+    @Nullable private final AppliedSlotSnapshot appliedSlots;
 
     public JustinResourceRequirements(
             Map<JobVertexID, JustinVertexResourceRequirements> vertexResources) {
+        this(vertexResources, null);
+    }
+
+    public JustinResourceRequirements(
+            Map<JobVertexID, JustinVertexResourceRequirements> vertexResources,
+            @Nullable AppliedSlotSnapshot appliedSlots) {
+        this.appliedSlots = appliedSlots;
         this.vertexResources =
                 Collections.unmodifiableMap(new HashMap<>(checkNotNull(vertexResources)));
+    }
+
+    @Nullable
+    public AppliedSlotSnapshot getAppliedSlots() {
+        return appliedSlots;
     }
 
     public JustinVertexResourceRequirements.Parallelism getParallelism(JobVertexID jobVertexId) {

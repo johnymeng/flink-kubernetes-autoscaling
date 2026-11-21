@@ -167,6 +167,25 @@ public final class CacheObservation {
         }
     }
 
+    /** Actual native soft write-buffer budget, in bytes. Absent when capability is unavailable. */
+    public static final class WriteBufferBudget {
+        public static final int VERSION = 1;
+
+        public final int version;
+        public final long bytes;
+
+        @JsonCreator
+        public WriteBufferBudget(
+                @JsonProperty("version") int version, @JsonProperty("bytes") long bytes) {
+            this.version = version;
+            this.bytes = bytes;
+        }
+
+        public boolean supportsReadback() {
+            return version == VERSION && bytes >= 0;
+        }
+    }
+
     /** Cumulative cache data and the task/DB read acquired at the same boundary. */
     public static final class Endpoint {
         public final long ownershipGeneration;
@@ -180,6 +199,9 @@ public final class CacheObservation {
         @JsonProperty("appliedSlot")
         @JsonInclude(JsonInclude.Include.NON_NULL)
         @Nullable public final AppliedSlot appliedSlot;
+        @JsonProperty("writeBufferBudget")
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        @Nullable public final WriteBufferBudget writeBufferBudget;
 
         @JsonCreator
         public Endpoint(
@@ -200,6 +222,15 @@ public final class CacheObservation {
                 long acquisitionEndNanos, long totalLookups, long totalMisses,
                 StackDistanceHistogram cumulativeHistogram, String timing,
                 @Nullable AppliedSlot appliedSlot) {
+            this(ownershipGeneration, acquisitionStartNanos, nativeNanos, acquisitionEndNanos,
+                    totalLookups, totalMisses, cumulativeHistogram, timing, appliedSlot, null);
+        }
+
+        public Endpoint(
+                long ownershipGeneration, long acquisitionStartNanos, long nativeNanos,
+                long acquisitionEndNanos, long totalLookups, long totalMisses,
+                StackDistanceHistogram cumulativeHistogram, String timing,
+                @Nullable AppliedSlot appliedSlot, @Nullable WriteBufferBudget writeBufferBudget) {
             this.ownershipGeneration = ownershipGeneration;
             this.acquisitionStartNanos = acquisitionStartNanos;
             this.nativeNanos = nativeNanos;
@@ -209,6 +240,7 @@ public final class CacheObservation {
             this.cumulativeHistogram = Objects.requireNonNull(cumulativeHistogram);
             this.timing = Objects.requireNonNull(timing);
             this.appliedSlot = appliedSlot;
+            this.writeBufferBudget = writeBufferBudget;
         }
 
         public boolean withinAcquisitionBound() {
