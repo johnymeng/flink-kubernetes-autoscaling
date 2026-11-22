@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.rest.handler.job.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
@@ -128,6 +129,19 @@ class A4SMissRateCurvePublicationTest {
     }
 
     @Test
+    void publishesHistogramFromRocksDbSanitizedMetricName() throws Exception {
+        addGauge(
+                join,
+                0,
+                "TumblingEventTimeWindows.rocksdb_stack-distance-histogram",
+                new StackDistanceHistogram(new long[] {3, 1}, 4, 1, 1L, 4096L).toMetricString());
+
+        var observation = response(join);
+        assertEquals(Status.AVAILABLE, observation.getMrcStatus());
+        assertEquals(2, observation.getCurve().orElseThrow().getPoints().size());
+    }
+
+    @Test
     void rejectsAnObservedSubtaskMissingItsHistogram() throws Exception {
         addHistogram(join, new long[] {3, 1}, 4);
         addGauge(join, 1, "other-metric", "1");
@@ -157,7 +171,7 @@ class A4SMissRateCurvePublicationTest {
     @Test
     void rejectsAmbiguousSubtaskHistograms() throws Exception {
         addHistogram(join, new long[] {3, 1}, 4);
-        addGauge(join, 0, "another-backend.stack-distance-histogram",
+        addGauge(join, 0, "another-backend.rocksdb_stack-distance-histogram",
                 new StackDistanceHistogram(new long[] {3, 1}, 4, 1, 1L, 4096L)
                         .toMetricString());
         assertUnavailable(join, "INVALID_HISTOGRAM");

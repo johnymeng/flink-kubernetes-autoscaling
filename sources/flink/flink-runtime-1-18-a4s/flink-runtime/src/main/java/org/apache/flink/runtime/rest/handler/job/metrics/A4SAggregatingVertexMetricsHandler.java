@@ -60,6 +60,8 @@ public class A4SAggregatingVertexMetricsHandler
                 AggregatedSubtaskMetricsParameters> {
 
     private static final String STACK_DISTANCE_HISTOGRAM_METRIC_NAME = "stack-distance-histogram";
+    private static final String ROCKSDB_SANITIZED_HISTOGRAM_METRIC_NAME =
+            "rocksdb_" + STACK_DISTANCE_HISTOGRAM_METRIC_NAME;
 
     private final Executor executor;
     private final MetricFetcher fetcher;
@@ -176,7 +178,9 @@ public class A4SAggregatingVertexMetricsHandler
                 continue;
             }
             if (metricKey.equals(STACK_DISTANCE_HISTOGRAM_METRIC_NAME)
-                    || metricKey.endsWith("." + STACK_DISTANCE_HISTOGRAM_METRIC_NAME)) {
+                    || metricKey.endsWith("." + STACK_DISTANCE_HISTOGRAM_METRIC_NAME)
+                    || metricKey.equals(ROCKSDB_SANITIZED_HISTOGRAM_METRIC_NAME)
+                    || metricKey.endsWith("." + ROCKSDB_SANITIZED_HISTOGRAM_METRIC_NAME)) {
                 if (histogram != null) {
                     throw new IllegalArgumentException("Expected one QuickMRC histogram per subtask");
                 }
