@@ -58,7 +58,7 @@ public class CollectedMetrics {
         Map<JobVertexID, MissRateCurve> observed = new HashMap<>();
         curves.forEach(
                 (vertex, curve) -> {
-                    if (curve != null && !curve.getPoints().isEmpty()) {
+                    if (curve != null && curve.isUsable()) {
                         observed.put(vertex, curve);
                     }
                 });

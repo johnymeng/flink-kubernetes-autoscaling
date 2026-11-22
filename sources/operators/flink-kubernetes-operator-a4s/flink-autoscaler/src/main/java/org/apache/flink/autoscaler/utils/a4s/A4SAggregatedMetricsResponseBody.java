@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler.utils.a4s;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.MissRateCurveObservation;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
@@ -25,23 +26,18 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonPro
 
 import javax.annotation.Nullable;
 
-/** Autoscaler-local copy of the A4S metrics response body. */
-public class A4SAggregatedMetricsResponseBody implements ResponseBody {
+/** REST response carrying a measured A4S curve or an availability status. */
+public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
+        implements ResponseBody {
 
-    public static final String FIELD_NAME_SCALED_MRC = "scaledMrc";
-
-    @JsonProperty(FIELD_NAME_SCALED_MRC)
-    @Nullable
-    private final MissRateCurve scaledMrc;
+    public A4SAggregatedMetricsResponseBody(@Nullable MissRateCurve scaledMrc) {
+        this(null, scaledMrc);
+    }
 
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
+            @JsonProperty(FIELD_NAME_STATUS) @Nullable Status status,
             @JsonProperty(FIELD_NAME_SCALED_MRC) @Nullable MissRateCurve scaledMrc) {
-        this.scaledMrc = scaledMrc;
-    }
-
-    @Nullable
-    public MissRateCurve getScaledMrc() {
-        return scaledMrc;
+        super(status, scaledMrc);
     }
 }

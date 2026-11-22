@@ -342,7 +342,8 @@ class RestApiMetricsCollectorTest {
                         () -> client);
 
         var collector = new RestApiMetricsCollector<JobID, JobAutoScalerContext<JobID>>();
-        var curve = collector.queryVertexMissRateCurve(context, jobID, new JobVertexID());
+        var curve = collector.queryVertexMissRateCurve(context, jobID, new JobVertexID())
+                .getCurve().orElseThrow();
 
         assertThat(curve.getPoints()).hasSize(2);
         assertThat(curve.getPoints().get(0).getCacheSizeBytes()).isEqualTo(1048576L);

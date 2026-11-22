@@ -42,8 +42,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /** Verifies that the producer publishes a curve only when there is measured support. */
 class A4SMissRateCurvePublicationTest {
@@ -75,35 +74,112 @@ class A4SMissRateCurvePublicationTest {
 
     @Test
     void missingSourceAndColdJoinAreAbsentUntilMeasurementsArrive() throws Exception {
-        var unused = response(source);
-        assertNull(unused.getScaledMrc(), "No metrics must not become an empty curve");
         var mapper = RestMapperUtils.getStrictObjectMapper();
-        var serialized = mapper.readTree(mapper.writeValueAsString(unused));
-        assertTrue(serialized.path("scaledMrc").isNull());
+        assertUnavailable(source, "TASK_METRICS_UNAVAILABLE");
+        addGauge(source, 0, "other-metric", "1");
+        assertUnavailable(source, "HISTOGRAM_UNAVAILABLE");
 
         addHistogram(join, new long[] {0, 0}, 0);
-        assertNull(response(join).getScaledMrc(), "An idle cache has no observations");
+        assertUnavailable(join, "NO_SAMPLES");
         addHistogram(join, new long[0], 9);
-        assertNull(response(join).getScaledMrc(), "No finite buckets means no supported size");
+        assertUnavailable(join, "NO_FINITE_BUCKETS");
+        addHistogram(join, new long[] {0, 0}, 9);
+        assertUnavailable(join, "NO_FINITE_BUCKETS");
 
         addHistogram(join, new long[] {3, 1}, 4);
         MissRateCurve warm =
                 mapper.readValue(
                                 mapper.writeValueAsString(response(join)),
                                 A4SAggregatedMetricsResponseBody.class)
-                        .getScaledMrc();
+                        .getCurve()
+                        .orElseThrow();
         assertEquals(2, warm.getPoints().size());
         assertEquals(4096L, warm.getPoints().get(0).getCacheSizeBytes());
         assertEquals(0.625, warm.getPoints().get(0).getMissRate(), 1.0e-9);
-        assertNull(response(source).getScaledMrc());
+        assertFalse(response(source).getCurve().isPresent());
+        assertEquals("AVAILABLE",
+                mapper.readTree(mapper.writeValueAsString(response(join))).path("mrcStatus").asText());
+    }
+
+    @Test
+    void rejectsMalformedAndOverflowingHistogramsAndRecoversOnNextSample() throws Exception {
+        addGauge(join, 0, "stack-distance-histogram", "{\"bucketCounts\":[\"bad\"]}");
+        assertUnavailable(join, "INVALID_HISTOGRAM");
+
+        String incomplete =
+                "{\"bucketCounts\":[3,1],\"numPartitions\":1,\"bucketSizeScaling\":1,"
+                        + "\"cacheItemSizeBytes\":4096}";
+        addGauge(join, 0, "stack-distance-histogram", incomplete);
+        assertUnavailable(join, "INVALID_HISTOGRAM");
+
+        String overflowing =
+                "{\"bucketCounts\":[9223372036854775807,1],\"completeMisses\":0,"
+                        + "\"numPartitions\":1,\"bucketSizeScaling\":1,\"cacheItemSizeBytes\":4096}";
+        addGauge(join, 0, "stack-distance-histogram", overflowing);
+        assertUnavailable(join, "INVALID_HISTOGRAM");
+
+        addGauge(join, 0, "stack-distance-histogram",
+                new StackDistanceHistogram(new long[] {3, 1}, 4, 1, Long.MAX_VALUE, 4096L)
+                        .toMetricString());
+        assertUnavailable(join, "INVALID_HISTOGRAM");
+
+        addHistogram(join, new long[] {3, 1}, 4);
+        assertEquals(2, response(join).getCurve().orElseThrow().getPoints().size());
+    }
+
+    @Test
+    void rejectsAnObservedSubtaskMissingItsHistogram() throws Exception {
+        addHistogram(join, new long[] {3, 1}, 4);
+        addGauge(join, 1, "other-metric", "1");
+        assertUnavailable(join, "INCOMPLETE_HISTOGRAMS");
+    }
+
+    @Test
+    void rejectsAnUnsampledSubtaskWithoutDiscardingCompleteMissSamples() throws Exception {
+        addHistogram(join, new long[] {3, 1}, 4);
+        addGauge(
+                join,
+                1,
+                "stack-distance-histogram",
+                new StackDistanceHistogram(new long[0], 0, 1, 1L, 4096L).toMetricString());
+        assertUnavailable(join, "INCOMPLETE_HISTOGRAMS");
+
+        addGauge(
+                join,
+                1,
+                "stack-distance-histogram",
+                new StackDistanceHistogram(new long[0], 2, 1, 1L, 4096L).toMetricString());
+        var curve = response(join).getCurve().orElseThrow();
+        assertEquals(8192L, curve.getPoints().get(0).getCacheSizeBytes());
+        assertEquals(0.7, curve.getPoints().get(0).getMissRate(), 1.0e-9);
+    }
+
+    @Test
+    void rejectsAmbiguousSubtaskHistograms() throws Exception {
+        addHistogram(join, new long[] {3, 1}, 4);
+        addGauge(join, 0, "another-backend.stack-distance-histogram",
+                new StackDistanceHistogram(new long[] {3, 1}, 4, 1, 1L, 4096L)
+                        .toMetricString());
+        assertUnavailable(join, "INVALID_HISTOGRAM");
+    }
+
+    private void assertUnavailable(JobVertexID vertex, String status) throws Exception {
+        var mapper = RestMapperUtils.getStrictObjectMapper();
+        var json = mapper.readTree(mapper.writeValueAsString(response(vertex)));
+        assertEquals(status, json.path("mrcStatus").asText());
+        assertFalse(json.has("scaledMrc"), "Do not publish a null or empty curve");
     }
 
     private void addHistogram(JobVertexID vertex, long[] counts, long completeMisses) {
-        store.add(new MetricDump.GaugeDump(
-                new QueryScopeInfo.TaskQueryScopeInfo(job.toString(), vertex.toString(), 0, 0, ""),
-                "stack-distance-histogram",
+        addGauge(vertex, 0, "stack-distance-histogram",
                 new StackDistanceHistogram(counts, completeMisses, 1, 1L, 4096L)
-                        .toMetricString()));
+                        .toMetricString());
+    }
+
+    private void addGauge(JobVertexID vertex, int subtask, String metricName, String value) {
+        store.add(new MetricDump.GaugeDump(
+                new QueryScopeInfo.TaskQueryScopeInfo(job.toString(), vertex.toString(), subtask, 0, ""),
+                metricName, value));
     }
 
     private A4SAggregatedMetricsResponseBody response(JobVertexID vertex) throws Exception {

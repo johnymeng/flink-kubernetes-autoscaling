@@ -19,6 +19,7 @@ package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedVertexMetricsHeaders;
 import org.apache.flink.autoscaler.metrics.FlinkMetric;
@@ -46,9 +47,10 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.Collection;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Collection;
 import java.util.stream.Collectors;
 
 import static org.apache.flink.autoscaler.metrics.FlinkMetric.HEAP_MEMORY_MAX;
@@ -88,13 +90,16 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
     @Override
     protected Map<JobVertexID, MissRateCurve> queryAllMissRateCurves(
             Context ctx, Collection<JobVertexID> jobVertexIds) {
-        return jobVertexIds.stream()
-                .map(v -> {
-                    var curve = queryVertexMissRateCurve(ctx, ctx.getJobID(), v);
-                    return curve == null ? null : Map.entry(v, curve);
-                })
-                .filter(entry -> entry != null)
-                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+        var curves = new HashMap<JobVertexID, MissRateCurve>();
+        for (JobVertexID vertex : jobVertexIds) {
+            var observation = queryVertexMissRateCurve(ctx, ctx.getJobID(), vertex);
+            observation.getCurve().ifPresent(curve -> curves.put(vertex, curve));
+            if (observation.getMrcStatus() != Status.AVAILABLE) {
+                LOG.debug("QuickMRC status for job {}, vertex {}: {}",
+                        ctx.getJobID(), vertex, observation.getMrcStatus());
+            }
+        }
+        return curves;
     }
 
     @SneakyThrows
@@ -129,7 +134,8 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
         }
     }
 
-    protected MissRateCurve queryVertexMissRateCurve(Context ctx, JobID jobId, JobVertexID jobVertexID) {
+    protected A4SAggregatedMetricsResponseBody queryVertexMissRateCurve(
+            Context ctx, JobID jobId, JobVertexID jobVertexID) {
         var parameters = new AggregatedSubtaskMetricsParameters();
         var pathIt = parameters.getPathParameters().iterator();
         ((JobIDPathParameter) pathIt.next()).resolve(jobId);
@@ -143,14 +149,16 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
                                     parameters,
                                     EmptyRequestBody.getInstance())
                             .get();
-            return responseBody.getScaledMrc();
+            return responseBody == null
+                    ? new A4SAggregatedMetricsResponseBody(Status.INVALID_RESPONSE, null)
+                    : responseBody;
         } catch (Exception e) {
             LOG.debug(
                     "Unable to fetch A4S miss-rate curve for job {}, vertex {}, continuing without MRC",
                     jobId,
                     jobVertexID,
                     e);
-            return null;
+            return new A4SAggregatedMetricsResponseBody(Status.REQUEST_FAILED, null);
         }
     }
 
