@@ -20,16 +20,15 @@ package org.apache.flink.autoscaler.metrics;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.util.HashMap;
 import java.util.Map;
 
 /** Collected scaling metrics. */
 @Data
 @NoArgsConstructor
-@AllArgsConstructor
 public class CollectedMetrics {
     private Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics;
     private Map<ScalingMetric, Double> globalMetrics;
@@ -39,5 +38,30 @@ public class CollectedMetrics {
             Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics,
             Map<ScalingMetric, Double> globalMetrics) {
         this(vertexMetrics, globalMetrics, null);
+    }
+
+    public CollectedMetrics(
+            Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics,
+            Map<ScalingMetric, Double> globalMetrics,
+            Map<JobVertexID, MissRateCurve> missRateCurves) {
+        this.vertexMetrics = vertexMetrics;
+        this.globalMetrics = globalMetrics;
+        setMissRateCurves(missRateCurves);
+    }
+
+    // Older runtimes and stored histories encoded unavailable measurements as empty points.
+    public void setMissRateCurves(Map<JobVertexID, MissRateCurve> curves) {
+        if (curves == null) {
+            missRateCurves = null;
+            return;
+        }
+        Map<JobVertexID, MissRateCurve> observed = new HashMap<>();
+        curves.forEach(
+                (vertex, curve) -> {
+                    if (curve != null && !curve.getPoints().isEmpty()) {
+                        observed.put(vertex, curve);
+                    }
+                });
+        missRateCurves = observed;
     }
 }

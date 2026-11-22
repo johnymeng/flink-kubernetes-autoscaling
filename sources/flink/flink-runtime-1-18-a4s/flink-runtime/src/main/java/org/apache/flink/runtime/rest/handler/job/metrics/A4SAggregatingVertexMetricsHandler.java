@@ -44,7 +44,6 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -115,8 +114,7 @@ public class A4SAggregatingVertexMetricsHandler
         MetricStore.TaskMetricStore taskMetricStore =
                 store.getTaskMetricStore(jobId.toString(), vertexID.toString());
         if (taskMetricStore == null) {
-            MissRateCurve emptyMrc = buildScaledMrcPoints(Collections.emptyList());
-            return new A4SAggregatedMetricsResponseBody(emptyMrc);
+            return new A4SAggregatedMetricsResponseBody(null);
         }
 
         List<StackDistanceHistogram> subtaskHistograms = new ArrayList<>();
@@ -132,8 +130,24 @@ public class A4SAggregatingVertexMetricsHandler
             subtaskHistograms.add(histogram);
         }
 
-        MissRateCurve scaledMrc = buildScaledMrcPoints(subtaskHistograms);
-        return new A4SAggregatedMetricsResponseBody(scaledMrc);
+        if (subtaskHistograms.isEmpty()) {
+            log.debug("No QuickMRC histogram available for job {} vertex {}", jobId, vertexID);
+            return new A4SAggregatedMetricsResponseBody(null);
+        }
+
+        StackDistanceHistogram mergedHistogram = StackDistanceHistogram.merge(subtaskHistograms);
+        if (mergedHistogram.getTotalFrequency() == 0 || mergedHistogram.getNumBuckets() == 0) {
+            log.debug(
+                    "QuickMRC histogram for job {} vertex {} has {} observations and {} finite buckets",
+                    jobId,
+                    vertexID,
+                    mergedHistogram.getTotalFrequency(),
+                    mergedHistogram.getNumBuckets());
+            return new A4SAggregatedMetricsResponseBody(null);
+        }
+
+        return new A4SAggregatedMetricsResponseBody(
+                MissRateCurve.fromStackDistanceHistogram(mergedHistogram));
     }
 
     @Nullable
@@ -149,13 +163,5 @@ public class A4SAggregatingVertexMetricsHandler
             }
         }
         return null;
-    }
-
-    private MissRateCurve buildScaledMrcPoints(List<StackDistanceHistogram> subtaskHistograms) {
-        if (subtaskHistograms.isEmpty()) {
-            return new MissRateCurve(Collections.emptyList());
-        }
-        StackDistanceHistogram mergedHistogram = StackDistanceHistogram.merge(subtaskHistograms);
-        return MissRateCurve.fromStackDistanceHistogram(mergedHistogram);
     }
 }

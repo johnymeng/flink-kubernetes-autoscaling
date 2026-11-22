@@ -91,8 +91,7 @@ public class ScalingMetricEvaluator {
             // This relies on target data rate first being calculated       
             LOG.debug("A4S: Evaluating metrics for vertex {}", vertex);
             MissRateCurve missRateCurve = collectedMissRateCurves.get(vertex);
-            if (missRateCurve == null || missRateCurve.getPoints().isEmpty()) {
-                LOG.warn("A4S: No usable miss rate curve found for vertex {}, skipping", vertex);
+            if (missRateCurve == null) {
                 continue;
             }
             MemoryParallelismCurve mpc = MemoryParallelismCurve.fromMissRateCurve(

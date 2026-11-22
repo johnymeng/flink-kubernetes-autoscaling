@@ -23,7 +23,7 @@ import org.apache.flink.runtime.rest.messages.ResponseBody;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
-import java.util.Collections;
+import javax.annotation.Nullable;
 
 /** Autoscaler-local copy of the A4S metrics response body. */
 public class A4SAggregatedMetricsResponseBody implements ResponseBody {
@@ -31,14 +31,16 @@ public class A4SAggregatedMetricsResponseBody implements ResponseBody {
     public static final String FIELD_NAME_SCALED_MRC = "scaledMrc";
 
     @JsonProperty(FIELD_NAME_SCALED_MRC)
+    @Nullable
     private final MissRateCurve scaledMrc;
 
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
-            @JsonProperty(FIELD_NAME_SCALED_MRC) MissRateCurve scaledMrc) {
-        this.scaledMrc = scaledMrc == null ? new MissRateCurve(Collections.emptyList()) : scaledMrc;
+            @JsonProperty(FIELD_NAME_SCALED_MRC) @Nullable MissRateCurve scaledMrc) {
+        this.scaledMrc = scaledMrc;
     }
 
+    @Nullable
     public MissRateCurve getScaledMrc() {
         return scaledMrc;
     }
