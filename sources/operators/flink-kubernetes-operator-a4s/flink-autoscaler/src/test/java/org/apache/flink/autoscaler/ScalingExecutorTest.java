@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -29,9 +30,11 @@ import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
@@ -51,6 +54,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.SortedMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -117,6 +121,192 @@ public class ScalingExecutorTest {
         conf.set(AutoScalerOptions.MAX_SCALE_DOWN_FACTOR, 1.);
         conf.set(AutoScalerOptions.MAX_SCALE_UP_FACTOR, (double) Integer.MAX_VALUE);
         conf.set(AutoScalerOptions.CATCH_UP_DURATION, Duration.ZERO);
+    }
+
+    @Test
+    void testA4SMemoryOnlyScaling() throws Exception {
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
+        var stateful = new JobVertexID();
+        var source = new JobVertexID();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(source, Map.of(), 1, MAX_PARALLELISM, false, null),
+                        new VertexInfo(
+                                stateful, Map.of(source, HASH), 1, MAX_PARALLELISM, false, null));
+        var metrics =
+                new EvaluatedMetrics(
+                        Map.of(source, evaluated(1, 70, 100), stateful, evaluated(1, 70, 100)),
+                        dummyGlobalMetrics,
+                        Map.of(
+                                stateful,
+                                MemoryParallelismCurve.builder()
+                                        .targetThroughput(70)
+                                        .addPoint(1, 18)
+                                        .build()));
+        var original =
+                ResourceProfile.newBuilder()
+                        .setCpuCores(.25)
+                        .setTaskHeapMemory(new MemorySize(67108865))
+                        .setManagedMemoryMB(128)
+                        .setNetworkMemory(new MemorySize(15728641))
+                        .build();
+        var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 1);
+        var live = new HashMap<JobVertexID, JustinVertexResourceRequirements>();
+        live.put(source, new JustinVertexResourceRequirements(parallelism, original));
+        live.put(stateful, new JustinVertexResourceRequirements(parallelism, original));
+        scalingExecutor =
+                new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
+                            JobAutoScalerContext<JobID> ctx) {
+                        return live;
+                    }
+                };
+        var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
+        var now = Instant.now();
+        assertThat(
+                        scalingExecutor.computeScalingSummary(
+                                context,
+                                metrics,
+                                history,
+                                Duration.ZERO,
+                                topology,
+                                new DelayedScaleDown()))
+                .isEmpty();
+
+        // A memory-only recommendation still obeys the execution and exclusion switches.
+        conf.set(AutoScalerOptions.SCALING_ENABLED, false);
+        assertFalse(
+                scalingExecutor.scaleResource(
+                        context,
+                        metrics,
+                        history,
+                        scalingTracking,
+                        now,
+                        topology,
+                        new DelayedScaleDown()));
+        assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+        conf.set(AutoScalerOptions.SCALING_ENABLED, true);
+        conf.set(AutoScalerOptions.VERTEX_EXCLUDE_IDS, List.of(stateful.toHexString()));
+        assertFalse(
+                scalingExecutor.scaleResource(
+                        context,
+                        metrics,
+                        history,
+                        scalingTracking,
+                        now,
+                        topology,
+                        new DelayedScaleDown()));
+        conf.set(AutoScalerOptions.VERTEX_EXCLUDE_IDS, List.of());
+        conf.set(AutoScalerOptions.GC_PRESSURE_THRESHOLD, 0.5);
+        metrics.setGlobalMetrics(
+                Map.of(
+                        ScalingMetric.GC_PRESSURE, EvaluatedScalingMetric.of(1.0),
+                        ScalingMetric.HEAP_MAX_USAGE_RATIO, EvaluatedScalingMetric.avg(0.0)));
+        assertFalse(
+                scalingExecutor.scaleResource(
+                        context,
+                        metrics,
+                        history,
+                        scalingTracking,
+                        now,
+                        topology,
+                        new DelayedScaleDown()));
+        metrics.setGlobalMetrics(dummyGlobalMetrics);
+
+        assertTrue(
+                scalingExecutor.scaleResource(
+                        context,
+                        metrics,
+                        history,
+                        scalingTracking,
+                        now,
+                        topology,
+                        new DelayedScaleDown()));
+        var expected = ResourceProfile.newBuilder(original).setManagedMemoryMB(34).build();
+        assertThat(stateStore.getResourceProfileOverrides(context))
+                .containsExactlyInAnyOrderEntriesOf(
+                        Map.of(
+                                source.toString(),
+                                original.toString(),
+                                stateful.toString(),
+                                expected.toString()));
+        assertThat(getScaledParallelism(stateStore, context))
+                .containsExactlyInAnyOrderEntriesOf(Map.of(source, 1, stateful, 1));
+        assertThat(history).isEmpty();
+
+        live.put(stateful, new JustinVertexResourceRequirements(parallelism, expected));
+        assertFalse(
+                scalingExecutor.scaleResource(
+                        context,
+                        metrics,
+                        history,
+                        scalingTracking,
+                        now.plusSeconds(1),
+                        topology,
+                        new DelayedScaleDown()));
+    }
+
+    @Test
+    void testA4SFinalParallelismIsValidatedAndStored() throws Exception {
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
+        var vertex = new JobVertexID();
+        var topology =
+                new JobTopology(new VertexInfo(vertex, Map.of(), 1, MAX_PARALLELISM, false, null));
+        var metrics =
+                new EvaluatedMetrics(
+                        Map.of(vertex, evaluated(1, 70, 100)),
+                        dummyGlobalMetrics,
+                        Map.of(
+                                vertex,
+                                MemoryParallelismCurve.builder()
+                                        .targetThroughput(70)
+                                        .addPoint(1, 700)
+                                        .addPoint(2, 100)
+                                        .build()));
+        var original = ResourceProfile.newBuilder().setManagedMemoryMB(128).build();
+        var validated = new HashMap<JobVertexID, ScalingSummary>();
+        scalingExecutor =
+                new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
+                            JobAutoScalerContext<JobID> ctx) {
+                        return Map.of(
+                                vertex,
+                                new JustinVertexResourceRequirements(
+                                        new JustinVertexResourceRequirements.Parallelism(1, 1),
+                                        original));
+                    }
+
+                    @Override
+                    protected boolean scalingWouldExceedMaxResources(
+                            Configuration config,
+                            JobTopology jobTopology,
+                            EvaluatedMetrics evaluated,
+                            Map<JobVertexID, ScalingSummary> summaries,
+                            JobAutoScalerContext<JobID> ctx) {
+                        validated.putAll(summaries);
+                        return false;
+                    }
+                };
+        var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
+        var now = Instant.now();
+        assertTrue(
+                scalingExecutor.scaleResource(
+                        context,
+                        metrics,
+                        history,
+                        scalingTracking,
+                        now,
+                        topology,
+                        new DelayedScaleDown()));
+        assertEquals(2, validated.get(vertex).getNewParallelism());
+        assertEquals(2, history.get(vertex).get(now).getNewParallelism());
+        assertEquals(Map.of(vertex, 2), getScaledParallelism(stateStore, context));
     }
 
     @Test

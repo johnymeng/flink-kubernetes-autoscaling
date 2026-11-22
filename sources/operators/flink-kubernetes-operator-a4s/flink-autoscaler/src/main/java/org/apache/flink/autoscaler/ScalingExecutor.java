@@ -19,6 +19,7 @@ package org.apache.flink.autoscaler;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.autoscaler.a4s.A4S;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.AutoScalerEventHandler;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -27,18 +28,20 @@ import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.resources.NoopResourceCheck;
 import org.apache.flink.autoscaler.resources.ResourceCheck;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
-import org.apache.flink.autoscaler.a4s.A4S;
-import org.apache.flink.autoscaler.a4s.A4S.Decision;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.tuning.MemoryTuning;
 import org.apache.flink.autoscaler.utils.CalendarUtils;
 import org.apache.flink.autoscaler.utils.ResourceCheckUtils;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
+import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
+import org.apache.flink.runtime.rest.messages.JobMessageParameters;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +56,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.*;
 import static org.apache.flink.autoscaler.event.AutoScalerEventHandler.SCALING_EXECUTION_DISABLED_REASON;
@@ -112,18 +117,76 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             throws Exception {
         var conf = context.getConfiguration();
         var restartTime = scalingTracking.getMaxRestartTimeOrDefault(conf);
+        boolean a4sEnabled = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
+        if (a4sEnabled && isJobUnderMemoryPressure(context, evaluatedMetrics.getGlobalMetrics())) {
+            return false;
+        }
 
         var scalingSummaries =
-                computeScalingSummary(
-                        context,
-                        evaluatedMetrics,
-                        scalingHistory,
-                        restartTime,
-                        jobTopology,
-                        delayedScaleDown);
+                new HashMap<>(
+                        computeScalingSummary(
+                                context,
+                                evaluatedMetrics,
+                                scalingHistory,
+                                restartTime,
+                                jobTopology,
+                                delayedScaleDown));
 
-        if (scalingSummaries.isEmpty()) {
-            LOG.info("All job vertices are currently running at their target parallelism.");
+        Map<JobVertexID, ResourceProfile> a4sProfiles = new HashMap<>();
+        boolean memoryChanged = false;
+        if (a4sEnabled) {
+            var decisions =
+                    new A4S(jobTopology, evaluatedMetrics, scalingSummaries).makeDecision(conf);
+            if (!decisions.isEmpty() || !scalingSummaries.isEmpty()) {
+                var currentRequirements = readResourceRequirements(context);
+                var excluded = conf.get(VERTEX_EXCLUDE_IDS);
+                for (var entry : evaluatedMetrics.getVertexMetrics().entrySet()) {
+                    var id = entry.getKey();
+                    var metrics = entry.getValue();
+                    var currentProfile = currentRequirements.get(id).getResourceProfile();
+                    var profile = currentProfile;
+                    var decision = decisions.get(id);
+                    if (decision != null && !excluded.contains(id.toHexString())) {
+                        int currentParallelism = (int) metrics.get(PARALLELISM).getCurrent();
+                        int targetParallelism = decision.getParallelism();
+                        if (currentParallelism == targetParallelism) {
+                            scalingSummaries.remove(id);
+                        } else {
+                            metrics.put(
+                                    EXPECTED_PROCESSING_RATE,
+                                    EvaluatedScalingMetric.of(
+                                            evaluatedMetrics
+                                                    .getMemoryParallelismCurves()
+                                                    .get(id)
+                                                    .getTargetThroughput()));
+                            scalingSummaries.put(
+                                    id,
+                                    new ScalingSummary(
+                                            currentParallelism, targetParallelism, metrics));
+                        }
+                        double memoryMb =
+                                conf.get(A4S_MANAGED_MEMORY_OVERRIDE_ENABLED)
+                                        ? conf.get(A4S_MANAGED_MEMORY_OVERRIDE_MB)
+                                        : decision.getMemoryMB() + conf.get(A4S_MEMORY_BASE_MB);
+                        if (!Double.isFinite(memoryMb) || memoryMb <= 0) {
+                            throw new IllegalArgumentException(
+                                    "Invalid A4S managed memory: " + memoryMb);
+                        }
+                        profile =
+                                ResourceProfile.newBuilder(currentProfile)
+                                        .setManagedMemory(
+                                                MemorySize.ofMebiBytes((long) Math.ceil(memoryMb)))
+                                        .build();
+                    }
+                    // Vertices without a usable A4S decision retain their deployed resources.
+                    a4sProfiles.put(id, profile);
+                    memoryChanged |= !profile.equals(currentProfile);
+                }
+            }
+        }
+
+        if (scalingSummaries.isEmpty() && !memoryChanged) {
+            LOG.info("Job resources already match the scaling recommendation.");
             return false;
         }
 
@@ -162,39 +225,24 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 getVertexParallelismOverrides(
                         evaluatedMetrics.getVertexMetrics(), scalingSummaries));
 
-        if (conf.get(JUSTIN_ENABLED)) {
+        if (a4sEnabled) {
+            autoScalerStateStore.storeResourceProfileOverrides(
+                    context,
+                    a4sProfiles.entrySet().stream()
+                            .collect(
+                                    Collectors.toMap(
+                                            e -> e.getKey().toString(),
+                                            e -> e.getValue().toString())));
+        } else if (conf.get(JUSTIN_ENABLED)) {
             var currentScalingConf =
                     scalingConfigurations.setCurrentConfiguration(
                             context.getJobID(),
                             evaluatedMetrics.getVertexMetrics(),
                             scalingSummaries,
                             periods.getOrDefault(context.getJobID(), 0));
-            
-            if (conf.get(A4S_ENABLED)) {
-                LOG.debug("A4S: Evaluated Metrics: {}", evaluatedMetrics);
 
-                A4S a4s = new A4S(jobTopology, evaluatedMetrics, scalingSummaries);
-                Map<JobVertexID, Decision> decisions = a4s.makeDecision(conf);
+            policy(context, currentScalingConf, conf);
 
-                boolean a4sManagedMemoryOverrideEnabled =
-                conf.get(A4S_ENABLED) && conf.get(A4S_MANAGED_MEMORY_OVERRIDE_ENABLED);
-                double a4sManagedMemoryOverrideMb = conf.get(A4S_MANAGED_MEMORY_OVERRIDE_MB);
-                double a4sMemoryBaseMb = conf.get(A4S_MEMORY_BASE_MB);
-                
-                // piggy-back off of justin's scaling algorithm for now
-                currentScalingConf.getScaling().forEach((id, information) -> {
-                    information.setParallelism(Optional.ofNullable(decisions.get(id)).map(Decision::getParallelism).orElse(information.getParallelism()));
-                    double memoryMb = Optional.ofNullable(decisions.get(id)).map(Decision::getMemoryMB).orElse(0.0);
-                    information.setManagedMemoryMB(memoryMb + a4sMemoryBaseMb);
-                    if (a4sManagedMemoryOverrideEnabled) {
-                        information.setManagedMemoryMB(a4sManagedMemoryOverrideMb);
-                    }
-                    LOG.debug("A4S: Vertex {} has parallelism {} and memory {}MB", id, information.getParallelism(), information.getManagedMemoryMB());
-                });
-            } else {
-                policy(context, currentScalingConf, conf);
-            }
-            
             LOG.info(scalingConfigurations.toString());
 
             autoScalerStateStore.storeParallelismOverrides(
@@ -212,6 +260,25 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         delayedScaleDown.clearAll();
 
         return true;
+    }
+
+    @VisibleForTesting
+    Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(Context context)
+            throws Exception {
+        var parameters = new JobMessageParameters();
+        parameters.jobPathParameter.resolve(context.getJobID());
+        try (var client = context.getRestClusterClient()) {
+            return client.sendRequest(
+                            new JustinResourceRequirementsHeaders(),
+                            parameters,
+                            EmptyRequestBody.getInstance())
+                    .get(
+                            context.getConfiguration().get(FLINK_CLIENT_TIMEOUT).toMillis(),
+                            TimeUnit.MILLISECONDS)
+                    .asJustinResourceRequirements()
+                    .orElseThrow()
+                    .getJobVertexParallelisms();
+        }
     }
 
     private void updateRecommendedParallelism(
