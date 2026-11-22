@@ -29,6 +29,7 @@ import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -204,7 +205,9 @@ public class RescaleApiScalingRealizer<KEY, Context extends JobAutoScalerContext
 
                 // We have an override for the vertex
                 var p = Integer.parseInt(overrideParallelism);
-                var newParallelism = new JustinVertexResourceRequirements.Parallelism(1, p);
+                var newParallelism =
+                        new JustinVertexResourceRequirements.Parallelism(
+                                Math.min(p, parallelism.getLowerBound()), p);
                 var newResourceProfile = parseResourceProfile(overrideResourceProfile);
 
                 // If the requirements changed we mark this as scaling triggered
@@ -272,12 +275,13 @@ public class RescaleApiScalingRealizer<KEY, Context extends JobAutoScalerContext
                 return ResourceProfile.UNKNOWN;
             }
             String[] profiles = strings[1].split(", ");
-            ResourceProfile.Builder resourceProfile = ResourceProfile.newBuilder()
-                    .setCpuCores(Double.parseDouble(profiles[0].split("=")[1]))
-                    .setTaskHeapMemoryMB(parseMemoryFromResourceProfile(profiles[1]))
-                    .setTaskOffHeapMemoryMB(parseMemoryFromResourceProfile(profiles[2]))
-                    .setManagedMemoryMB(parseMemoryFromResourceProfile(profiles[3]))
-                    .setNetworkMemoryMB(parseMemoryFromResourceProfile(profiles[4]));
+            ResourceProfile.Builder resourceProfile =
+                    ResourceProfile.newBuilder()
+                            .setCpuCores(Double.parseDouble(profiles[0].split("=")[1]))
+                            .setTaskHeapMemory(parseMemoryFromResourceProfile(profiles[1]))
+                            .setTaskOffHeapMemory(parseMemoryFromResourceProfile(profiles[2]))
+                            .setManagedMemory(parseMemoryFromResourceProfile(profiles[3]))
+                            .setNetworkMemory(parseMemoryFromResourceProfile(profiles[4]));
             return resourceProfile.build();
 
         } else {
@@ -285,18 +289,12 @@ public class RescaleApiScalingRealizer<KEY, Context extends JobAutoScalerContext
         }
     }
 
-    private static int parseMemoryFromResourceProfile(String s) {
-        String parsed = s.substring(s.indexOf("=") + 1, s.indexOf(" "));
-        if (parsed.equals("0")) {
-            return 0;
+    private static MemorySize parseMemoryFromResourceProfile(String s) {
+        String value = s.substring(s.indexOf('=') + 1);
+        int exactBytes = value.indexOf('(');
+        if (exactBytes >= 0) {
+            value = value.substring(exactBytes + 1, value.indexOf(')', exactBytes));
         }
-        System.out.println(parsed);
-        int value = Integer.parseInt(parsed.split("\\.")[0]);
-        if (parsed.contains("gb")) {
-            value *= 1024;
-        } else if (parsed.contains("kb")) {
-            value /= 1024;
-        }
-        return value;
+        return MemorySize.parse(value);
     }
 }

@@ -33,6 +33,7 @@ import org.apache.flink.client.deployment.application.cli.ApplicationClusterDepl
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
@@ -71,6 +72,7 @@ import org.slf4j.LoggerFactory;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -266,48 +268,16 @@ public class NativeFlinkService extends AbstractFlinkService {
         }
 
         try (var client = getClusterClient(observeConfig)) {
-            var requirements = new HashMap<>(getVertexResources(client, resource));
-            var newRequirements = new HashMap<JobVertexID, JustinVertexResourceRequirements>();
-            var alreadyScaled = true;
-
-            LOG.debug("Fetched Justin requirement: {}", requirements);
-            for (Map.Entry<JobVertexID, JobVertexResourceRequirements> entry :
-                    requirements.entrySet()) {
-                var jobId = entry.getKey().toString();
-                var parallelism = entry.getValue().getParallelism();
-                var overrideStr = newOverrides.get(jobId);
-                var overrideRPStr = newRPOverrides.get(jobId);
-
-                if (overrideStr != null && overrideRPStr != null) {
-                    // We set the parallelism upper bound to the target parallelism, anything higher
-                    // would defeat the purpose of scaling down
-                    int upperBound = Integer.parseInt(overrideStr);
-
-                    var newResourceProfile = parseResourceProfile(overrideRPStr);
-                    // We only change the lower bound if the new parallelism went below it. As we
-                    // cannot guarantee that new resources can be acquired, increasing the lower
-                    // bound to the target could potentially cause job failure.
-                    int lowerBound = Math.min(upperBound, parallelism.getLowerBound());
-                    var newParallelism =
-                            new JustinVertexResourceRequirements.Parallelism(lowerBound, upperBound);
-                    // If the requirements changed we mark this as scaling triggered
-                    if (!parallelism.equals(newParallelism)) {
-                        newRequirements.put(entry.getKey(),new JustinVertexResourceRequirements(newParallelism, newResourceProfile));
-                        alreadyScaled = false;
-                    }
-                } else if (previousOverrides.containsKey(jobId)) {
-                    LOG.info(
-                            "Parallelism override for {} has been removed, falling back to regular upgrade.",
-                            jobId);
-                    return false;
-                } else {
-                    // No overrides for this vertex
-                }
+            var requirements = getJustinResources(client, resource);
+            var proposed = proposeJustinResources(requirements, deployConfig, observeConfig);
+            if (proposed.isEmpty()) {
+                LOG.info("Resource override removed, falling back to regular upgrade.");
+                return false;
             }
-            if (alreadyScaled) {
+            var newRequirements = proposed.get();
+            if (requirements.equals(newRequirements)) {
                 LOG.info("Vertex resources requirements already match target, nothing to do...");
             } else {
-                LOG.debug("AlreadyScaled is false.");
                 updateJustinResources(client, resource, newRequirements, observeConfig);
                 ScalingExecutor.scalingTriggered(JobID.fromHexString(resource.getStatus().getJobStatus().getJobId()));
                 eventRecorder.triggerEvent(
@@ -323,6 +293,42 @@ public class NativeFlinkService extends AbstractFlinkService {
             LOG.error("Error while rescaling, falling back to regular upgrade", t);
             return false;
         }
+    }
+
+    @VisibleForTesting
+    static Optional<Map<JobVertexID, JustinVertexResourceRequirements>> proposeJustinResources(
+            Map<JobVertexID, JustinVertexResourceRequirements> live,
+            Configuration desired,
+            Configuration observed) {
+        var parallelism = desired.get(PipelineOptions.PARALLELISM_OVERRIDES);
+        var profiles = desired.get(KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES);
+        var oldParallelism = observed.get(PipelineOptions.PARALLELISM_OVERRIDES);
+        var oldProfiles = observed.get(KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES);
+        var result = new HashMap<>(live);
+        for (var entry : live.entrySet()) {
+            String id = entry.getKey().toString();
+            if ((!parallelism.containsKey(id) && oldParallelism.containsKey(id))
+                    || (!profiles.containsKey(id) && oldProfiles.containsKey(id))) {
+                return Optional.empty(); // Removing an override requires the regular upgrade path.
+            }
+            var current = entry.getValue();
+            int upper =
+                    parallelism.containsKey(id)
+                            ? Integer.parseInt(parallelism.get(id))
+                            : current.getParallelism().getUpperBound();
+            var profile =
+                    profiles.containsKey(id)
+                            ? parseResourceProfile(profiles.get(id))
+                            : current.getResourceProfile();
+            result.put(
+                    entry.getKey(),
+                    new JustinVertexResourceRequirements(
+                            new JustinVertexResourceRequirements.Parallelism(
+                                    Math.min(upper, current.getParallelism().getLowerBound()),
+                                    upper),
+                            profile));
+        }
+        return Optional.of(result);
     }
 
     private static boolean supportsInPlaceScaling(
@@ -416,12 +422,13 @@ public class NativeFlinkService extends AbstractFlinkService {
                 return ResourceProfile.UNKNOWN;
             }
             String[] profiles = strings[1].split(", ");
-            ResourceProfile.Builder resourceProfile = ResourceProfile.newBuilder()
-                    .setCpuCores(Double.parseDouble(profiles[0].split("=")[1]))
-                    .setTaskHeapMemoryMB(parseMemoryFromResourceProfile(profiles[1]))
-                    .setTaskOffHeapMemoryMB(parseMemoryFromResourceProfile(profiles[2]))
-                    .setManagedMemoryMB(parseMemoryFromResourceProfile(profiles[3]))
-                    .setNetworkMemoryMB(parseMemoryFromResourceProfile(profiles[4]));
+            ResourceProfile.Builder resourceProfile =
+                    ResourceProfile.newBuilder()
+                            .setCpuCores(Double.parseDouble(profiles[0].split("=")[1]))
+                            .setTaskHeapMemory(parseMemoryFromResourceProfile(profiles[1]))
+                            .setTaskOffHeapMemory(parseMemoryFromResourceProfile(profiles[2]))
+                            .setManagedMemory(parseMemoryFromResourceProfile(profiles[3]))
+                            .setNetworkMemory(parseMemoryFromResourceProfile(profiles[4]));
             return resourceProfile.build();
 
         } else {
@@ -429,19 +436,13 @@ public class NativeFlinkService extends AbstractFlinkService {
         }
     }
 
-    private static int parseMemoryFromResourceProfile(String s) {
-        String parsed = s.substring(s.indexOf("=") + 1, s.indexOf(" "));
-        if (parsed.equals("0")) {
-            return 0;
+    private static MemorySize parseMemoryFromResourceProfile(String s) {
+        String value = s.substring(s.indexOf('=') + 1);
+        int exactBytes = value.indexOf('(');
+        if (exactBytes >= 0) {
+            value = value.substring(exactBytes + 1, value.indexOf(')', exactBytes));
         }
-        System.out.println(parsed);
-        int value = Integer.parseInt(parsed.split("\\.")[0]);
-        if (parsed.contains("gb")) {
-            value *= 1024;
-        } else if (parsed.contains("kb")) {
-            value /= 1024;
-        }
-        return value;
+        return MemorySize.parse(value);
     }
 
     protected Map<JobVertexID, JustinVertexResourceRequirements> getJustinResources(
