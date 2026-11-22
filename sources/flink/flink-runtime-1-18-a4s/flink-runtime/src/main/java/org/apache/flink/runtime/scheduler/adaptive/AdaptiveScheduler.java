@@ -47,7 +47,6 @@ import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.client.JobExecutionException;
-import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptorFactory;
@@ -142,6 +141,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -184,6 +184,8 @@ public class AdaptiveScheduler
                 StopWithSavepoint.Context {
 
     private static final Logger LOG = LoggerFactory.getLogger(AdaptiveScheduler.class);
+
+    private static final Duration NATIVE_SCALE_UP_PREPARATION_TIMEOUT = Duration.ofSeconds(60);
 
     private final JobGraph jobGraph;
     private final VertexParallelismStore initialParallelismStore;
@@ -249,6 +251,8 @@ public class AdaptiveScheduler
     private boolean justinRescale = false;
 
     private boolean firstJustinRescale = true;
+
+    @Nullable private ScheduledFuture<?> nativeScaleUpTimeout;
 
     public AdaptiveScheduler(
             JobGraph jobGraph,
@@ -911,18 +915,57 @@ public class AdaptiveScheduler
                         jobInformation.getVertexParallelismStore(), justinResourceRequirements);
 
         if (maybeUpdateVertexParallelismStore.isPresent()) {
-            //    LOG.info("Triggering manual checkpoint before redeploy");
-            //    CompletableFuture<CompletedCheckpoint> checkpointFuture = triggerCheckpoint(
-            //            CheckpointType.INCREMENTAL);
-            //    checkpointFuture.thenAccept((completedCheckpoint -> {
-            //        LOG.info("Checkpoint completed: " + completedCheckpoint.getExternalPointer());
             updateJustinGraphJobInformation(maybeUpdateVertexParallelismStore.get());
             declareJustinDesiredResources();
+            prepareNativeScaleUp();
             state.tryRun(
                     ResourceListener.class,
                     ResourceListener::onNewResourceRequirements,
                     "Current state does not react to desired parallelism changes.");
-            // }));
+        }
+    }
+
+    private void prepareNativeScaleUp() {
+        if (!(state instanceof Executing)) {
+            return;
+        }
+
+        final Executing executing = (Executing) state;
+        ResourceCounter runningResources = ResourceCounter.empty();
+        for (ExecutionJobVertex vertex : executing.getExecutionGraph().getVerticesTopologically()) {
+            runningResources =
+                    runningResources.add(
+                            vertex.getJobVertex().getSlotSharingGroup().getResourceProfile(),
+                            vertex.getParallelism());
+        }
+
+        if (runningResources.equals(desiredResources)
+                || !runningResources.subtract(desiredResources).isEmpty()) {
+            // A profile change or reduction may need the old allocations to be freed first.
+            cancelNativeScaleUpTimeout();
+            return;
+        }
+
+        if (nativeScaleUpTimeout == null
+                && !hasDesiredResources(
+                        desiredResources, declarativeSlotPool.getAllSlotsInformation())) {
+            LOG.info("Waiting for additional slots before restarting for native scale-up.");
+            nativeScaleUpTimeout =
+                    runIfState(
+                            executing,
+                            () -> {
+                                nativeScaleUpTimeout = null;
+                                LOG.info("Native scale-up slot preparation timed out; restarting.");
+                                executing.onNewResourceRequirements();
+                            },
+                            NATIVE_SCALE_UP_PREPARATION_TIMEOUT);
+        }
+    }
+
+    private void cancelNativeScaleUpTimeout() {
+        if (nativeScaleUpTimeout != null) {
+            nativeScaleUpTimeout.cancel(false);
+            nativeScaleUpTimeout = null;
         }
     }
 
@@ -955,23 +998,30 @@ public class AdaptiveScheduler
             ResourceCounter desiredResources, Collection<? extends SlotInfo> freeSlots) {
         ResourceCounter outstandingResources = desiredResources;
         final Iterator<? extends SlotInfo> slotIterator = freeSlots.iterator();
+        int wildcardSlots = 0;
 
         while (!outstandingResources.isEmpty() && slotIterator.hasNext()) {
             final SlotInfo slotInfo = slotIterator.next();
             final ResourceProfile resourceProfile = slotInfo.getResourceProfile();
 
-            if (outstandingResources.containsResource(resourceProfile)) {
+            if (resourceProfile.equals(ResourceProfile.ANY)) {
+                wildcardSlots++;
+            } else if (outstandingResources.containsResource(resourceProfile)) {
                 outstandingResources = outstandingResources.subtract(resourceProfile, 1);
             } else {
                 outstandingResources = outstandingResources.subtract(ResourceProfile.UNKNOWN, 1);
             }
         }
 
-        return outstandingResources.isEmpty();
+        return outstandingResources.getTotalResourceCount() <= wildcardSlots;
     }
 
     @Override
     public boolean hasSufficientResources() {
+        if (justinRescale) {
+            // Justin builds a fixed target plan. A lower-bound allocation is not sufficient.
+            return hasDesiredResources();
+        }
         return slotAllocator
                 .determineParallelism(jobInformation, declarativeSlotPool.getAllSlotsInformation())
                 .isPresent();
@@ -995,7 +1045,12 @@ public class AdaptiveScheduler
                                         "Not enough resources available for scheduling."));
     }
 
-    private JobSchedulingPlan createJustinSchedulingPlan(ExecutionGraph previousExecutionGraph) {
+    private JobSchedulingPlan createJustinSchedulingPlan(ExecutionGraph previousExecutionGraph)
+            throws NoResourceAvailableException {
+        if (justinRescale && !hasDesiredResources()) {
+            throw new NoResourceAvailableException(
+                    "Not enough matching slots for the requested native rescale.");
+        }
         SlotAssigner slotAssigner = new JustinSlotAssigner();
         VertexParallelism vertexParallelism;
         Map<JobVertexID, Integer> map = new HashMap<>();
@@ -1032,24 +1087,9 @@ public class AdaptiveScheduler
 
     @Override
     public void goToWaitingForResources(@Nullable ExecutionGraph previousExecutionGraph) {
-        /*
-
-        if (!justinRescale && this.configuration.get(PipelineOptions.JUSTIN_OVERRIDES) == null) {
-            declareDesiredResources();
-        } else {
-            declareJustinDesiredResources();
-        }
-         */
         declareJustinDesiredResources();
-        // To avoid getting ConcurrentModificationException
-        List<AllocationID> allocationIDS =
-                declarativeSlotPool.getAllSlotsInformation().stream()
-                        .map(SlotInfo::getAllocationId)
-                        .collect(Collectors.toList());
-        for (AllocationID allocationID : allocationIDS) {
-            declarativeSlotPool.releaseSlot(
-                    allocationID, new FlinkException("Releasing all slots before restarting."));
-        }
+        firstJustinRescale = false;
+        releaseSlotsExceedingDesiredResources();
 
         transitionToState(
                 new WaitingForResources.Factory(
@@ -1058,6 +1098,29 @@ public class AdaptiveScheduler
                         this.initialResourceAllocationTimeout,
                         this.resourceStabilizationTimeout,
                         previousExecutionGraph));
+    }
+
+    private void releaseSlotsExceedingDesiredResources() {
+        // Take a snapshot because returning an allocation changes the slot pool.
+        final List<SlotInfo> slots = new ArrayList<>(declarativeSlotPool.getAllSlotsInformation());
+        // Keep exact matches first, then use wildcard slots for remaining requirements.
+        slots.sort(
+                Comparator.comparing(
+                        slot -> slot.getResourceProfile().equals(ResourceProfile.ANY)));
+        ResourceCounter remaining = desiredResources;
+        final FlinkException cause = new FlinkException("Slot is no longer needed after restart.");
+        for (SlotInfo slot : slots) {
+            final ResourceProfile profile = slot.getResourceProfile();
+            if (remaining.containsResource(profile)) {
+                remaining = remaining.subtract(profile, 1);
+            } else if (remaining.containsResource(ResourceProfile.UNKNOWN)) {
+                remaining = remaining.subtract(ResourceProfile.UNKNOWN, 1);
+            } else if (profile.equals(ResourceProfile.ANY) && !remaining.isEmpty()) {
+                remaining = remaining.subtract(remaining.getResources().iterator().next(), 1);
+            } else {
+                declarativeSlotPool.releaseSlot(slot.getAllocationId(), cause);
+            }
+        }
     }
 
     private void declareDesiredResources() {
@@ -1363,7 +1426,11 @@ public class AdaptiveScheduler
     @Override
     public boolean shouldRescale(ExecutionGraph executionGraph) {
         if (justinRescale) {
-            if (firstJustinRescale) {
+            if (firstJustinRescale
+                    && (nativeScaleUpTimeout == null
+                            || hasDesiredResources(
+                                    desiredResources,
+                                    declarativeSlotPool.getAllSlotsInformation()))) {
                 firstJustinRescale = false;
                 return true;
             }
@@ -1496,6 +1563,9 @@ public class AdaptiveScheduler
 
             final JobStatus previousJobStatus = state.getJobStatus();
 
+            if (state instanceof Executing) {
+                cancelNativeScaleUpTimeout();
+            }
             state.onLeave(targetState.getStateClass());
             T targetStateInstance = targetState.getState();
             state = targetStateInstance;
