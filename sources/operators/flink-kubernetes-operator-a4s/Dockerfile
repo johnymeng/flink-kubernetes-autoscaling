@@ -16,8 +16,9 @@
 # limitations under the License.
 ################################################################################
 # Build
-ARG JAVA_VERSION=11
-FROM maven:3.8.8-eclipse-temurin-${JAVA_VERSION} AS build
+ARG MAVEN_IMAGE=maven:3.8.8-eclipse-temurin-11@sha256:25d160c54fe5249795ffe4c4ab10fb0b305c746a7721d699b28d48de3e1347fd
+ARG JRE_IMAGE=eclipse-temurin:11-jre-jammy@sha256:c5995c158f8a12d78ba69a2d92ea784e57c5ddcaf458159df9a25ed4c9315cf7
+FROM ${MAVEN_IMAGE} AS build
 ARG SKIP_TESTS=true
 ARG HTTP_CLIENT=okhttp
 
@@ -26,8 +27,17 @@ WORKDIR /app
 COPY . .
 COPY --from=flink-src / /flink-src
 
-RUN --mount=type=cache,target=/root/.m2 mvn -f /flink-src/flink-a4s/pom.xml -ntp install -Dspotless.check.skip=true -Dcheckstyle.skip -DskipTests -Drat.skip=true
-RUN --mount=type=cache,target=/root/.m2 mvn -ntp clean install -pl flink-kubernetes-standalone,flink-kubernetes-operator-api,flink-kubernetes-operator,flink-autoscaler,flink-kubernetes-webhook -Dspotless.check.skip=true -Dcheckstyle.skip -DskipTests -Drat.skip=true -Dfabric8.httpclient.impl="$HTTP_CLIENT"
+# Build the matching Flink SNAPSHOT artifacts, including parent POMs and test
+# JARs. Keep them in this build stage instead of relying on a shared cache.
+RUN mvn -B -ntp install:install-file \
+    -Dfile=/flink-src/rocksdbjni-6.20.3-linux64.jar \
+    -DgroupId=org.rocksdb -DartifactId=frocksdbjni -Dversion=6.20.3-custom -Dpackaging=jar
+RUN mvn -B -ntp -f /flink-src/pom.xml -T 4 \
+    -pl :flink-a4s,:flink-clients,:flink-kubernetes,:flink-runtime-web,:flink-test-utils,:flink-metrics-datadog,:flink-metrics-graphite,:flink-metrics-influxdb,:flink-metrics-jmx,:flink-metrics-prometheus,:flink-metrics-slf4j,:flink-metrics-statsd \
+    -am install -DskipTests -Dspotless.check.skip=true -Drat.skip=true -Dcheckstyle.skip
+RUN mvn -B -ntp clean install \
+    -pl flink-kubernetes-standalone,flink-kubernetes-operator-api,flink-kubernetes-operator,flink-autoscaler,flink-kubernetes-webhook \
+    -Dspotless.check.skip=true -Dcheckstyle.skip -DskipTests -Drat.skip=true -Dfabric8.httpclient.impl="$HTTP_CLIENT"
 
 RUN cd /app/tools/license; mkdir jars; cd jars; \
     cp /app/flink-kubernetes-operator/target/flink-kubernetes-operator-*-shaded.jar . && \
@@ -37,7 +47,7 @@ RUN cd /app/tools/license; mkdir jars; cd jars; \
     cd ../ && ./collect_license_files.sh ./jars ./licenses-output
 
 # stage
-FROM eclipse-temurin:${JAVA_VERSION}-jre-jammy
+FROM ${JRE_IMAGE}
 ENV FLINK_HOME=/opt/flink
 ENV FLINK_PLUGINS_DIR=$FLINK_HOME/plugins
 ENV OPERATOR_VERSION=1.11-SNAPSHOT

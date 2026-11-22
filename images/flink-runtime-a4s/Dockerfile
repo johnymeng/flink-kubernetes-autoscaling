@@ -1,6 +1,7 @@
-ARG JAVA_VERSION=11
+ARG MAVEN_IMAGE=maven:3.8.8-eclipse-temurin-11@sha256:25d160c54fe5249795ffe4c4ab10fb0b305c746a7721d699b28d48de3e1347fd
+ARG FLINK_IMAGE=ghcr.io/apache/flink-docker:1.18-SNAPSHOT-scala_2.12-java11-debian@sha256:38d4ccb5891801cf04d721911b9645cbbf818804f0b53bcbee7e19bfb64d9346
 
-FROM maven:3.8.8-eclipse-temurin-${JAVA_VERSION} AS build
+FROM ${MAVEN_IMAGE} AS build
 ARG SKIP_TESTS=true
 ARG HTTP_CLIENT=okhttp
 ARG FLINK_RUNTIME_SOURCE_DIR=sources/flink/flink-runtime-1-18-a4s
@@ -10,16 +11,15 @@ WORKDIR /app
 
 COPY ${FLINK_RUNTIME_SOURCE_DIR}/ .
 
-RUN --mount=type=cache,target=/root/.m2 \
-  mvn install:install-file \
+RUN mvn -B -ntp install:install-file \
     -Dfile=${ROCKSDBJNI_JAR} \
     -DgroupId=org.rocksdb \
     -DartifactId=frocksdbjni \
     -Dversion=6.20.3-custom \
     -Dpackaging=jar
-RUN --mount=type=cache,target=/root/.m2 mvn clean install -T 8 -DskipTests -Dspotless.check.skip=true -Drat.skip=true -Dcheckstyle.skip
+RUN mvn -B -ntp clean install -T 4 -DskipTests -Dspotless.check.skip=true -Drat.skip=true -Dcheckstyle.skip
 
-FROM ghcr.io/apache/flink-docker:1.18-SNAPSHOT-scala_2.12-java11-debian
+FROM ${FLINK_IMAGE}
 
 RUN rm -rf /opt/flink
 USER flink
