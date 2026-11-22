@@ -93,6 +93,27 @@ public class TimerGaugeTest {
     }
 
     @Test
+    public void testEndingMeasurementDoesNotRecountPublishedTime() {
+        ManualClock clock = new ManualClock(42_000_000);
+        TimerGauge gauge = new TimerGauge(clock, View.UPDATE_INTERVAL_SECONDS);
+        gauge.markStart();
+        clock.advanceTime(SLEEP, TimeUnit.MILLISECONDS);
+        gauge.update();
+        clock.advanceTime(SLEEP, TimeUnit.MILLISECONDS);
+        gauge.update();
+        clock.advanceTime(SLEEP / 2, TimeUnit.MILLISECONDS);
+        gauge.markEnd();
+
+        assertEquals(2 * SLEEP + SLEEP / 2, gauge.getAccumulatedCount());
+        // Only the unpublished tail belongs to the next reporting interval.
+        assertEquals(SLEEP / 2, gauge.getCount());
+        gauge.update();
+        assertEquals(2 * SLEEP + SLEEP / 2, gauge.getMaxSingleMeasurement());
+        gauge.markEnd();
+        assertEquals(2 * SLEEP + SLEEP / 2, gauge.getAccumulatedCount());
+    }
+
+    @Test
     public void testGetWithoutUpdate() {
         ManualClock clock = new ManualClock(42_000_000);
         TimerGauge gauge = new TimerGauge(clock);
