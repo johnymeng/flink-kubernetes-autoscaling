@@ -6,7 +6,3 @@
 	path = sources/operators/flink-kubernetes-operator-justin
 	url = git@github.com:shafinulh/flink-kubernetes-operator-justin.git
 	branch = main
-[submodule "sources/libs/frocksdb"]
-	path = sources/libs/frocksdb
-	url = git@github.com:RyanL123/frocksdb.git
-	branch = quickmrc
