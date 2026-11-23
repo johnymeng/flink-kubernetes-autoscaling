@@ -91,22 +91,35 @@ The online estimator uses standard C++ containers. The offline
   for decisions. Reset the baseline when an attempt, cache roster, estimator
   configuration or parallelism changes. Comparing merged counter totals alone
   can conceal a replacement cache when other caches keep accumulating.
-- **Missing and stale telemetry.** Validate consistent header settings and
-  bins, handle empty or insufficient samples and latch unavailable status
-  through the operator. Preserve the existing deployed memory profile when
-  the curve is unavailable. Review work-fork fixes `b74389f7`,
-  `50cd2891`, `63cc94c5`, `6e4a8a7e`, `13da4173`, `dea57cbe` on
-  `origin/fix/a4s-missing-miss-rate-curves`, and `3c57eae8` on
-  `origin/fix/native-rescale-slot-reuse` for monitor shutdown. If the work
-  fork's `origin/quickmrc-main-port-718d9b22` becomes the implementation
-  base, preserve its cache-owned observations and telemetry-hold behavior.
+- **Missing and stale telemetry.** Validate consistent SHARDS header settings
+  and bins. Propagate an explicit unavailable status for empty, insufficient
+  or stale samples. Preserve the deployed memory profile while the curve is
+  unavailable.
+
+## Work repo PRs
+
+| PR | Reuse in the SHARDS port |
+| --- | --- |
+| [#2](https://github.com/johnymeng/flink-kubernetes-autoscaling/pull/2) | Use the cache-owned QuickMRC observation and aggregation tests as references for deduplication and for preserving deployed profiles during telemetry holds. The closed PR is a reference for targeted changes. |
+| [#3](https://github.com/johnymeng/flink-kubernetes-autoscaling/pull/3) | Adapt explicit unavailable outcomes, sanitized gauge names and curve validation. Its remaining coverage and pooled-cache attribution questions also apply to SHARDS. Test active-attempt and physical-cache rosters, header and bin compatibility, and baseline reset when cumulative observations change generation. |
+| [#5](https://github.com/johnymeng/flink-kubernetes-autoscaling/pull/5) | Use the monitor shutdown change and lifecycle test in `3c57eae8` when wiring native histogram polling. Review it independently of the draft PR's slot-reuse changes. |
+
+The native sample-cap correction is independent of these PRs. Before
+porting the Java telemetry, check which relevant fixes are in the chosen
+integration base and bring across the applicable tests with any missing
+behavior.
 
 ## Implementation and acceptance
 
-1. **Native and JNI.** Port the four native commits and cap correction.
-   Build `shards_mrc_estimator_test`, `block_cache_tracer_test`, and
-   `shards_trace_replay`, then build and test `LRUCache` JNI using the same
-   JAR the image will bundle. Verify full-sample byte-LRU against an
+1. **Native cap correction and JNI.** Start with a FRocksDB regression for
+   the two reads of a sampled 5-byte block at `R = 0.5` and cap 8. Change
+   eviction to use `(trackedBytes - oldestCharge) / R + oldestCharge`,
+   consistent with the hit-size calculation. Require a hit on the second
+   read, retain entries at the cap and check eviction above it with mixed
+   block charges. Verify that a partial final bin respects the advertised
+   byte limit. Rerun `shards_mrc_estimator_test`, `block_cache_tracer_test`
+   and both `shards_trace_replay` modes. Then build and test `LRUCache` JNI
+   using the same JAR the image will bundle. Verify full-sample byte-LRU against an
    independent oracle and compare online counts with `--estimator` replay
    for identical keys, charges and seed. Exercise Get, MultiGet and iterator
    traffic, repeated opens and closes, and concurrent snapshot collection.
@@ -135,7 +148,8 @@ The online estimator uses standard C++ containers. The offline
    against measured data-cache and write-buffer usage before enabling
    SHARDS-driven scaling.
 
-The review verified patch applicability on the exported native base and ran
-the two standalone estimator cases above. The complete FRocksDB/JNI build,
-Flink integration and workload measurements are acceptance work for the
-implementation.
+The four native patches landed on `jason/shards-upstream` at `db6ae5ba`.
+All 16 native tests passed, both replay modes passed a small trace check,
+and the Java and JNI code compiled. The standalone sample-cap regression
+still reproduces. JNI packaging, Flink integration and workload measurements
+remain acceptance work.
