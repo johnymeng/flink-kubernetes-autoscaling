@@ -19,11 +19,14 @@ package org.apache.flink.runtime.scheduler.adaptive;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.api.common.resources.ExternalResource;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.configuration.SchedulerExecutionMode;
+import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.core.failure.FailureEnricher;
 import org.apache.flink.core.failure.TestingFailureEnricher;
@@ -67,6 +70,7 @@ import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexResourceRequirements;
 import org.apache.flink.runtime.jobgraph.OperatorID;
+import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
 import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
@@ -84,6 +88,8 @@ import org.apache.flink.runtime.operators.coordination.CoordinationRequest;
 import org.apache.flink.runtime.operators.coordination.TaskNotRunningException;
 import org.apache.flink.runtime.operators.coordination.TestOperatorEvent;
 import org.apache.flink.runtime.rest.handler.legacy.utils.ArchivedExecutionGraphBuilder;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsBody;
+import org.apache.flink.runtime.rest.util.RestMapperUtils;
 import org.apache.flink.runtime.scheduler.DefaultSchedulerTest;
 import org.apache.flink.runtime.scheduler.SchedulerBase;
 import org.apache.flink.runtime.scheduler.SchedulerNG;
@@ -108,8 +114,13 @@ import org.apache.flink.util.Preconditions;
 import org.apache.flink.util.concurrent.FutureUtils;
 import org.apache.flink.util.jackson.JacksonMapperFactory;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -1039,6 +1050,100 @@ public class AdaptiveSchedulerTest {
         assertThat(resubmittedArchivedVertex.getParallelism()).isEqualTo(parallelism);
         // and that the max parallelism was submitted based on what was configured
         assertThat(resubmittedArchivedVertex.getMaxParallelism()).isEqualTo(expectedMaxParallelism);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false", "true, false", "false, true"})
+    void testJustinReportsAppliedSlotProfileForInitiallyUnknownGroup(
+            boolean shareSlot, boolean hasExternalResource) throws Exception {
+        final JobVertex vertex = createNoOpVertex("stateful", 1);
+        final JobGraph jobGraph;
+        if (shareSlot) {
+            final JobVertex other = createNoOpVertex("other", 1);
+            other.setSlotSharingGroup(vertex.getSlotSharingGroup());
+            jobGraph = streamingJobGraph(vertex, other);
+        } else {
+            jobGraph = streamingJobGraph(vertex);
+        }
+        assertThat(vertex.getSlotSharingGroup().getResourceProfile())
+                .isEqualTo(ResourceProfile.UNKNOWN);
+        final DefaultDeclarativeSlotPool slotPool = createDeclarativeSlotPool(jobGraph.getJobID());
+        final AdaptiveScheduler scheduler =
+                prepareScheduler(jobGraph, slotPool)
+                        .setJobMasterConfiguration(
+                                getConfigurationWithNoTimeouts()
+                                        .set(
+                                                TaskManagerOptions.TOTAL_PROCESS_MEMORY,
+                                                MemorySize.ofMebiBytes(4096)))
+                        .build();
+        final int subtasks = shareSlot ? 2 : 1;
+        final SubmissionBufferingTaskManagerGateway gateway =
+                createSubmissionBufferingTaskManagerGateway(subtasks, scheduler);
+        final ResourceProfile.Builder profileBuilder =
+                ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(640);
+        if (hasExternalResource) {
+            profileBuilder.setExtendedResource(new ExternalResource("gpu", 1));
+        }
+        final ResourceProfile slotProfile = profileBuilder.build();
+
+        singleThreadMainThreadExecutor.execute(
+                () -> {
+                    scheduler.startScheduling();
+                    offerSlots(
+                            slotPool,
+                            createSlotOffersForResourceRequirements(
+                                    ResourceCounter.withResource(slotProfile, 1)),
+                            gateway);
+                });
+        final List<TaskDeploymentDescriptor> tasks = gateway.waitForSubmissions(subtasks);
+        final ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
+        final JustinResourceRequirements beforeRunning =
+                CompletableFuture.supplyAsync(
+                                scheduler::requestJustinResourceRequirements,
+                                singleThreadMainThreadExecutor)
+                        .get();
+        assertThat(
+                        mapper.readTree(
+                                        mapper.writeValueAsBytes(
+                                                new JustinResourceRequirementsBody(beforeRunning)))
+                                .path(vertex.getID().toString())
+                                .has("appliedResourceProfile"))
+                .isFalse();
+
+        final JustinResourceRequirements running =
+                CompletableFuture.supplyAsync(
+                                () -> {
+                                    for (TaskDeploymentDescriptor task : tasks) {
+                                        for (ExecutionState taskState :
+                                                Arrays.asList(
+                                                        ExecutionState.INITIALIZING,
+                                                        ExecutionState.RUNNING)) {
+                                            assertThat(
+                                                            scheduler.updateTaskExecutionState(
+                                                                    new TaskExecutionState(
+                                                                            task
+                                                                                    .getExecutionAttemptId(),
+                                                                            taskState)))
+                                                    .isTrue();
+                                        }
+                                    }
+                                    return scheduler.requestJustinResourceRequirements();
+                                },
+                                singleThreadMainThreadExecutor)
+                        .get();
+        final JsonNode requirement =
+                mapper.readTree(
+                                mapper.writeValueAsBytes(
+                                        new JustinResourceRequirementsBody(running)))
+                        .path(vertex.getID().toString());
+        assertThat(requirement.at("/resourceProfile/managedMemory/bytes").asLong())
+                .isEqualTo(MemorySize.ofMebiBytes(343).getBytes());
+        if (shareSlot || hasExternalResource) {
+            assertThat(requirement.has("appliedResourceProfile")).isFalse();
+        } else {
+            assertThat(requirement.at("/appliedResourceProfile/managedMemory/bytes").asLong())
+                    .isEqualTo(MemorySize.ofMebiBytes(640).getBytes());
+        }
     }
 
     @Test

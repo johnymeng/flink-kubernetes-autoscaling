@@ -50,7 +50,7 @@ public class JustinResourceRequirementsHeaders
     }
 
     @Override
-    public JobMessageParameters getUnresolvedMessageParameters() {
-        return new JobMessageParameters();
+    public JustinResourceRequirementsMessageParameters getUnresolvedMessageParameters() {
+        return new JustinResourceRequirementsMessageParameters();
     }
 }

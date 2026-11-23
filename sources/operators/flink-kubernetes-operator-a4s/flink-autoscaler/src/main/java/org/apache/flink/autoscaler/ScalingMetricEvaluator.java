@@ -92,7 +92,6 @@ public class ScalingMetricEvaluator {
             LOG.debug("A4S: Evaluating metrics for vertex {}", vertex);
             MissRateCurve missRateCurve = collectedMissRateCurves.get(vertex);
             if (missRateCurve == null) {
-                LOG.warn("A4S: No miss rate curve found for vertex {}, skipping", vertex);
                 continue;
             }
             MemoryParallelismCurve mpc = MemoryParallelismCurve.fromMissRateCurve(

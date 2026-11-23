@@ -19,28 +19,26 @@
 package org.apache.flink.runtime.rest.messages.job.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.MissRateCurveObservation;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
-import java.util.Collections;
+import javax.annotation.Nullable;
 
-/** A4S response body containing aggregated scalar metrics and scaled MRC points. */
-public class A4SAggregatedMetricsResponseBody implements ResponseBody {
+/** REST response carrying a measured A4S curve or an availability status. */
+public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
+        implements ResponseBody {
 
-    public static final String FIELD_NAME_SCALED_MRC = "scaledMrc";
-
-    @JsonProperty(FIELD_NAME_SCALED_MRC)
-    private final MissRateCurve scaledMrc;
+    public A4SAggregatedMetricsResponseBody(@Nullable MissRateCurve scaledMrc) {
+        this(null, scaledMrc);
+    }
 
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
-            @JsonProperty(FIELD_NAME_SCALED_MRC) MissRateCurve scaledMrc) {
-        this.scaledMrc = scaledMrc == null ? new MissRateCurve(Collections.emptyList()) : scaledMrc;
-    }
-
-    public MissRateCurve getScaledMrc() {
-        return scaledMrc;
+            @JsonProperty(FIELD_NAME_STATUS) @Nullable Status status,
+            @JsonProperty(FIELD_NAME_SCALED_MRC) @Nullable MissRateCurve scaledMrc) {
+        super(status, scaledMrc);
     }
 }

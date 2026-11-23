@@ -19,9 +19,12 @@ package org.apache.flink.kubernetes.operator.service;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsUpdateHeaders;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.kubernetes.configuration.KubernetesConfigOptions;
 import org.apache.flink.kubernetes.operator.TestUtils;
@@ -31,6 +34,7 @@ import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkDeploymentSpec;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
 import org.apache.flink.kubernetes.operator.api.spec.JobSpec;
+import org.apache.flink.kubernetes.operator.autoscaler.KubernetesScalingRealizer;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.config.FlinkOperatorConfiguration;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
@@ -40,6 +44,7 @@ import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.operator.utils.FlinkResourceEventCollector;
 import org.apache.flink.kubernetes.operator.utils.FlinkStateSnapshotEventCollector;
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.JobVertexResourceRequirements;
@@ -514,6 +519,65 @@ public class NativeFlinkServiceTest {
                     reconStatus.serializeAndSetLastReconciledSpec(lastReconciledSpec, fd);
                 },
                 scaled);
+    }
+
+    @Test
+    public void testJustinSendsExactMemoryFromPersistedOverride() throws Exception {
+        var testingClusterClient = new TestingClusterClient<String>(configuration);
+        var service = (NativeFlinkService) createFlinkService(testingClusterClient);
+        var jobId = new JobID();
+        var vertex = new JobVertexID();
+        var profile =
+                ResourceProfile.newBuilder()
+                        .setCpuCores(1.25)
+                        .setTaskHeapMemory(new MemorySize(1610612737L))
+                        .setTaskOffHeapMemory(new MemorySize(257))
+                        .setManagedMemory(new MemorySize(2684354565L))
+                        .setNetworkMemory(new MemorySize(1048577))
+                        .build();
+        var current =
+                new JobResourceRequirements(
+                        Map.of(
+                                vertex,
+                                new JobVertexResourceRequirements(
+                                        new JobVertexResourceRequirements.Parallelism(1, 1))));
+        var updated = new CompletableFuture<JustinResourceRequirementsBody>();
+        testingClusterClient.setRequestProcessor(
+                (h, p, r) -> {
+                    assertEquals(jobId, ((JobMessageParameters) p).jobPathParameter.getValue());
+                    if (h instanceof JobResourceRequirementsHeaders) {
+                        return CompletableFuture.completedFuture(
+                                new JobResourceRequirementsBody(current));
+                    }
+                    assertTrue(h instanceof JustinResourceRequirementsUpdateHeaders);
+                    updated.complete((JustinResourceRequirementsBody) r);
+                    return CompletableFuture.completedFuture(null);
+                });
+
+        var deployment = TestUtils.buildApplicationCluster();
+        deployment.getStatus().getJobStatus().setJobId(jobId.toString());
+        deployment.getStatus().getJobStatus().setState(JobStatus.RUNNING);
+        deployment
+                .getStatus()
+                .getReconciliationStatus()
+                .serializeAndSetLastReconciledSpec(deployment.getSpec(), deployment);
+        var context =
+                new FlinkDeploymentContext(
+                        deployment,
+                        TestUtils.createEmptyContextWithClient(client),
+                        null,
+                        configManager,
+                        ctx -> service);
+        var deployConfig = new Configuration();
+        deployConfig.set(PipelineOptions.PARALLELISM_OVERRIDES, Map.of(vertex.toString(), "2"));
+        deployConfig.set(
+                KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES,
+                Map.of(vertex.toString(), profile.toString()));
+
+        assertTrue(service.justin(context, deployConfig));
+        var sent = updated.getNow(null).asJustinResourceRequirements().orElseThrow();
+        assertEquals(2, sent.getParallelism(vertex).getUpperBound());
+        assertEquals(profile, sent.getResourceProfile(vertex));
     }
 
     @Test

@@ -17,6 +17,7 @@
 
 package org.apache.flink.autoscaler;
 
+import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
@@ -35,7 +36,9 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.CATCH_UP_DURATION;
@@ -52,6 +55,55 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class ScalingMetricEvaluatorTest {
 
     private ScalingMetricEvaluator evaluator = new ScalingMetricEvaluator();
+
+    @Test
+    void skipsEmptySourceCurveAndEvaluatesDownstreamCurve() {
+        var source = new JobVertexID();
+        var downstream = new JobVertexID();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(source, Map.of(), 1, 8),
+                        new VertexInfo(downstream, Map.of(source, REBALANCE), 1, 8));
+        var curves =
+                Map.of(
+                        source,
+                        new MissRateCurve(List.of()),
+                        downstream,
+                        new MissRateCurve(List.of(new MissRateCurve.Point(1024 * 1024, 0.1))));
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        for (int second = 0; second <= 1; second++) {
+            double count = 100.0 * second;
+            history.put(
+                    Instant.ofEpochSecond(second),
+                    new CollectedMetrics(
+                            Map.of(
+                                    source,
+                                    Map.of(
+                                            ScalingMetric.LAG, 0.0,
+                                            ScalingMetric.NUM_RECORDS_IN, count,
+                                            ScalingMetric.NUM_RECORDS_OUT, count),
+                                    downstream,
+                                    Map.of(ScalingMetric.NUM_RECORDS_IN, count)),
+                            Map.of(),
+                            curves));
+        }
+
+        var evaluated =
+                evaluator.evaluate(
+                        new Configuration(),
+                        new CollectedMetricHistory(topology, history, history.firstKey()),
+                        Duration.ZERO);
+        assertEquals(
+                EvaluatedScalingMetric.avg(100),
+                evaluated.getVertexMetrics().get(source).get(ScalingMetric.TARGET_DATA_RATE));
+        assertEquals(Set.of(downstream), evaluated.getMemoryParallelismCurves().keySet());
+        assertEquals(
+                1.0,
+                evaluated.getMemoryParallelismCurves()
+                        .get(downstream)
+                        .getMemoryMbForParallelism(1)
+                        .orElseThrow());
+    }
 
     @Test
     public void testLagBasedSourceScaling() {
