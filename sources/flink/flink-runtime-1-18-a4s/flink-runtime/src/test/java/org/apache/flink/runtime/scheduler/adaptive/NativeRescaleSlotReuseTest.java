@@ -54,7 +54,7 @@ import java.util.stream.Collectors;
 import static org.apache.flink.runtime.jobgraph.JobGraphTestUtils.streamingJobGraph;
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Tests resource preparation and allocation reuse during native scaling. */
+/** Tests restart timing and allocation reuse during native scaling. */
 class NativeRescaleSlotReuseTest {
 
     private static final ResourceProfile ORIGINAL_PROFILE = profileWithManagedMemory(32);
@@ -120,10 +120,11 @@ class NativeRescaleSlotReuseTest {
     }
 
     @Test
-    void keepsCurrentExecutionUntilAdditionalSlotsArriveAndReusesItsAllocation() {
-        requestResize(ORIGINAL_PROFILE, 3);
+    void restartsImmediatelyAndKeepsCompatibleAllocationsWhileWaiting() {
         requestResize(ORIGINAL_PROFILE, 2);
-        assertThat(scheduler.getState().getJobStatus()).isEqualTo(JobStatus.RUNNING);
+        assertThat(scheduler.getState().getJobStatus()).isEqualTo(JobStatus.RESTARTING);
+        drainImmediateTasks();
+        assertThat(scheduler.getState()).isInstanceOf(WaitingForResources.class);
         assertThat(offerSlots(newSlot(CHANGED_PROFILE))).isEmpty();
         assertThat(deployed).isEmpty();
 
@@ -136,6 +137,45 @@ class NativeRescaleSlotReuseTest {
                         originalSlot.getAllocationId(), additionalSlot.getAllocationId());
         assertThat(released).isEmpty();
         assertThat(triggerTimers(PREPARATION_TIMEOUT)).isFalse();
+    }
+
+    @Test
+    void waitsForTheLatestTargetWhenAScaleUpIsSuperseded() {
+        requestResize(ORIGINAL_PROFILE, 2);
+        drainImmediateTasks();
+        assertThat(scheduler.getState()).isInstanceOf(WaitingForResources.class);
+        requestResize(ORIGINAL_PROFILE, 3);
+        assertThat(triggerTimers(PREPARATION_TIMEOUT)).isFalse();
+
+        final SlotOffer second = newSlot(ORIGINAL_PROFILE);
+        assertThat(offerSlots(second)).containsExactly(second);
+        drainImmediateTasks();
+        assertThat(deployed).isEmpty();
+        assertThat(scheduler.getState()).isInstanceOf(WaitingForResources.class);
+
+        final SlotOffer third = newSlot(ORIGINAL_PROFILE);
+        assertThat(offerSlots(third)).containsExactly(third);
+        drainImmediateTasks();
+        assertThat(deployed)
+                .containsExactlyInAnyOrder(originalSlot.getAllocationId(), second.getAllocationId(),
+                        third.getAllocationId());
+        assertThat(released).isEmpty();
+    }
+
+    @Test
+    void releasesRetainedSlotsIfThePendingTargetChangesProfile() {
+        requestResize(ORIGINAL_PROFILE, 2);
+        drainImmediateTasks();
+        assertThat(scheduler.getState()).isInstanceOf(WaitingForResources.class);
+        requestResize(CHANGED_PROFILE, 2);
+        assertThat(released).containsExactly(originalSlot.getAllocationId());
+
+        final SlotOffer first = newSlot(CHANGED_PROFILE);
+        final SlotOffer second = newSlot(CHANGED_PROFILE);
+        assertThat(offerSlots(first, second)).containsExactlyInAnyOrder(first, second);
+        drainImmediateTasks();
+        assertThat(deployed)
+                .containsExactlyInAnyOrder(first.getAllocationId(), second.getAllocationId());
     }
 
     @Test
@@ -168,14 +208,12 @@ class NativeRescaleSlotReuseTest {
     }
 
     @Test
-    void expiresPreparationWithoutTryingToDeployAnIncompleteTarget() {
+    void startsTheNormalAllocationDeadlineWithoutAPreparationWait() {
         requestResize(ORIGINAL_PROFILE, 2);
-        assertThat(scheduler.getState().getJobStatus()).isEqualTo(JobStatus.RUNNING);
-
-        assertThat(triggerTimers(PREPARATION_TIMEOUT)).isTrue();
         assertThat(scheduler.getState().getJobStatus()).isEqualTo(JobStatus.RESTARTING);
         drainImmediateTasks();
         assertThat(scheduler.getState()).isInstanceOf(WaitingForResources.class);
+        assertThat(triggerTimers(PREPARATION_TIMEOUT)).isFalse();
         assertThat(scheduler.hasSufficientResources()).isFalse();
         assertThat(released).isEmpty();
 

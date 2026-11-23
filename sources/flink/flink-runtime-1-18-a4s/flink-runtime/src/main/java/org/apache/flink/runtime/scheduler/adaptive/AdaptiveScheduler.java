@@ -185,8 +185,6 @@ public class AdaptiveScheduler
 
     private static final Logger LOG = LoggerFactory.getLogger(AdaptiveScheduler.class);
 
-    private static final Duration NATIVE_SCALE_UP_PREPARATION_TIMEOUT = Duration.ofSeconds(60);
-
     private final JobGraph jobGraph;
     private final VertexParallelismStore initialParallelismStore;
 
@@ -251,8 +249,6 @@ public class AdaptiveScheduler
     private boolean justinRescale = false;
 
     private boolean firstJustinRescale = true;
-
-    @Nullable private ScheduledFuture<?> nativeScaleUpTimeout;
 
     public AdaptiveScheduler(
             JobGraph jobGraph,
@@ -894,7 +890,6 @@ public class AdaptiveScheduler
     public void updateJustinResourceRequirements(
             JustinResourceRequirements justinResourceRequirements) {
         this.justinRescale = true;
-        this.firstJustinRescale = true;
         this.justinResourceRequirements = justinResourceRequirements;
         /*
         if (!(slotAllocator instanceof JustinSlotAllocator)) {
@@ -915,57 +910,17 @@ public class AdaptiveScheduler
                         jobInformation.getVertexParallelismStore(), justinResourceRequirements);
 
         if (maybeUpdateVertexParallelismStore.isPresent()) {
+            // A graph that is already waiting for resources will use the updated requirements.
+            firstJustinRescale = !(state instanceof WaitingForResources);
             updateJustinGraphJobInformation(maybeUpdateVertexParallelismStore.get());
             declareJustinDesiredResources();
-            prepareNativeScaleUp();
+            if (state instanceof WaitingForResources) {
+                releaseSlotsExceedingDesiredResources();
+            }
             state.tryRun(
                     ResourceListener.class,
                     ResourceListener::onNewResourceRequirements,
                     "Current state does not react to desired parallelism changes.");
-        }
-    }
-
-    private void prepareNativeScaleUp() {
-        if (!(state instanceof Executing)) {
-            return;
-        }
-
-        final Executing executing = (Executing) state;
-        ResourceCounter runningResources = ResourceCounter.empty();
-        for (ExecutionJobVertex vertex : executing.getExecutionGraph().getVerticesTopologically()) {
-            runningResources =
-                    runningResources.add(
-                            vertex.getJobVertex().getSlotSharingGroup().getResourceProfile(),
-                            vertex.getParallelism());
-        }
-
-        if (runningResources.equals(desiredResources)
-                || !runningResources.subtract(desiredResources).isEmpty()) {
-            // A profile change or reduction may need the old allocations to be freed first.
-            cancelNativeScaleUpTimeout();
-            return;
-        }
-
-        if (nativeScaleUpTimeout == null
-                && !hasDesiredResources(
-                        desiredResources, declarativeSlotPool.getAllSlotsInformation())) {
-            LOG.info("Waiting for additional slots before restarting for native scale-up.");
-            nativeScaleUpTimeout =
-                    runIfState(
-                            executing,
-                            () -> {
-                                nativeScaleUpTimeout = null;
-                                LOG.info("Native scale-up slot preparation timed out; restarting.");
-                                executing.onNewResourceRequirements();
-                            },
-                            NATIVE_SCALE_UP_PREPARATION_TIMEOUT);
-        }
-    }
-
-    private void cancelNativeScaleUpTimeout() {
-        if (nativeScaleUpTimeout != null) {
-            nativeScaleUpTimeout.cancel(false);
-            nativeScaleUpTimeout = null;
         }
     }
 
@@ -1426,11 +1381,7 @@ public class AdaptiveScheduler
     @Override
     public boolean shouldRescale(ExecutionGraph executionGraph) {
         if (justinRescale) {
-            if (firstJustinRescale
-                    && (nativeScaleUpTimeout == null
-                            || hasDesiredResources(
-                                    desiredResources,
-                                    declarativeSlotPool.getAllSlotsInformation()))) {
+            if (firstJustinRescale) {
                 firstJustinRescale = false;
                 return true;
             }
@@ -1563,9 +1514,6 @@ public class AdaptiveScheduler
 
             final JobStatus previousJobStatus = state.getJobStatus();
 
-            if (state instanceof Executing) {
-                cancelNativeScaleUpTimeout();
-            }
             state.onLeave(targetState.getStateClass());
             T targetStateInstance = targetState.getState();
             state = targetStateInstance;
