@@ -60,12 +60,13 @@ ShardsMrcEstimator::ShardsMrcEstimator(double sampling_rate, uint64_t hash_seed,
 }
 
 void ShardsMrcEstimator::Access(const Slice& block_key, uint64_t charge) {
-  total_refs_.fetch_add(1, std::memory_order_relaxed);
   if (GetSliceNPHash64(block_key, hash_seed_) > threshold_) {
+    total_refs_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   MutexLock l(&mutex_);
   const auto start = std::chrono::steady_clock::now();
+  total_refs_.fetch_add(1, std::memory_order_relaxed);
   ++sampled_refs_;
 
   std::string key = block_key.ToString();
@@ -118,8 +119,9 @@ std::vector<uint64_t> ShardsMrcEstimator::Snapshot() const {
   out[kHashSeed] = hash_seed_;
   out[kBinBytes] = bin_bytes_;
   out[kMaxDistanceBytes] = max_distance_bytes_;
-  out[kTotalRefs] = total_refs_.load(std::memory_order_relaxed);
   MutexLock l(&mutex_);
+  // Publish sampled accesses and their contribution to total_refs_ together.
+  out[kTotalRefs] = total_refs_.load(std::memory_order_relaxed);
   out[kSampledRefs] = sampled_refs_;
   out[kEvictedByCap] = evicted_by_cap_;
   out[kTrackedEntries] = blocks_.size();

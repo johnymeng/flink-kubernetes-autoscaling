@@ -1,8 +1,10 @@
 #include "cache/shards_mrc_estimator.h"
 
+#include <atomic>
 #include <cstring>
 #include <limits>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -260,6 +262,30 @@ TEST(ShardsMrcEstimatorTest, CountersAreMonotonicAndNotResetByReads) {
     prev = std::move(cur);
   }
   ASSERT_GT(prev[ShardsMrcEstimator::kEvictedByCap], 0U);
+}
+
+TEST(ShardsMrcEstimatorTest, ConcurrentSnapshotsKeepReferenceCountsConsistent) {
+  ShardsMrcEstimator estimator(1.0, 0, 4096, 64 * 4096);
+  std::atomic<bool> stop{false};
+  std::thread writer([&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      estimator.Access("hot-block", 4096);
+    }
+  });
+
+  bool consistent = true;
+  for (int i = 0; i < 100000; ++i) {
+    const auto snapshot = estimator.Snapshot();
+    // With full sampling, every counted access must appear in both counters.
+    if (snapshot[ShardsMrcEstimator::kTotalRefs] !=
+        snapshot[ShardsMrcEstimator::kSampledRefs]) {
+      consistent = false;
+      break;
+    }
+  }
+  stop.store(true, std::memory_order_relaxed);
+  writer.join();
+  ASSERT_TRUE(consistent);
 }
 
 TEST(ShardsMrcEstimatorTest, UserDataBlockFilter) {
