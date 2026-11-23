@@ -36,6 +36,7 @@ import org.apache.flink.autoscaler.utils.ResourceCheckUtils;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirements;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
+import org.apache.flink.autoscaler.utils.justin.ResourceProfileParser;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
@@ -230,6 +231,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             var headers = JustinResourceRequirementsHeaders.INSTANCE;
             var parameters = headers.getUnresolvedMessageParameters();
             parameters.jobPathParameter.resolve(context.getJobID());
+            parameters.includeAppliedProfile.resolve(Collections.singletonList(true));
             try (var client = context.getRestClusterClient()) {
                 currentRequirements =
                         client.sendRequest(headers, parameters, EmptyRequestBody.getInstance())
@@ -257,12 +259,18 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                                 : getResourceProfile(conf, 0);
             } else {
                 var current = currentRequirements.get(id);
-                profile = current == null ? null : current.getResourceProfile();
+                profile = current == null ? null : current.getAppliedResourceProfile();
                 if (profile == null
                         || profile.equals(ResourceProfile.UNKNOWN)
                         || profile.equals(ResourceProfile.ANY)) {
                     LOG.warn(
-                            "A4S: Deferring rescale because the current resource profile for vertex {} is unavailable",
+                            "A4S: Deferring rescale because the applied resource profile for vertex {} is unavailable",
+                            id);
+                    return Optional.empty();
+                }
+                if (!profile.equals(ResourceProfileParser.parse(profile.toString()))) {
+                    LOG.warn(
+                            "A4S: Deferring rescale because the applied resource profile for vertex {} cannot be preserved",
                             id);
                     return Optional.empty();
                 }

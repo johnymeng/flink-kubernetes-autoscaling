@@ -32,6 +32,7 @@ import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirements;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
+import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
@@ -155,13 +156,26 @@ public class ScalingExecutorTest {
                         .setManagedMemoryMB(192)
                         .setNetworkMemoryMB(84)
                         .build();
-        var requirementsBuilder =
-                JustinResourceRequirements.newBuilder()
-                        .setParallelismForJobVertex(source, 1, 1, sourceProfile);
-        if (statefulProfileAvailable) {
-            requirementsBuilder.setParallelismForJobVertex(stateful, 1, 1, statefulProfile);
-        }
-        var requirements = requirementsBuilder.build();
+        // The legacy GET field can contain this template for an UNKNOWN group on a 4 GiB TM.
+        var legacyProfile =
+                ResourceProfile.newBuilder()
+                        .setCpuCores(1)
+                        .setTaskHeapMemoryMB(363)
+                        .setManagedMemoryMB(343)
+                        .setNetworkMemoryMB(84)
+                        .build();
+        var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 1);
+        var requirements =
+                new JustinResourceRequirements(
+                        Map.of(
+                                source,
+                                new JustinVertexResourceRequirements(
+                                        parallelism, sourceProfile, sourceProfile),
+                                stateful,
+                                new JustinVertexResourceRequirements(
+                                        parallelism,
+                                        legacyProfile,
+                                        statefulProfileAvailable ? statefulProfile : null)));
         context =
                 context.toBuilder()
                         .restClientSupplier(() -> resourceRequirementsClient(requirements))
@@ -225,6 +239,10 @@ public class ScalingExecutorTest {
                             P extends ResponseBody>
                     CompletableFuture<P> sendRequest(M headers, U parameters, R request) {
                 assertThat(headers).isSameAs(JustinResourceRequirementsHeaders.INSTANCE);
+                assertThat(
+                                MessageParameters.resolveUrl(
+                                        headers.getTargetRestEndpointURL(), parameters))
+                        .endsWith("/justin?include-applied-profile=true");
                 return CompletableFuture.completedFuture(
                         headers.getResponseClass()
                                 .cast(new JustinResourceRequirementsBody(requirements)));

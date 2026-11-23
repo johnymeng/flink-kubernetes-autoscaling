@@ -19,11 +19,29 @@ package org.apache.flink.autoscaler.standalone.realizer;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.DelayedScaleDown;
 import org.apache.flink.autoscaler.JobAutoScalerContext;
+import org.apache.flink.autoscaler.ScalingExecutor;
+import org.apache.flink.autoscaler.ScalingTracking;
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
+import org.apache.flink.autoscaler.metrics.ScalingMetric;
+import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
+import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirements;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsUpdateHeaders;
+import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
+import org.apache.flink.configuration.MemorySize;
+import org.apache.flink.configuration.TaskManagerOptions;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneClientHAServices;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -35,12 +53,15 @@ import org.apache.flink.runtime.rest.messages.RequestBody;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 import org.apache.flink.runtime.rest.messages.job.JobResourceRequirementsBody;
 import org.apache.flink.runtime.rest.messages.job.JobResourceRequirementsHeaders;
+import org.apache.flink.runtime.rest.util.RestMapperUtils;
 import org.apache.flink.util.function.SupplierWithException;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -107,6 +128,147 @@ class RescaleApiScalingRealizerTest {
             assertThat(eventCollector.events).isEmpty();
         }
         assertThat(closeFuture).isDone();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {1536, 2560})
+    void testThroughputRescalePreservesAppliedMemoryBytes(int managedMemoryMiB) throws Exception {
+        var jobId = new JobID();
+        var vertex = new JobVertexID();
+        var managedMemory = new MemorySize(MemorySize.ofMebiBytes(managedMemoryMiB).getBytes() + 5);
+        var current =
+                ResourceProfile.newBuilder()
+                        .setCpuCores(1.25)
+                        .setTaskHeapMemory(new MemorySize(1610612737L))
+                        .setTaskOffHeapMemory(new MemorySize(257))
+                        .setManagedMemory(managedMemory)
+                        .setNetworkMemory(new MemorySize(1048577))
+                        .build();
+        var legacyProfile =
+                ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(343).build();
+        var requirements =
+                new JustinResourceRequirements(
+                        Map.of(
+                                vertex,
+                                new JustinVertexResourceRequirements(
+                                        new JustinVertexResourceRequirements.Parallelism(1, 1),
+                                        legacyProfile,
+                                        current)));
+        var mapper = RestMapperUtils.getStrictObjectMapper();
+        var response =
+                mapper.readValue(
+                        mapper.writeValueAsBytes(new JustinResourceRequirementsBody(requirements)),
+                        JustinResourceRequirementsBody.class);
+        var legacyResponse =
+                new JustinResourceRequirementsBody(
+                        JustinResourceRequirements.newBuilder()
+                                .setParallelismForJobVertex(vertex, 1, 1, legacyProfile)
+                                .build());
+        var updated = new CompletableFuture<JustinResourceRequirementsBody>();
+        var context =
+                createJobAutoScalerContext(
+                        jobId,
+                        () ->
+                                new RestClusterClient<>(
+                                        new Configuration(),
+                                        "test-cluster",
+                                        (c, e) -> new StandaloneClientHAServices("localhost")) {
+                                    @Override
+                                    public <
+                                                    M extends MessageHeaders<R, P, U>,
+                                                    U extends MessageParameters,
+                                                    R extends RequestBody,
+                                                    P extends ResponseBody>
+                                            CompletableFuture<P> sendRequest(M h, U p, R r) {
+                                        assertThat(
+                                                        ((JobMessageParameters) p)
+                                                                .jobPathParameter.getValue())
+                                                .isEqualTo(jobId);
+                                        if (h instanceof JustinResourceRequirementsHeaders) {
+                                            var url =
+                                                    MessageParameters.resolveUrl(
+                                                            h.getTargetRestEndpointURL(), p);
+                                            var body =
+                                                    url.endsWith("?include-applied-profile=true")
+                                                            ? response
+                                                            : legacyResponse;
+                                            return CompletableFuture.completedFuture(
+                                                    h.getResponseClass().cast(body));
+                                        }
+                                        assertThat(h)
+                                                .isInstanceOf(
+                                                        JustinResourceRequirementsUpdateHeaders
+                                                                .class);
+                                        updated.complete((JustinResourceRequirementsBody) r);
+                                        return CompletableFuture.completedFuture(null);
+                                    }
+                                });
+        var conf = context.getConfiguration();
+        conf.set(JobManagerOptions.SCHEDULER, JobManagerOptions.SchedulerType.Adaptive);
+        conf.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(8192));
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.SCALING_ENABLED, true);
+        conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
+        conf.set(AutoScalerOptions.MEMORY_SCALING_ENABLED, false);
+        conf.set(AutoScalerOptions.STABILIZATION_INTERVAL, Duration.ZERO);
+        conf.set(AutoScalerOptions.CATCH_UP_DURATION, Duration.ZERO);
+
+        var vertexMetrics =
+                new HashMap<>(
+                        Map.of(
+                                ScalingMetric.PARALLELISM, EvaluatedScalingMetric.of(1),
+                                ScalingMetric.MAX_PARALLELISM, EvaluatedScalingMetric.of(128),
+                                ScalingMetric.NUM_SOURCE_PARTITIONS, EvaluatedScalingMetric.of(0),
+                                ScalingMetric.TARGET_DATA_RATE,
+                                        new EvaluatedScalingMetric(110, 110),
+                                ScalingMetric.TRUE_PROCESSING_RATE,
+                                        new EvaluatedScalingMetric(100, 100),
+                                ScalingMetric.CATCH_UP_DATA_RATE, EvaluatedScalingMetric.of(0),
+                                ScalingMetric.ROCKS_DB_BLOCK_CACHE_HIT_RATE,
+                                        EvaluatedScalingMetric.of(0)));
+        vertexMetrics.put(ScalingMetric.SCALE_UP_RATE_THRESHOLD, EvaluatedScalingMetric.of(125));
+        vertexMetrics.put(ScalingMetric.SCALE_DOWN_RATE_THRESHOLD, EvaluatedScalingMetric.of(200));
+        var globalMetrics =
+                Map.of(
+                        ScalingMetric.GC_PRESSURE, EvaluatedScalingMetric.of(Double.NaN),
+                        ScalingMetric.HEAP_MAX_USAGE_RATIO, EvaluatedScalingMetric.of(Double.NaN),
+                        ScalingMetric.HEAP_MEMORY_USED, EvaluatedScalingMetric.avg(0),
+                        ScalingMetric.MANAGED_MEMORY_USED, EvaluatedScalingMetric.avg(0),
+                        ScalingMetric.METASPACE_MEMORY_USED, EvaluatedScalingMetric.avg(0));
+        var events = new TestingEventCollector<JobID, JobAutoScalerContext<JobID>>();
+        var stateStore = new InMemoryAutoScalerStateStore<JobID, JobAutoScalerContext<JobID>>();
+        assertThat(
+                        new ScalingExecutor<>(events, stateStore)
+                                .scaleResource(
+                                        context,
+                                        new EvaluatedMetrics(
+                                                Map.of(vertex, vertexMetrics),
+                                                globalMetrics,
+                                                Map.of()),
+                                        new HashMap<>(),
+                                        new ScalingTracking(),
+                                        Instant.now(),
+                                        new JobTopology(new VertexInfo(vertex, Map.of(), 1, 128)),
+                                        new DelayedScaleDown()))
+                .isTrue();
+
+        new RescaleApiScalingRealizer<>(events)
+                .realizeParallelismOverrides(
+                        context,
+                        stateStore.getParallelismOverrides(context),
+                        stateStore.getResourceProfileOverrides(context));
+        assertThat(updated).isDone();
+        var sent =
+                mapper.readValue(
+                                mapper.writeValueAsBytes(updated.join()),
+                                JustinResourceRequirementsBody.class)
+                        .asJustinResourceRequirements()
+                        .orElseThrow();
+        assertThat(sent.getParallelism(vertex).getUpperBound()).isGreaterThan(1);
+        assertThat(sent.getResourceProfile(vertex).getManagedMemory().getBytes())
+                .isEqualTo(managedMemory.getBytes());
+        assertThat(sent.getResourceProfile(vertex)).isEqualTo(current);
     }
 
     @Test
