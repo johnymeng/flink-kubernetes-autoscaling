@@ -20,13 +20,13 @@ namespace ROCKSDB_NAMESPACE {
 // accessed since its previous access, divided by sampling_rate, plus its own
 // charge: the smallest byte-LRU cache in which the access hits. Bin i counts
 // distances in (i * bin_bytes, (i + 1) * bin_bytes], i.e. accesses that hit in
-// a cache of (i + 1) * bin_bytes bytes, so the hits at that size are the sum of
-// bins 0..i. One infinite bin follows; it holds first accesses, re-accesses of
-// blocks evicted by the bound, and distances beyond the last bin.
+// a cache of (i + 1) * bin_bytes bytes, with the final bin limited to
+// max_distance_bytes. One infinite bin follows. It holds first accesses,
+// re-accesses of blocks evicted by the bound, and distances beyond the cap.
 //
-// The sample set is bounded: while the tracked charge divided by
-// sampling_rate exceeds max_distance_bytes, the least recently used sampled
-// block is dropped (counted in evicted_by_cap).
+// The sample set is bounded by dropping the least recently used sampled
+// block while its estimated hit size exceeds max_distance_bytes. Each drop
+// contributes to evicted_by_cap.
 //
 // All counters are monotonic and never reset. Thread-safe; the hash is
 // computed before the mutex, which is taken only for sampled accesses.
@@ -66,6 +66,8 @@ class ShardsMrcEstimator {
 
  private:
   using KeyMap = std::unordered_map<std::string, uint64_t>;  // key -> slot
+
+  uint64_t HitBin(uint64_t newer, uint64_t charge) const;
 
   // Fenwick tree over access slots in recency order; a slot holds the charge
   // of the block whose most recent access it is.
