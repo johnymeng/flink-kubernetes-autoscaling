@@ -18,6 +18,7 @@
 
 package org.apache.flink.contrib.streaming.state;
 
+import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
 import org.apache.flink.metrics.Metric;
@@ -30,6 +31,7 @@ import org.apache.flink.runtime.metrics.scope.ScopeFormats;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.LRUCache;
 import org.rocksdb.RocksDBException;
 
 import java.math.BigInteger;
@@ -205,6 +207,55 @@ class RocksDBNativeMetricMonitorTest {
                     .withFailMessage("Closed gauge still queried RocksDB")
                     .isZero();
         }
+    }
+
+    @Test
+    void testShardsGaugeBecomesUnavailableForSharedAndClosedCaches() {
+        GenericMetricGroup group =
+                new GenericMetricGroup(
+                        new SimpleMetricRegistry(),
+                        UnregisteredMetricGroups.createUnregisteredTaskMetricGroup(),
+                        OPERATOR_NAME);
+        RocksDBNativeMetricOptions options = new RocksDBNativeMetricOptions();
+        options.enableStackDistanceHistogram();
+        try (LRUCache cache = new LRUCache(8L << 20, -1, false, 0.1, false, 60, 1, 0.01, 1)) {
+            cache.enableShardsMrc(1.0, 7L, 1024L, 4096L);
+            try (RocksDBNativeMetricMonitor first =
+                    new RocksDBNativeMetricMonitor(
+                            options, group, rocksDBExtension.getRocksDB(), null, cache)) {
+                RocksDBNativeMetricMonitor.RocksDBStackDistanceHistogramView view =
+                        first.new RocksDBStackDistanceHistogramView(cache);
+                assertThat(view.getValue()).isEmpty();
+                view.update();
+                StackDistanceHistogram histogram =
+                        StackDistanceHistogram.fromMetricString(view.getValue());
+                assertThat(histogram.getVersion()).isEqualTo(2);
+                assertThat(histogram.getNumBuckets()).isEqualTo(4);
+
+                try (RocksDBNativeMetricMonitor second =
+                        new RocksDBNativeMetricMonitor(
+                                options, group, rocksDBExtension.getRocksDB(), null, cache)) {
+                    assertThat(view.getValue()).isEmpty();
+                }
+                // Earlier pooled samples cannot be attributed after the second monitor closes.
+                view.update();
+                assertThat(view.getValue()).isEmpty();
+            }
+        }
+
+        RocksDBNativeMetricMonitor.RocksDBStackDistanceHistogramView closedView;
+        try (LRUCache cache = new LRUCache(8L << 20, -1, false, 0.1, false, 60, 1, 0.01, 1)) {
+            cache.enableShardsMrc(1.0, 7L, 1024L, 4096L);
+            try (RocksDBNativeMetricMonitor monitor =
+                    new RocksDBNativeMetricMonitor(
+                            options, group, rocksDBExtension.getRocksDB(), null, cache)) {
+                closedView = monitor.new RocksDBStackDistanceHistogramView(cache);
+                closedView.update();
+                assertThat(closedView.getValue()).isNotEmpty();
+            }
+        }
+        closedView.update();
+        assertThat(closedView.getValue()).isEmpty();
     }
 
     static class SimpleMetricRegistry implements MetricRegistry {
