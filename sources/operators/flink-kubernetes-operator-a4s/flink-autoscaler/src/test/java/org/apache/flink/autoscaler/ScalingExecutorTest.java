@@ -617,6 +617,9 @@ public class ScalingExecutorTest {
         context = TestingAutoscalerUtils.createResourceAwareContext();
         context.getConfiguration()
                 .set(AutoScalerOptions.MEMORY_TUNING_ENABLED, memoryTuningEnabled);
+        // Allow the 32-task plan assumed by the memory expectations below.
+        context.getConfiguration()
+                .set(AutoScalerOptions.VERTEX_MAX_PARALLELISM, MAX_PARALLELISM);
         context.getConfiguration().set(TaskManagerOptions.NUM_TASK_SLOTS, 5);
         context.getConfiguration()
                 .set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.parse("30 gb"));
@@ -657,6 +660,7 @@ public class ScalingExecutorTest {
                         now,
                         jobTopology,
                         new DelayedScaleDown()));
+        assertEquals(Map.of(source, 32, sink, 32), getScaledParallelism(stateStore, context));
         Map<String, String> expected;
         if (memoryTuningEnabled) {
             assertNotEquals(context.getConfiguration(), capturedConfForMaxResources);
