@@ -323,7 +323,8 @@ class BlockBasedTable : public TableReader {
       autovector<Status, MultiGetContext::MAX_BATCH_SIZE>* statuses,
       autovector<CachableEntry<Block>, MultiGetContext::MAX_BATCH_SIZE>*
           results,
-      char* scratch, const UncompressionDict& uncompression_dict) const;
+      char* scratch, const UncompressionDict& uncompression_dict,
+      BlockCacheLookupContext* lookup_contexts) const;
 
   // Get the iterator from the index reader.
   //

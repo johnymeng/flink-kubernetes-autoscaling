@@ -378,6 +378,86 @@ TEST(ShardsMrcEstimatorTest, NoFillReadsMissUntilTheBlockIsAdmitted) {
   ASSERT_OK(DestroyDB(path, options));
 }
 
+TEST(ShardsMrcEstimatorTest, BatchedMultiGetTracksEachBlockLookupOnce) {
+  for (bool shared_block : {false, true}) {
+    SCOPED_TRACE(shared_block);
+    const std::string path = test::PerThreadDBPath("shards_mrc_batch");
+    const std::string trace_path = path + ".trace";
+    Options options;
+    options.create_if_missing = true;
+    options.compression = kNoCompression;
+    options.statistics = CreateDBStatistics();
+    BlockBasedTableOptions table;
+    table.block_size = shared_block ? 65536 : 512;
+    table.block_cache = NewLRUCache(1 << 20, 0);
+    auto estimator = std::make_shared<ShardsMrcEstimator>(1.0, 0, 512, 1 << 20);
+    table.block_cache->SetShardsMrcEstimator(estimator);
+    options.table_factory.reset(NewBlockBasedTableFactory(table));
+    ASSERT_OK(DestroyDB(path, options));
+    DB* raw = nullptr;
+    ASSERT_OK(DB::Open(options, path, &raw));
+    std::unique_ptr<DB> db(raw);
+    const Slice keys[] = {"a", "b", "c"};
+    const std::string value(1500, 'v');
+    for (const auto& key : keys) {
+      ASSERT_OK(db->Put(WriteOptions(), key, value));
+    }
+    ASSERT_OK(db->Flush(FlushOptions()));
+    std::unique_ptr<TraceWriter> writer;
+    ASSERT_OK(
+        NewFileTraceWriter(options.env, EnvOptions(), trace_path, &writer));
+    ASSERT_OK(db->StartBlockCacheTrace(TraceOptions(), std::move(writer)));
+
+    for (bool fill : {false, false, true, false}) {
+      ReadOptions read;
+      read.fill_cache = fill;
+      PinnableSlice values[3];
+      Status statuses[3];
+      db->MultiGet(read, db->DefaultColumnFamily(), 3, keys, values, statuses,
+                   /*sorted_input=*/true);
+      for (size_t i = 0; i < 3; ++i) {
+        ASSERT_OK(statuses[i]);
+        ASSERT_EQ(values[i].ToString(), value);
+      }
+    }
+    const uint64_t blocks = shared_block ? 1 : 3;
+    const auto snapshot = estimator->Snapshot();
+    EXPECT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_DATA_HIT), blocks);
+    EXPECT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_DATA_MISS),
+              3 * blocks);
+    EXPECT_EQ(snapshot[ShardsMrcEstimator::kSampledRefs], 4 * blocks);
+    EXPECT_EQ(snapshot.back(), 3 * blocks);
+    EXPECT_EQ(snapshot[ShardsMrcEstimator::kTrackedEntries], blocks);
+    ASSERT_OK(db->EndBlockCacheTrace());
+    db.reset();
+
+    std::unique_ptr<TraceReader> file;
+    ASSERT_OK(NewFileTraceReader(options.env, EnvOptions(), trace_path, &file));
+    BlockCacheTraceReader reader(std::move(file));
+    BlockCacheTraceHeader header;
+    ASSERT_OK(reader.ReadHeader(&header));
+    uint64_t accesses = 0;
+    BlockCacheTraceRecord record;
+    Status s;
+    while ((s = reader.ReadAccess(&record)).ok()) {
+      if (record.caller != TableReaderCaller::kUserMultiGet ||
+          record.block_type != TraceType::kBlockTraceDataBlock) {
+        continue;
+      }
+      const uint64_t pass = accesses++ / blocks;
+      EXPECT_EQ(record.is_cache_hit == Boolean::kTrue, pass == 3);
+      EXPECT_EQ(record.no_insert == Boolean::kTrue, pass != 2);
+      EXPECT_EQ(record.block_size > 0, pass >= 2);
+      EXPECT_FALSE(record.block_key.empty());
+      EXPECT_EQ(record.referenced_key_exist_in_block, Boolean::kTrue);
+    }
+    EXPECT_TRUE(s.IsIncomplete() && s.getState() == nullptr) << s.ToString();
+    EXPECT_EQ(accesses, 4 * blocks);
+    ASSERT_OK(options.env->DeleteFile(trace_path));
+    ASSERT_OK(DestroyDB(path, options));
+  }
+}
+
 // The table reader feeds the estimator exactly the accesses a block cache
 // trace records with the same filter: replaying the trace through a second
 // estimator reproduces the online snapshot.
