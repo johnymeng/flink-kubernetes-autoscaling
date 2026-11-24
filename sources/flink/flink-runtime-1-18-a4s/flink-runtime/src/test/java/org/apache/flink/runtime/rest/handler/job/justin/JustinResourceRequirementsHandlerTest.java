@@ -36,9 +36,10 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -51,8 +52,9 @@ import static org.mockito.Mockito.when;
 class JustinResourceRequirementsHandlerTest {
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testAppliedProfileIsOptIn(boolean includeApplied) throws Exception {
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void resourceMetadataIsIndependentlyOptIn(boolean includeApplied, boolean includeDefault)
+            throws Exception {
         final JobID jobId = new JobID();
         final JobVertexID vertexId = new JobVertexID();
         final ResourceProfile requested =
@@ -66,7 +68,8 @@ class JustinResourceRequirementsHandlerTest {
                                 new JustinVertexResourceRequirements(
                                         new JustinVertexResourceRequirements.Parallelism(1, 1),
                                         requested,
-                                        applied)));
+                                        applied,
+                                        true)));
         final RestfulGateway gateway = mock(RestfulGateway.class);
         when(gateway.requestJustinResourceRequirements(jobId))
                 .thenReturn(CompletableFuture.completedFuture(requirements));
@@ -75,11 +78,13 @@ class JustinResourceRequirementsHandlerTest {
                         () -> CompletableFuture.completedFuture(gateway),
                         Time.seconds(5),
                         Collections.emptyMap());
-        final Map<String, List<String>> query =
-                includeApplied
-                        ? Collections.singletonMap(
-                                "include-applied-profile", Collections.singletonList("true"))
-                        : Collections.emptyMap();
+        final Map<String, List<String>> query = new HashMap<>();
+        if (includeApplied) {
+            query.put("include-applied-profile", Collections.singletonList("true"));
+        }
+        if (includeDefault) {
+            query.put("include-default-slot", Collections.singletonList("true"));
+        }
         final JustinResourceRequirementsBody response =
                 handler.handleRequest(
                                 HandlerRequest.resolveParametersAndCreate(
@@ -93,8 +98,16 @@ class JustinResourceRequirementsHandlerTest {
                                 gateway)
                         .get();
         final ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
-        final JsonNode vertex =
-                mapper.readTree(mapper.writeValueAsBytes(response)).path(vertexId.toString());
+        final byte[] wire = mapper.writeValueAsBytes(response);
+        final JsonNode vertex = mapper.readTree(wire).path(vertexId.toString());
+        assertThat(vertex.has("defaultSlot")).isEqualTo(includeDefault);
+        assertThat(vertex.path("defaultSlot").asBoolean()).isEqualTo(includeDefault);
+        final JustinResourceRequirements decoded =
+                mapper.readValue(wire, JustinResourceRequirementsBody.class)
+                        .asJobResourceRequirements()
+                        .orElseThrow();
+        assertThat(decoded.getResourceProfile(vertexId))
+                .isEqualTo(includeDefault ? ResourceProfile.UNKNOWN : requested);
         assertThat(vertex.at("/resourceProfile/managedMemory/bytes").asLong())
                 .isEqualTo(requested.getManagedMemory().getBytes());
         if (includeApplied) {

@@ -21,6 +21,7 @@ public class JustinVertexResourceRequirements {
     private static final String FIELD_NAME_PARALLELISM = "parallelism";
     private static final String FIELD_NAME_RESOURCE_PROFILE = "resourceProfile";
     private static final String FIELD_NAME_APPLIED_RESOURCE_PROFILE = "appliedResourceProfile";
+    private static final String FIELD_NAME_DEFAULT_SLOT = "defaultSlot";
 
     public static class Parallelism implements Serializable {
 
@@ -79,10 +80,18 @@ public class JustinVertexResourceRequirements {
     private final ResourceProfile resourceProfile;
 
     @Nullable private final ResourceProfile appliedResourceProfile;
+    private final boolean defaultSlot;
 
     public JustinVertexResourceRequirements(
             Parallelism parallelism, ResourceProfile resourceProfile) {
         this(parallelism, resourceProfile, null);
+    }
+
+    public JustinVertexResourceRequirements(
+            Parallelism parallelism,
+            ResourceProfile resourceProfile,
+            @Nullable ResourceProfile appliedResourceProfile) {
+        this(parallelism, resourceProfile, appliedResourceProfile, false);
     }
 
     @JsonCreator
@@ -90,10 +99,12 @@ public class JustinVertexResourceRequirements {
             @JsonProperty(FIELD_NAME_PARALLELISM) Parallelism parallelism,
             @JsonProperty(FIELD_NAME_RESOURCE_PROFILE) ResourceProfile resourceProfile,
             @JsonProperty(FIELD_NAME_APPLIED_RESOURCE_PROFILE) @Nullable
-                    ResourceProfile appliedResourceProfile) {
+                    ResourceProfile appliedResourceProfile,
+            @JsonProperty(FIELD_NAME_DEFAULT_SLOT) @Nullable Boolean defaultSlot) {
         this.parallelism = checkNotNull(parallelism);
         this.resourceProfile = resourceProfile;
         this.appliedResourceProfile = appliedResourceProfile;
+        this.defaultSlot = Boolean.TRUE.equals(defaultSlot);
     }
 
     public Parallelism getParallelism() {
@@ -102,6 +113,13 @@ public class JustinVertexResourceRequirements {
 
     public ResourceProfile getResourceProfile() {
         return resourceProfile;
+    }
+
+    /** The scheduler should allocate a default slot. The numeric profile is the legacy GET value. */
+    @JsonProperty(FIELD_NAME_DEFAULT_SLOT)
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean isDefaultSlot() {
+        return defaultSlot;
     }
 
     /** Slot profile confirmed for all running subtasks, when available on a GET response. */
@@ -121,13 +139,14 @@ public class JustinVertexResourceRequirements {
             return false;
         }
         final JustinVertexResourceRequirements that = (JustinVertexResourceRequirements) o;
-        return parallelism.equals(that.parallelism)
+        return defaultSlot == that.defaultSlot
+                && parallelism.equals(that.parallelism)
                 && Objects.equals(resourceProfile, that.resourceProfile);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(parallelism, resourceProfile);
+        return Objects.hash(parallelism, resourceProfile, defaultSlot);
     }
 
     @Override

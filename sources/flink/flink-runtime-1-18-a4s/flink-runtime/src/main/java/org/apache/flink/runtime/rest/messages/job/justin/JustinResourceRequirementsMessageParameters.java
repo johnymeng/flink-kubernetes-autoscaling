@@ -21,26 +21,49 @@ package org.apache.flink.runtime.rest.messages.job.justin;
 import org.apache.flink.runtime.rest.messages.JobMessageParameters;
 import org.apache.flink.runtime.rest.messages.MessageQueryParameter;
 
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 
 /** Parameters for reading Justin resource requirements. */
 public class JustinResourceRequirementsMessageParameters extends JobMessageParameters {
 
     public final IncludeAppliedProfileParameter includeAppliedProfile =
             new IncludeAppliedProfileParameter();
+    public final IncludeDefaultSlotParameter includeDefaultSlot = new IncludeDefaultSlotParameter();
 
     @Override
     public Collection<MessageQueryParameter<?>> getQueryParameters() {
-        return Collections.singletonList(includeAppliedProfile);
+        return Arrays.asList(includeAppliedProfile, includeDefaultSlot);
     }
 
     /** Opt-in for returning resource profiles confirmed by the scheduler. */
-    public static final class IncludeAppliedProfileParameter
-            extends MessageQueryParameter<Boolean> {
-
+    public static final class IncludeAppliedProfileParameter extends BooleanParameter {
         public IncludeAppliedProfileParameter() {
-            super("include-applied-profile", MessageParameterRequisiteness.OPTIONAL);
+            super("include-applied-profile");
+        }
+
+        @Override
+        public String getDescription() {
+            return "Whether to include confirmed applied slot profiles in the response.";
+        }
+    }
+
+    /** Opt-in for distinguishing the scheduler default from an explicit slot reservation. */
+    public static final class IncludeDefaultSlotParameter extends BooleanParameter {
+        public IncludeDefaultSlotParameter() {
+            super("include-default-slot");
+        }
+
+        @Override
+        public String getDescription() {
+            return "Whether to identify vertices requesting a default slot.";
+        }
+    }
+
+    /** Optional Boolean query parameter for resource profile metadata. */
+    private abstract static class BooleanParameter extends MessageQueryParameter<Boolean> {
+        BooleanParameter(String key) {
+            super(key, MessageParameterRequisiteness.OPTIONAL);
         }
 
         @Override
@@ -51,11 +74,6 @@ public class JustinResourceRequirementsMessageParameters extends JobMessageParam
         @Override
         public String convertValueToString(Boolean value) {
             return value.toString();
-        }
-
-        @Override
-        public String getDescription() {
-            return "Whether to include confirmed applied slot profiles in the response.";
         }
     }
 }

@@ -879,7 +879,8 @@ public class AdaptiveScheduler
         for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
             final JobVertexID vertexId = vertex.getJobVertexID();
             ResourceProfile requestedProfile = vertex.getSlotSharingGroup().getResourceProfile();
-            if (requestedProfile.equals(ResourceProfile.UNKNOWN)) {
+            final boolean defaultSlot = requestedProfile.equals(ResourceProfile.UNKNOWN);
+            if (defaultSlot) {
                 requestedProfile = getLegacyFallbackResourceProfile(configuration);
             }
             final ResourceProfile appliedProfile =
@@ -893,7 +894,8 @@ public class AdaptiveScheduler
                             new JustinVertexResourceRequirements.Parallelism(
                                     vertex.getMinParallelism(), vertex.getParallelism()),
                             requestedProfile,
-                            appliedProfile));
+                            appliedProfile,
+                            defaultSlot));
         }
         return new JustinResourceRequirements(requirements);
     }

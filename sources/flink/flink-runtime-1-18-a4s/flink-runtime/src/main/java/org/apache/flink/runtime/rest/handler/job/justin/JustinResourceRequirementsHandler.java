@@ -19,7 +19,9 @@ package org.apache.flink.runtime.rest.handler.job.justin;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.JustinVertexResourceRequirements;
 import org.apache.flink.runtime.rest.handler.AbstractRestHandler;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.RestHandlerException;
@@ -29,11 +31,13 @@ import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequireme
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters.IncludeAppliedProfileParameter;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters.IncludeDefaultSlotParameter;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 
 import javax.annotation.Nonnull;
 
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -65,27 +69,32 @@ public class JustinResourceRequirementsHandler
         final JobID jobId = request.getPathParameter(JobIDPathParameter.class);
         final boolean includeApplied =
                 request.getQueryParameter(IncludeAppliedProfileParameter.class).contains(true);
+        final boolean includeDefault =
+                request.getQueryParameter(IncludeDefaultSlotParameter.class).contains(true);
         return gateway.requestJustinResourceRequirements(jobId)
                 .thenApply(
                         requirements ->
                                 new JustinResourceRequirementsBody(
-                                        includeApplied
-                                                ? requirements
-                                                : requestedOnly(requirements)));
+                                        requestedFields(
+                                                requirements, includeApplied, includeDefault)));
     }
 
-    private static JustinResourceRequirements requestedOnly(
-            JustinResourceRequirements requirements) {
-        final JustinResourceRequirements.Builder builder = JustinResourceRequirements.newBuilder();
+    private static JustinResourceRequirements requestedFields(
+            JustinResourceRequirements requirements, boolean includeApplied, boolean includeDefault) {
+        var projected = new HashMap<JobVertexID, JustinVertexResourceRequirements>();
         requirements
                 .getJobVertexParallelisms()
                 .forEach(
                         (vertexId, requirement) ->
-                                builder.setParallelismForJobVertex(
+                                projected.put(
                                         vertexId,
-                                        requirement.getParallelism().getLowerBound(),
-                                        requirement.getParallelism().getUpperBound(),
-                                        requirement.getResourceProfile()));
-        return builder.build();
+                                        new JustinVertexResourceRequirements(
+                                                requirement.getParallelism(),
+                                                requirement.getResourceProfile(),
+                                                includeApplied
+                                                        ? requirement.getAppliedResourceProfile()
+                                                        : null,
+                                                includeDefault && requirement.isDefaultSlot())));
+        return new JustinResourceRequirements(projected);
     }
 }

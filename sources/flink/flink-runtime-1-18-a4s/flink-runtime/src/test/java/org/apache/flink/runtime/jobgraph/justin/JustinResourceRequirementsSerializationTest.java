@@ -25,6 +25,8 @@ import org.apache.flink.util.InstantiationUtil;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class JustinResourceRequirementsSerializationTest {
@@ -56,5 +58,28 @@ class JustinResourceRequirementsSerializationTest {
         assertThat(recovered.getParallelism(join).getLowerBound()).isEqualTo(3);
         assertThat(recovered.getParallelism(join).getUpperBound()).isEqualTo(8);
         assertThat(recovered.getResourceProfile(join)).isEqualTo(profile);
+    }
+
+    @Test
+    void restoresDefaultSlotAlongsideExplicitMemoryFromThePersistedJobGraph() throws Exception {
+        JobGraph graph = new JobGraph("shared slots");
+        JobVertexID source = new JobVertexID();
+        JobVertexID join = new JobVertexID();
+        ResourceProfile template = ResourceProfile.newBuilder().setManagedMemoryMB(343).build();
+        var p = new JustinVertexResourceRequirements.Parallelism(2, 2);
+        var requirements =
+                new JustinResourceRequirements(
+                        Map.of(
+                                source,
+                                        new JustinVertexResourceRequirements(
+                                                p, template, null, true),
+                                join, new JustinVertexResourceRequirements(p, template)));
+        JustinResourceRequirements.writeToJobGraph(graph, requirements);
+        var recovered =
+                JustinResourceRequirements.readFromJobGraph(InstantiationUtil.clone(graph))
+                        .orElseThrow();
+        assertThat(recovered.getResourceProfile(source)).isEqualTo(ResourceProfile.UNKNOWN);
+        assertThat(recovered.getResourceProfile(join)).isEqualTo(template);
+        assertThat(recovered.getParallelism(source)).isEqualTo(p);
     }
 }

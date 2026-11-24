@@ -69,6 +69,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -315,17 +316,24 @@ public class NativeFlinkService extends AbstractFlinkService {
                     parallelism.containsKey(id)
                             ? Integer.parseInt(parallelism.get(id))
                             : current.getParallelism().getUpperBound();
+            String override = profiles.get(id);
+            boolean keepDefault = ResourceProfile.UNKNOWN.toString().equals(override);
+            // A mixed-version runtime may not report the default-slot marker. Preserve its
+            // requested profile instead of sending an unsupported marker or a numeric zero.
+            boolean defaultSlot = current.isDefaultSlot() && (override == null || keepDefault);
             var profile =
-                    profiles.containsKey(id)
-                            ? parseResourceProfile(profiles.get(id))
-                            : current.getResourceProfile();
+                    override == null || keepDefault
+                            ? current.getResourceProfile()
+                            : parseResourceProfile(override);
             result.put(
                     entry.getKey(),
                     new JustinVertexResourceRequirements(
                             new JustinVertexResourceRequirements.Parallelism(
                                     Math.min(upper, current.getParallelism().getLowerBound()),
                                     upper),
-                            profile));
+                            profile,
+                            null,
+                            defaultSlot));
         }
         return Optional.of(result);
     }
@@ -418,13 +426,15 @@ public class NativeFlinkService extends AbstractFlinkService {
     protected Map<JobVertexID, JustinVertexResourceRequirements> getJustinResources(
             RestClusterClient<String> client, AbstractFlinkResource<?, ?> resource)
             throws Exception {
-        var jobParameters = new JobMessageParameters();
+        var headers = JustinResourceRequirementsHeaders.INSTANCE;
+        var jobParameters = headers.getUnresolvedMessageParameters();
+        jobParameters.includeDefaultSlot.resolve(Collections.singletonList(true));
         jobParameters.jobPathParameter.resolve(
                 JobID.fromHexString(resource.getStatus().getJobStatus().getJobId()));
 
         var currentRequirements =
                 client.sendRequest(
-                                new JustinResourceRequirementsHeaders(),
+                                headers,
                                 jobParameters,
                                 EmptyRequestBody.getInstance())
                         .get(operatorConfig.getFlinkClientTimeout().toSeconds(), TimeUnit.SECONDS);

@@ -145,14 +145,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 for (var entry : evaluatedMetrics.getVertexMetrics().entrySet()) {
                     var id = entry.getKey();
                     var metrics = entry.getValue();
-                    var current = currentRequirements.get(id);
-                    var currentProfile =
-                            current == null ? null : current.getAppliedResourceProfile();
-                    if (currentProfile == null
-                            || currentProfile.equals(ResourceProfile.UNKNOWN)
-                            || currentProfile.equals(ResourceProfile.ANY)
-                            || !currentProfile.equals(
-                                    ResourceProfileParser.parse(currentProfile.toString()))) {
+                    var currentProfile = appliedProfile(currentRequirements.get(id));
+                    if (currentProfile == null) {
                         LOG.warn(
                                 "A4S: Deferring rescale because the applied resource profile for vertex {} cannot be preserved",
                                 id);
@@ -250,10 +244,12 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
             LOG.info(scalingConfigurations.toString());
 
+            var profiles = getJustinResourceProfiles(context, currentScalingConf);
+            if (profiles.isEmpty()) {
+                return false;
+            }
+            profileOverrides = profiles.get();
             parallelismOverrides = getVertexParallelismOverrides(currentScalingConf);
-            profileOverrides =
-                    getVertexResourceProfileOverrides(
-                            context.getJobID(), scalingConfigurations, conf);
         }
 
         addToScalingHistoryAndStore(
@@ -275,10 +271,18 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     @VisibleForTesting
     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(Context context)
             throws Exception {
+        return readResourceRequirements(context, false);
+    }
+
+    private Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
+            Context context, boolean includeDefaultSlot) throws Exception {
         var headers = JustinResourceRequirementsHeaders.INSTANCE;
         var parameters = headers.getUnresolvedMessageParameters();
         parameters.jobPathParameter.resolve(context.getJobID());
         parameters.includeAppliedProfile.resolve(Collections.singletonList(true));
+        if (includeDefaultSlot) {
+            parameters.includeDefaultSlot.resolve(Collections.singletonList(true));
+        }
         try (var client = context.getRestClusterClient()) {
             return client.sendRequest(headers, parameters, EmptyRequestBody.getInstance())
                     .get(
@@ -598,19 +602,59 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         return overrides;
     }
 
-    @VisibleForTesting
-    public static Map<String, String> getVertexResourceProfileOverrides(JobID jobID, ScalingConfigurations scalingConfigurations, Configuration conf) {
+    @Nullable
+    private static ResourceProfile appliedProfile(
+            @Nullable JustinVertexResourceRequirements current) {
+        var profile = current == null ? null : current.getAppliedResourceProfile();
+        if (profile == null
+                || profile.equals(ResourceProfile.UNKNOWN)
+                || profile.equals(ResourceProfile.ANY)
+                || !profile.equals(ResourceProfileParser.parse(profile.toString()))) {
+            return null;
+        }
+        return profile;
+    }
+
+    private Optional<Map<String, String>> getJustinResourceProfiles(
+            Context context, ScalingConfigurations.ScalingConfiguration scaling) throws Exception {
+        var conf = context.getConfiguration();
+        Map<JobVertexID, JustinVertexResourceRequirements> live = null;
         var overrides = new HashMap<String, String>();
-        scalingConfigurations.getCurrentConfiguration(jobID, periods.getOrDefault(jobID, 0)).getScaling().forEach((id, information) -> {
-            var managedMemoryMB = information.getManagedMemoryMB();
-            overrides.put(
-                    id.toString(),
-                    managedMemoryMB >= 0
-                            ? String.valueOf(getResourceProfile(conf, managedMemoryMB))
-                            : String.valueOf(getResourceProfile(conf, information.getMemoryLevel()))
-            );
-        } );
-        return overrides;
+        for (var entry : scaling.getScaling().entrySet()) {
+            var id = entry.getKey();
+            var information = entry.getValue();
+            ResourceProfile profile;
+            if (!hasCacheHits(information)) {
+                // A chained SQL operator can use managed memory without accessing the block cache.
+                if (live == null) {
+                    live = readResourceRequirements(context, true);
+                }
+                var current = live.get(id);
+                profile =
+                        current != null && current.isDefaultSlot()
+                                ? ResourceProfile.UNKNOWN
+                                : appliedProfile(current);
+                if (profile == null) {
+                    LOG.warn(
+                            "Justin: Deferring rescale until the applied resource profile for {} is available",
+                            id);
+                    return Optional.empty();
+                }
+            } else {
+                var memoryMb = information.getManagedMemoryMB();
+                profile =
+                        memoryMb >= 0
+                                ? getResourceProfile(conf, memoryMb)
+                                : getResourceProfile(conf, information.getMemoryLevel());
+            }
+            overrides.put(id.toString(), profile.toString());
+        }
+        return Optional.of(overrides);
+    }
+
+    private static boolean hasCacheHits(ScalingConfigurations.ScalingInformation information) {
+        double hitRate = information.getAvgCacheHitRate();
+        return Double.isFinite(hitRate) && hitRate > 0;
     }
 
 
@@ -699,8 +743,10 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                             context.getJobID(),
                             id,
                             periods.getOrDefault(context.getJobID(), 0));
-            if (information.getAvgCacheHitRate() == 0.0) { // Stateless
-                information.setMemoryLevel(-1);
+            if (!hasCacheHits(information)) {
+                if (previousInformation != null) {
+                    information.setMemoryLevel(previousInformation.getMemoryLevel());
+                }
             } else {
                 if (previousInformation != null) {
                     if ( previousInformation.getParallelism() != information.getParallelism()) {

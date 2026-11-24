@@ -199,7 +199,9 @@ public class JustinResourceRequirements implements Serializable {
 
     public ResourceProfile getResourceProfile(JobVertexID jobVertexId) {
         return Optional.ofNullable(vertexResources.get(jobVertexId))
-                .map(JustinVertexResourceRequirements::getResourceProfile)
+                .map(vertex -> vertex.isDefaultSlot()
+                        ? ResourceProfile.UNKNOWN
+                        : vertex.getResourceProfile())
                 .orElseThrow(
                         () ->
                                 new IllegalStateException(

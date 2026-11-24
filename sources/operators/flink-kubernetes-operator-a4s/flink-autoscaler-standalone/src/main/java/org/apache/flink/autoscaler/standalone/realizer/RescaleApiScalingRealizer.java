@@ -43,6 +43,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.time.Duration;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
@@ -207,11 +208,20 @@ public class RescaleApiScalingRealizer<KEY, Context extends JobAutoScalerContext
                 var newParallelism =
                         new JustinVertexResourceRequirements.Parallelism(
                                 Math.min(p, parallelism.getLowerBound()), p);
-                var newResourceProfile = parseResourceProfile(overrideResourceProfile);
+                boolean keepDefault =
+                        ResourceProfile.UNKNOWN.toString().equals(overrideResourceProfile);
+                var updated =
+                        new JustinVertexResourceRequirements(
+                                newParallelism,
+                                keepDefault
+                                        ? resourceProfile
+                                        : parseResourceProfile(overrideResourceProfile),
+                                null,
+                                keepDefault && entry.getValue().isDefaultSlot());
 
                 // If the requirements changed we mark this as scaling triggered
-                if (!parallelism.equals(newParallelism) || !resourceProfile.equals(newResourceProfile)) {
-                    entry.setValue(new JustinVertexResourceRequirements(newParallelism, newResourceProfile));
+                if (!entry.getValue().equals(updated)) {
+                    entry.setValue(updated);
                     parallelismUpdated = true;
                 }
             }
@@ -236,14 +246,13 @@ public class RescaleApiScalingRealizer<KEY, Context extends JobAutoScalerContext
     private Map<JobVertexID, JustinVertexResourceRequirements> getJustinResources(
             RestClusterClient<String> client, JobID jobID, Duration restClientTimeout)
             throws Exception {
-        var jobParameters = new JobMessageParameters();
+        var headers = JustinResourceRequirementsHeaders.INSTANCE;
+        var jobParameters = headers.getUnresolvedMessageParameters();
+        jobParameters.includeDefaultSlot.resolve(Collections.singletonList(true));
         jobParameters.jobPathParameter.resolve(jobID);
 
         var currentRequirements =
-                client.sendRequest(
-                                new JustinResourceRequirementsHeaders(),
-                                jobParameters,
-                                EmptyRequestBody.getInstance())
+                client.sendRequest(headers, jobParameters, EmptyRequestBody.getInstance())
                         .get(restClientTimeout.toSeconds(), TimeUnit.SECONDS);
 
         return currentRequirements.asJustinResourceRequirements().get().getJobVertexParallelisms();

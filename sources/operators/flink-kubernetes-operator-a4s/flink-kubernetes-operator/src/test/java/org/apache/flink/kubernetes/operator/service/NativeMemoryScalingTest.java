@@ -76,6 +76,52 @@ class NativeMemoryScalingTest {
     }
 
     @Test
+    void defaultSlotSurvivesRescaleAlongsideAnExplicitMemoryOverride() {
+        var source = new JobVertexID();
+        var join = new JobVertexID();
+        var p = new JustinVertexResourceRequirements.Parallelism(1, 1);
+        var current = ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(96).build();
+        var larger = ResourceProfile.newBuilder(current).setManagedMemoryMB(192).build();
+        var explicit = new JustinVertexResourceRequirements(p, current);
+        var live =
+                Map.of(
+                        source,
+                        new JustinVertexResourceRequirements(p, current, null, true),
+                        join,
+                        explicit);
+        var desired = new Configuration();
+        desired.set(
+                PipelineOptions.PARALLELISM_OVERRIDES,
+                Map.of(source.toString(), "2", join.toString(), "2"));
+        desired.set(
+                KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES,
+                Map.of(
+                        source.toString(),
+                        ResourceProfile.UNKNOWN.toString(),
+                        join.toString(),
+                        larger.toString()));
+
+        var update =
+                NativeFlinkService.proposeJustinResources(live, desired, new Configuration())
+                        .orElseThrow();
+        assertTrue(update.get(source).isDefaultSlot());
+        assertEquals(current, update.get(source).getResourceProfile());
+        assertEquals(2, update.get(source).getParallelism().getUpperBound());
+        assertEquals(larger, update.get(join).getResourceProfile());
+        assertEquals(
+                update,
+                NativeFlinkService.proposeJustinResources(update, desired, desired).orElseThrow());
+
+        var legacy = Map.of(source, explicit, join, explicit);
+        var observed =
+                NativeFlinkService.proposeJustinResources(legacy, desired, new Configuration())
+                        .orElseThrow();
+        assertEquals(
+                new JustinVertexResourceRequirements(update.get(source).getParallelism(), current),
+                observed.get(source));
+    }
+
+    @Test
     void operatorRequestPreservesMemoryWhenReadByTheRuntime() throws Exception {
         var id = new JobVertexID();
         var profile =

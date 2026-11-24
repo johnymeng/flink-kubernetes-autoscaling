@@ -139,8 +139,38 @@ public class ScalingExecutorTest {
     @CsvSource({"true, true", "false, true", "false, false"})
     void handlesMissingCurveOnThroughputRescale(
             boolean scaleStateful, boolean statefulProfileAvailable) throws Exception {
+        checkAppliedProfilesOnRescale(scaleStateful, statefulProfileAvailable, true, 0.0, false);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "true, true, 0, false",
+        "false, true, 0, false",
+        "true, false, 0, false",
+        "true, true, NaN, false",
+        "true, true, 1, false",
+        "true, true, 0, true",
+        "false, true, 0, true"
+    })
+    void justinKeepsManagedMemoryWithoutObservedCacheHits(
+            boolean scaleStateful,
+            boolean statefulProfileAvailable,
+            double cacheHitRate,
+            boolean defaultSourceSlot)
+            throws Exception {
+        checkAppliedProfilesOnRescale(
+                scaleStateful, statefulProfileAvailable, false, cacheHitRate, defaultSourceSlot);
+    }
+
+    private void checkAppliedProfilesOnRescale(
+            boolean scaleStateful,
+            boolean statefulProfileAvailable,
+            boolean a4s,
+            double cacheHitRate,
+            boolean defaultSourceSlot)
+            throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
-        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, a4s);
         conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
         conf.set(AutoScalerOptions.MEMORY_SCALING_ENABLED, false);
         conf.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(4096));
@@ -150,7 +180,9 @@ public class ScalingExecutorTest {
 
         var source = new JobVertexID();
         var stateful = new JobVertexID();
-        var sourceProfile = ResourceProfile.newBuilder().setCpuCores(1).build();
+        // A source chained to a local SQL window uses managed memory without a RocksDB gauge.
+        var sourceProfile =
+                ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(158).build();
         var statefulProfile =
                 ResourceProfile.newBuilder()
                         .setCpuCores(1)
@@ -172,7 +204,10 @@ public class ScalingExecutorTest {
                         Map.of(
                                 source,
                                 new JustinVertexResourceRequirements(
-                                        parallelism, sourceProfile, sourceProfile),
+                                        parallelism,
+                                        sourceProfile,
+                                        defaultSourceSlot ? null : sourceProfile,
+                                        defaultSourceSlot),
                                 stateful,
                                 new JustinVertexResourceRequirements(
                                         parallelism,
@@ -180,7 +215,7 @@ public class ScalingExecutorTest {
                                         statefulProfileAvailable ? statefulProfile : null)));
         context =
                 context.toBuilder()
-                        .restClientSupplier(() -> resourceRequirementsClient(requirements))
+                        .restClientSupplier(() -> resourceRequirementsClient(requirements, !a4s))
                         .build();
         var topology =
                 new JobTopology(
@@ -188,7 +223,8 @@ public class ScalingExecutorTest {
                         new VertexInfo(stateful, Map.of(source, HASH), 1, MAX_PARALLELISM));
         var statefulMetrics = evaluated(1, scaleStateful ? 110 : 60, 100);
         statefulMetrics.put(
-                ScalingMetric.ROCKS_DB_BLOCK_CACHE_HIT_RATE, EvaluatedScalingMetric.of(0));
+                ScalingMetric.ROCKS_DB_BLOCK_CACHE_HIT_RATE,
+                new EvaluatedScalingMetric(0, cacheHitRate));
         var globalMetrics = new HashMap<>(dummyGlobalMetrics);
         globalMetrics.put(ScalingMetric.HEAP_MEMORY_USED, EvaluatedScalingMetric.avg(0));
         globalMetrics.put(ScalingMetric.MANAGED_MEMORY_USED, EvaluatedScalingMetric.avg(0));
@@ -222,13 +258,16 @@ public class ScalingExecutorTest {
         assertThat(getScaledParallelism(stateStore, context))
                 .containsEntry(source, scaleStateful ? 1 : 2)
                 .containsEntry(stateful, scaleStateful ? 2 : 1);
+        var expectedStateful = cacheHitRate > 0 ? legacyProfile : statefulProfile;
         assertThat(stateStore.getResourceProfileOverrides(context))
-                .containsEntry(stateful.toString(), statefulProfile.toString())
-                .containsEntry(source.toString(), sourceProfile.toString());
+                .containsEntry(stateful.toString(), expectedStateful.toString())
+                .containsEntry(
+                        source.toString(),
+                        (defaultSourceSlot ? ResourceProfile.UNKNOWN : sourceProfile).toString());
     }
 
     private static RestClusterClient<String> resourceRequirementsClient(
-            JustinResourceRequirements requirements) throws Exception {
+            JustinResourceRequirements requirements, boolean includeDefaultSlot) throws Exception {
         return new RestClusterClient<>(
                 new Configuration(),
                 "test-cluster",
@@ -244,7 +283,9 @@ public class ScalingExecutorTest {
                 assertThat(
                                 MessageParameters.resolveUrl(
                                         headers.getTargetRestEndpointURL(), parameters))
-                        .endsWith("/justin?include-applied-profile=true");
+                        .endsWith(
+                                "/justin?include-applied-profile=true"
+                                        + (includeDefaultSlot ? "&include-default-slot=true" : ""));
                 return CompletableFuture.completedFuture(
                         headers.getResponseClass()
                                 .cast(new JustinResourceRequirementsBody(requirements)));

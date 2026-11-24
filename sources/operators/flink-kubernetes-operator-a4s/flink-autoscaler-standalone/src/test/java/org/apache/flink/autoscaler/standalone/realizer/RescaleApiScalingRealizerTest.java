@@ -58,6 +58,7 @@ import org.apache.flink.util.function.SupplierWithException;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
@@ -145,8 +146,9 @@ class RescaleApiScalingRealizerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {1536, 2560})
-    void testThroughputRescalePreservesAppliedMemoryBytes(int managedMemoryMiB) throws Exception {
+    @CsvSource({"1536,false", "2560,false", "158,true"})
+    void testThroughputRescalePreservesRequestedAllocation(
+            int managedMemoryMiB, boolean sharedJustin) throws Exception {
         var jobId = new JobID();
         var vertex = new JobVertexID();
         var managedMemory = new MemorySize(MemorySize.ofMebiBytes(managedMemoryMiB).getBytes() + 5);
@@ -160,24 +162,7 @@ class RescaleApiScalingRealizerTest {
                         .build();
         var legacyProfile =
                 ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(343).build();
-        var requirements =
-                new JustinResourceRequirements(
-                        Map.of(
-                                vertex,
-                                new JustinVertexResourceRequirements(
-                                        new JustinVertexResourceRequirements.Parallelism(1, 1),
-                                        legacyProfile,
-                                        current)));
         var mapper = RestMapperUtils.getStrictObjectMapper();
-        var response =
-                mapper.readValue(
-                        mapper.writeValueAsBytes(new JustinResourceRequirementsBody(requirements)),
-                        JustinResourceRequirementsBody.class);
-        var legacyResponse =
-                new JustinResourceRequirementsBody(
-                        JustinResourceRequirements.newBuilder()
-                                .setParallelismForJobVertex(vertex, 1, 1, legacyProfile)
-                                .build());
         var updated = new CompletableFuture<JustinResourceRequirementsBody>();
         var context =
                 createJobAutoScalerContext(
@@ -202,10 +187,23 @@ class RescaleApiScalingRealizerTest {
                                             var url =
                                                     MessageParameters.resolveUrl(
                                                             h.getTargetRestEndpointURL(), p);
+                                            var requirement =
+                                                    new JustinVertexResourceRequirements(
+                                                            new JustinVertexResourceRequirements
+                                                                    .Parallelism(1, 1),
+                                                            legacyProfile,
+                                                            !sharedJustin
+                                                                            && url.contains(
+                                                                                    "include-applied-profile=true")
+                                                                    ? current
+                                                                    : null,
+                                                            sharedJustin
+                                                                    && url.contains(
+                                                                            "include-default-slot=true"));
                                             var body =
-                                                    url.endsWith("?include-applied-profile=true")
-                                                            ? response
-                                                            : legacyResponse;
+                                                    new JustinResourceRequirementsBody(
+                                                            new JustinResourceRequirements(
+                                                                    Map.of(vertex, requirement)));
                                             return CompletableFuture.completedFuture(
                                                     h.getResponseClass().cast(body));
                                         }
@@ -221,7 +219,7 @@ class RescaleApiScalingRealizerTest {
         conf.set(JobManagerOptions.SCHEDULER, JobManagerOptions.SchedulerType.Adaptive);
         conf.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(8192));
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
-        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, !sharedJustin);
         conf.set(AutoScalerOptions.SCALING_ENABLED, true);
         conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
         conf.set(AutoScalerOptions.MEMORY_SCALING_ENABLED, false);
@@ -280,9 +278,17 @@ class RescaleApiScalingRealizerTest {
                         .asJustinResourceRequirements()
                         .orElseThrow();
         assertThat(sent.getParallelism(vertex).getUpperBound()).isGreaterThan(1);
-        assertThat(sent.getResourceProfile(vertex).getManagedMemory().getBytes())
-                .isEqualTo(managedMemory.getBytes());
-        assertThat(sent.getResourceProfile(vertex)).isEqualTo(current);
+        assertThat(sent.getResourceProfile(vertex))
+                .isEqualTo(sharedJustin ? legacyProfile : current);
+        var runtime =
+                mapper.readValue(
+                                mapper.writeValueAsBytes(updated.join()),
+                                org.apache.flink.runtime.rest.messages.job.justin
+                                        .JustinResourceRequirementsBody.class)
+                        .asJobResourceRequirements()
+                        .orElseThrow();
+        assertThat(runtime.getResourceProfile(vertex))
+                .isEqualTo(sharedJustin ? ResourceProfile.UNKNOWN : current);
     }
 
     @Test
