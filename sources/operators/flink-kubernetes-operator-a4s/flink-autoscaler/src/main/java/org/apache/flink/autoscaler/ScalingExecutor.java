@@ -116,12 +116,12 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             DelayedScaleDown delayedScaleDown)
             throws Exception {
         var conf = context.getConfiguration();
-        var restartTime = scalingTracking.getMaxRestartTimeOrDefault(conf);
-        boolean a4sEnabled = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
-        if (a4sEnabled && isJobUnderMemoryPressure(context, evaluatedMetrics.getGlobalMetrics())) {
+        if (isJobUnderMemoryPressure(context, evaluatedMetrics.getGlobalMetrics())) {
+            LOG.info("Skipping scaling due to memory pressure");
             return false;
         }
 
+        var restartTime = scalingTracking.getMaxRestartTimeOrDefault(conf);
         var scalingSummaries =
                 new HashMap<>(
                         computeScalingSummary(
@@ -134,6 +134,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
         Map<JobVertexID, ResourceProfile> a4sProfiles = new HashMap<>();
         boolean memoryChanged = false;
+        boolean a4sEnabled = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
         if (a4sEnabled) {
             var decisions =
                     new A4S(jobTopology, evaluatedMetrics, scalingSummaries).makeDecision(conf);
@@ -352,11 +353,6 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             JobTopology jobTopology,
             DelayedScaleDown delayedScaleDown) {
         LOG.debug("Restart time used in scaling summary computation: {}", restartTime);
-
-        if (isJobUnderMemoryPressure(context, evaluatedMetrics.getGlobalMetrics())) {
-            LOG.info("Skipping vertex scaling due to memory pressure");
-            return Map.of();
-        }
 
         var out = new HashMap<JobVertexID, ScalingSummary>();
 
