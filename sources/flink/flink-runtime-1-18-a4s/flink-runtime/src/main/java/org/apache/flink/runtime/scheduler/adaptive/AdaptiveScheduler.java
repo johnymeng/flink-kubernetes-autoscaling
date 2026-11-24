@@ -143,6 +143,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -953,7 +954,6 @@ public class AdaptiveScheduler
     public void updateJustinResourceRequirements(
             JustinResourceRequirements justinResourceRequirements) {
         this.justinRescale = true;
-        this.firstJustinRescale = true;
         this.justinResourceRequirements = justinResourceRequirements;
         /*
         if (!(slotAllocator instanceof JustinSlotAllocator)) {
@@ -974,18 +974,17 @@ public class AdaptiveScheduler
                         jobInformation.getVertexParallelismStore(), justinResourceRequirements);
 
         if (maybeUpdateVertexParallelismStore.isPresent()) {
-            //    LOG.info("Triggering manual checkpoint before redeploy");
-            //    CompletableFuture<CompletedCheckpoint> checkpointFuture = triggerCheckpoint(
-            //            CheckpointType.INCREMENTAL);
-            //    checkpointFuture.thenAccept((completedCheckpoint -> {
-            //        LOG.info("Checkpoint completed: " + completedCheckpoint.getExternalPointer());
+            // A graph that is already waiting for resources will use the updated requirements.
+            firstJustinRescale = !(state instanceof WaitingForResources);
             updateJustinGraphJobInformation(maybeUpdateVertexParallelismStore.get());
             declareJustinDesiredResources();
+            if (state instanceof WaitingForResources) {
+                releaseSlotsExceedingDesiredResources();
+            }
             state.tryRun(
                     ResourceListener.class,
                     ResourceListener::onNewResourceRequirements,
                     "Current state does not react to desired parallelism changes.");
-            // }));
         }
     }
 
@@ -1018,23 +1017,30 @@ public class AdaptiveScheduler
             ResourceCounter desiredResources, Collection<? extends SlotInfo> freeSlots) {
         ResourceCounter outstandingResources = desiredResources;
         final Iterator<? extends SlotInfo> slotIterator = freeSlots.iterator();
+        int wildcardSlots = 0;
 
         while (!outstandingResources.isEmpty() && slotIterator.hasNext()) {
             final SlotInfo slotInfo = slotIterator.next();
             final ResourceProfile resourceProfile = slotInfo.getResourceProfile();
 
-            if (outstandingResources.containsResource(resourceProfile)) {
+            if (resourceProfile.equals(ResourceProfile.ANY)) {
+                wildcardSlots++;
+            } else if (outstandingResources.containsResource(resourceProfile)) {
                 outstandingResources = outstandingResources.subtract(resourceProfile, 1);
             } else {
                 outstandingResources = outstandingResources.subtract(ResourceProfile.UNKNOWN, 1);
             }
         }
 
-        return outstandingResources.isEmpty();
+        return outstandingResources.getTotalResourceCount() <= wildcardSlots;
     }
 
     @Override
     public boolean hasSufficientResources() {
+        if (justinRescale) {
+            // Justin builds a fixed target plan. A lower-bound allocation is not sufficient.
+            return hasDesiredResources();
+        }
         return slotAllocator
                 .determineParallelism(jobInformation, declarativeSlotPool.getAllSlotsInformation())
                 .isPresent();
@@ -1058,7 +1064,12 @@ public class AdaptiveScheduler
                                         "Not enough resources available for scheduling."));
     }
 
-    private JobSchedulingPlan createJustinSchedulingPlan(ExecutionGraph previousExecutionGraph) {
+    private JobSchedulingPlan createJustinSchedulingPlan(ExecutionGraph previousExecutionGraph)
+            throws NoResourceAvailableException {
+        if (justinRescale && !hasDesiredResources()) {
+            throw new NoResourceAvailableException(
+                    "Not enough matching slots for the requested native rescale.");
+        }
         SlotAssigner slotAssigner = new JustinSlotAssigner();
         VertexParallelism vertexParallelism;
         Map<JobVertexID, Integer> map = new HashMap<>();
@@ -1095,24 +1106,9 @@ public class AdaptiveScheduler
 
     @Override
     public void goToWaitingForResources(@Nullable ExecutionGraph previousExecutionGraph) {
-        /*
-
-        if (!justinRescale && this.configuration.get(PipelineOptions.JUSTIN_OVERRIDES) == null) {
-            declareDesiredResources();
-        } else {
-            declareJustinDesiredResources();
-        }
-         */
         declareJustinDesiredResources();
-        // To avoid getting ConcurrentModificationException
-        List<AllocationID> allocationIDS =
-                declarativeSlotPool.getAllSlotsInformation().stream()
-                        .map(SlotInfo::getAllocationId)
-                        .collect(Collectors.toList());
-        for (AllocationID allocationID : allocationIDS) {
-            declarativeSlotPool.releaseSlot(
-                    allocationID, new FlinkException("Releasing all slots before restarting."));
-        }
+        firstJustinRescale = false;
+        releaseSlotsExceedingDesiredResources();
 
         transitionToState(
                 new WaitingForResources.Factory(
@@ -1121,6 +1117,29 @@ public class AdaptiveScheduler
                         this.initialResourceAllocationTimeout,
                         this.resourceStabilizationTimeout,
                         previousExecutionGraph));
+    }
+
+    private void releaseSlotsExceedingDesiredResources() {
+        // Take a snapshot because returning an allocation changes the slot pool.
+        final List<SlotInfo> slots = new ArrayList<>(declarativeSlotPool.getAllSlotsInformation());
+        // Keep exact matches first, then use wildcard slots for remaining requirements.
+        slots.sort(
+                Comparator.comparing(
+                        slot -> slot.getResourceProfile().equals(ResourceProfile.ANY)));
+        ResourceCounter remaining = desiredResources;
+        final FlinkException cause = new FlinkException("Slot is no longer needed after restart.");
+        for (SlotInfo slot : slots) {
+            final ResourceProfile profile = slot.getResourceProfile();
+            if (remaining.containsResource(profile)) {
+                remaining = remaining.subtract(profile, 1);
+            } else if (remaining.containsResource(ResourceProfile.UNKNOWN)) {
+                remaining = remaining.subtract(ResourceProfile.UNKNOWN, 1);
+            } else if (profile.equals(ResourceProfile.ANY) && !remaining.isEmpty()) {
+                remaining = remaining.subtract(remaining.getResources().iterator().next(), 1);
+            } else {
+                declarativeSlotPool.releaseSlot(slot.getAllocationId(), cause);
+            }
+        }
     }
 
     private void declareDesiredResources() {
