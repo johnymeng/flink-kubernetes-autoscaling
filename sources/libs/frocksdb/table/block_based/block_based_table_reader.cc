@@ -1568,12 +1568,12 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
       lookup_context) {
     size_t usage = 0;
     uint64_t nkeys = 0;
-    if (block_entry->GetValue()) {
+    const auto* value = block_entry->GetValue();
+    if (value) {
       // Approximate the number of keys in the block using restarts.
-      nkeys =
-          rep_->table_options.block_restart_interval *
-          BlocklikeTraits<TBlocklike>::GetNumRestarts(*block_entry->GetValue());
-      usage = block_entry->GetValue()->ApproximateMemoryUsage();
+      nkeys = rep_->table_options.block_restart_interval *
+              BlocklikeTraits<TBlocklike>::GetNumRestarts(*value);
+      usage = value->ApproximateMemoryUsage();
     }
     TraceType trace_block_type = TraceType::kTraceMax;
     switch (block_type) {
@@ -1597,7 +1597,10 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
         assert(false);
         break;
     }
-    bool no_insert = no_io || !ro.fill_cache;
+    // PutDataBlockToCache bypasses the cache for borrowed bytes, for example
+    // an uncompressed data block backed directly by a memory-mapped file.
+    const bool no_insert =
+        no_io || !ro.fill_cache || (value && !value->own_bytes());
     if (BlockCacheTraceHelper::IsGetOrMultiGetOnDataBlock(
             trace_block_type, lookup_context->caller)) {
       // Defer logging the access to Get() and MultiGet() to trace additional
@@ -2716,8 +2719,10 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
             // fills.
             lookup_data_block_context.is_cache_hit =
                 block_handles[idx_in_batch].IsNull();
-            lookup_data_block_context.no_insert =
-                no_io || !read_options.fill_cache;
+            if (lookup_data_block_context.is_cache_hit) {
+              lookup_data_block_context.no_insert =
+                  no_io || !read_options.fill_cache;
+            }
             first_biter.Invalidate(Status::OK());
             NewDataBlockIterator<DataBlockIter>(
                 read_options, results[idx_in_batch], &first_biter,

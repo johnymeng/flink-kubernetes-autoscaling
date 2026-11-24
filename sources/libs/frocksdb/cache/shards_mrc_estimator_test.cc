@@ -458,6 +458,57 @@ TEST(ShardsMrcEstimatorTest, BatchedMultiGetTracksEachBlockLookupOnce) {
   }
 }
 
+TEST(ShardsMrcEstimatorTest, MappedUncompressedBlocksDoNotWarmTheCache) {
+  const std::string path = test::PerThreadDBPath("shards_mrc_mapped");
+  Options options;
+  options.create_if_missing = true;
+  options.allow_mmap_reads = true;
+  options.compression = kNoCompression;
+  options.statistics = CreateDBStatistics();
+  BlockBasedTableOptions table;
+  table.block_cache = NewLRUCache(1 << 20, 0);
+  auto estimator = std::make_shared<ShardsMrcEstimator>(1.0, 0, 512, 1 << 20);
+  table.block_cache->SetShardsMrcEstimator(estimator);
+  options.table_factory.reset(NewBlockBasedTableFactory(table));
+  ASSERT_OK(DestroyDB(path, options));
+  DB* raw = nullptr;
+  ASSERT_OK(DB::Open(options, path, &raw));
+  std::unique_ptr<DB> db(raw);
+  const Slice keys[] = {"a", "b"};
+  for (const auto& key : keys) {
+    ASSERT_OK(db->Put(WriteOptions(), key, key));
+  }
+  ASSERT_OK(db->Flush(FlushOptions()));
+
+  for (int pass = 0; pass < 2; ++pass) {
+    ReadOptions read;
+    std::string value;
+    ASSERT_OK(db->Get(read, keys[0], &value));
+    ASSERT_EQ(value, "a");
+    PinnableSlice values[2];
+    Status statuses[2];
+    db->MultiGet(read, db->DefaultColumnFamily(), 2, keys, values, statuses,
+                 /*sorted_input=*/true);
+    for (size_t i = 0; i < 2; ++i) {
+      ASSERT_OK(statuses[i]);
+      ASSERT_EQ(values[i], keys[i]);
+    }
+    std::unique_ptr<Iterator> it(db->NewIterator(read));
+    it->SeekToFirst();
+    ASSERT_TRUE(it->Valid());
+    ASSERT_EQ(it->key(), keys[0]);
+    ASSERT_OK(it->status());
+  }
+  const auto snapshot = estimator->Snapshot();
+  EXPECT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_DATA_ADD), 0U);
+  EXPECT_EQ(options.statistics->getTickerCount(BLOCK_CACHE_DATA_HIT), 0U);
+  EXPECT_EQ(snapshot[ShardsMrcEstimator::kSampledRefs], 6U);
+  EXPECT_EQ(snapshot.back(), 6U);
+  EXPECT_EQ(snapshot[ShardsMrcEstimator::kTrackedEntries], 0U);
+  db.reset();
+  ASSERT_OK(DestroyDB(path, options));
+}
+
 // The table reader feeds the estimator exactly the accesses a block cache
 // trace records with the same filter: replaying the trace through a second
 // estimator reproduces the online snapshot.
