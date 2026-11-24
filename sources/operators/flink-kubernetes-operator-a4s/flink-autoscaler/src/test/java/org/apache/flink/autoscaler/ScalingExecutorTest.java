@@ -77,6 +77,7 @@ import static org.apache.flink.autoscaler.event.AutoScalerEventHandler.SCALING_S
 import static org.apache.flink.autoscaler.topology.ShipStrategy.HASH;
 import static org.apache.flink.autoscaler.topology.ShipStrategy.REBALANCE;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -249,6 +250,41 @@ public class ScalingExecutorTest {
                                 .cast(new JustinResourceRequirementsBody(requirements)));
             }
         };
+    }
+
+    @Test
+    void failedJustinDecisionKeepsLastAppliedOverrides() throws Exception {
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, false);
+        conf.setString(AutoScalerOptions.MIN_CACHE_HIT_RATE_THRESHOLD.key(), "invalid");
+        var vertex = new JobVertexID();
+        var metrics = evaluated(1, 110, 100);
+        metrics.put(ScalingMetric.ROCKS_DB_BLOCK_CACHE_HIT_RATE, EvaluatedScalingMetric.avg(0.5));
+        var evaluatedMetrics = new EvaluatedMetrics(Map.of(vertex, metrics), dummyGlobalMetrics);
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 100, false, null));
+        var previousParallelism = Map.of(vertex.toString(), "1");
+        var profile = ResourceProfile.newBuilder().setManagedMemoryMB(128).build();
+        var previousProfiles = Map.of(vertex.toString(), profile.toString());
+        stateStore.storeParallelismOverrides(context, previousParallelism);
+        stateStore.storeResourceProfileOverrides(context, previousProfiles);
+
+        assertThatThrownBy(
+                        () ->
+                                scalingExecutor.scaleResource(
+                                        context,
+                                        evaluatedMetrics,
+                                        stateStore.getScalingHistory(context),
+                                        scalingTracking,
+                                        Instant.now(),
+                                        topology,
+                                        new DelayedScaleDown()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining(AutoScalerOptions.MIN_CACHE_HIT_RATE_THRESHOLD.key());
+
+        assertThat(stateStore.getParallelismOverrides(context)).isEqualTo(previousParallelism);
+        assertThat(stateStore.getResourceProfileOverrides(context)).isEqualTo(previousProfiles);
+        assertThat(stateStore.getScalingHistory(context)).isEmpty();
+        assertThat(stateStore.getScalingTracking(context).getLatestScalingRecordEntry()).isEmpty();
     }
 
     @Test

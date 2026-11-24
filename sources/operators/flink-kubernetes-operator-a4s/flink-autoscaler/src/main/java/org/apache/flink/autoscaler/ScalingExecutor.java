@@ -134,7 +134,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
         Map<JobVertexID, ResourceProfile> a4sProfiles = new HashMap<>();
         boolean memoryChanged = false;
-        boolean a4sEnabled = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
+        boolean justinEnabled = conf.get(JUSTIN_ENABLED);
+        boolean a4sEnabled = justinEnabled && conf.get(A4S_ENABLED);
         if (a4sEnabled) {
             var decisions =
                     new A4S(jobTopology, evaluatedMetrics, scalingSummaries).makeDecision(conf);
@@ -227,26 +228,17 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             return false;
         }
 
-        addToScalingHistoryAndStore(
-                autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
-
-        scalingTracking.addScalingRecord(now, new ScalingRecord());
-        autoScalerStateStore.storeScalingTracking(context, scalingTracking);
-
-        autoScalerStateStore.storeParallelismOverrides(
-                context,
-                getVertexParallelismOverrides(
-                        evaluatedMetrics.getVertexMetrics(), scalingSummaries));
-
+        var parallelismOverrides =
+                getVertexParallelismOverrides(evaluatedMetrics.getVertexMetrics(), scalingSummaries);
+        Map<String, String> profileOverrides = Map.of();
         if (a4sEnabled) {
-            autoScalerStateStore.storeResourceProfileOverrides(
-                    context,
+            profileOverrides =
                     a4sProfiles.entrySet().stream()
                             .collect(
                                     Collectors.toMap(
                                             e -> e.getKey().toString(),
-                                            e -> e.getValue().toString())));
-        } else if (conf.get(JUSTIN_ENABLED)) {
+                                            e -> e.getValue().toString()));
+        } else if (justinEnabled) {
             var currentScalingConf =
                     scalingConfigurations.setCurrentConfiguration(
                             context.getJobID(),
@@ -258,15 +250,20 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
             LOG.info(scalingConfigurations.toString());
 
-            autoScalerStateStore.storeParallelismOverrides(
-                    context,
-                    getVertexParallelismOverrides(currentScalingConf));
-
-            autoScalerStateStore.storeResourceProfileOverrides(
-                    context,
-                    getVertexResourceProfileOverrides(context.getJobID(), this.scalingConfigurations, conf));
+            parallelismOverrides = getVertexParallelismOverrides(currentScalingConf);
+            profileOverrides =
+                    getVertexResourceProfileOverrides(
+                            context.getJobID(), scalingConfigurations, conf);
         }
 
+        addToScalingHistoryAndStore(
+                autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
+        scalingTracking.addScalingRecord(now, new ScalingRecord());
+        autoScalerStateStore.storeScalingTracking(context, scalingTracking);
+        autoScalerStateStore.storeParallelismOverrides(context, parallelismOverrides);
+        if (justinEnabled) {
+            autoScalerStateStore.storeResourceProfileOverrides(context, profileOverrides);
+        }
         autoScalerStateStore.storeConfigChanges(context, configOverrides);
 
         // Try to clear all delayed scale down requests after scaling.
