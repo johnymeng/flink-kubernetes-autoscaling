@@ -271,7 +271,8 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         @Override
         public void update() {
             synchronized (lock) {
-                if (isClosed()) {
+                // A queued update can outlive the monitor and its native cache handle.
+                if (rocksDB == null || isClosed()) {
                     return;
                 }
                 if (viewLruCache == null) {

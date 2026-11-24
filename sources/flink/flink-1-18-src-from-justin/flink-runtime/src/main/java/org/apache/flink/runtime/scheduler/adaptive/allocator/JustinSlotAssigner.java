@@ -31,6 +31,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -66,15 +67,27 @@ public class JustinSlotAssigner implements SlotAssigner {
             Collection<? extends SlotInfo> freeSlots,
             VertexParallelism vertexParallelism,
             JobAllocationsInformation previousAllocations) {
-        List<ExecutionSlotSharingGroup> allGroups = new ArrayList<>();
-        for (SlotSharingGroup slotSharingGroup : jobInformation.getSlotSharingGroups()) {
-            allGroups.addAll(createExecutionSlotSharingGroups(vertexParallelism, slotSharingGroup));
-        }
+        final List<ExecutionSlotSharingGroup> allGroups = new ArrayList<>();
+        // An unspecified group can use any slot. Assign specific groups first.
+        jobInformation.getSlotSharingGroups().stream()
+                .sorted(
+                        Comparator.comparing(
+                                group ->
+                                        group.getResourceProfile().equals(ResourceProfile.UNKNOWN)))
+                .forEach(
+                        group ->
+                                allGroups.addAll(
+                                        createExecutionSlotSharingGroups(
+                                                vertexParallelism, group)));
 
+        final List<? extends SlotInfo> candidateSlots = new ArrayList<>(freeSlots);
+        candidateSlots.sort(
+                Comparator.comparing(
+                        slot -> slot.getResourceProfile().equals(ResourceProfile.ANY)));
         Collection<SlotAssignment> assignments = new ArrayList<>();
-        ArrayList<AllocationID> used = new ArrayList<>();
+        Set<AllocationID> used = new HashSet<>();
         for (ExecutionSlotSharingGroup group : allGroups) {
-            for (SlotInfo slotInfo : freeSlots) {
+            for (SlotInfo slotInfo : candidateSlots) {
                 if (used.contains(slotInfo.getAllocationId())) {
                     continue;
                 }
