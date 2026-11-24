@@ -26,6 +26,7 @@ import org.apache.flink.runtime.concurrent.ManuallyTriggeredComponentMainThreadE
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.utils.SimpleAckingTaskManagerGateway;
 import org.apache.flink.runtime.jobgraph.JobGraph;
+import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
@@ -137,6 +138,24 @@ class NativeRescaleSlotReuseTest {
                         originalSlot.getAllocationId(), additionalSlot.getAllocationId());
         assertThat(released).isEmpty();
         assertThat(triggerTimers(PREPARATION_TIMEOUT)).isFalse();
+    }
+
+    @Test
+    void parallelismOnlyUpdatePreservesExistingExplicitSlotProfile() {
+        scheduler.updateJobResourceRequirements(
+                JobResourceRequirements.newBuilder()
+                        .setParallelismForJobVertex(vertex.getID(), 1, 2)
+                        .build());
+        drainImmediateTasks();
+        assertThat(scheduler.getState()).isInstanceOf(WaitingForResources.class);
+        assertThat(scheduler.requestJustinResourceRequirements().getResourceProfile(vertex.getID()))
+                .isEqualTo(ORIGINAL_PROFILE);
+
+        final SlotOffer additional = newSlot(ORIGINAL_PROFILE);
+        assertThat(offerSlots(additional)).containsExactly(additional);
+        drainImmediateTasks();
+        assertThat(deployed)
+                .containsExactlyInAnyOrder(originalSlot.getAllocationId(), additional.getAllocationId());
     }
 
     @Test

@@ -834,27 +834,21 @@ public class AdaptiveScheduler
 
     @Override
     public void updateJobResourceRequirements(JobResourceRequirements jobResourceRequirements) {
-        JustinResourceRequirements.Builder builder = JustinResourceRequirements.newBuilder();
-        for (JobVertexID jobVertexID : jobResourceRequirements.getJobVertices()) {
-            builder.setParallelismForJobVertex(
-                    jobVertexID,
-                    jobResourceRequirements
-                            .getJobVertexParallelisms()
-                            .get(jobVertexID)
-                            .getParallelism()
-                            .getLowerBound(),
-                    jobResourceRequirements
-                            .getJobVertexParallelisms()
-                            .get(jobVertexID)
-                            .getParallelism()
-                            .getUpperBound(),
-                    ResourceProfile.UNKNOWN);
-        }
-        if (true) {
+        if (requiresFixedSchedulingPlan()) {
+            JustinResourceRequirements.Builder builder = JustinResourceRequirements.newBuilder();
+            jobResourceRequirements.getJobVertexParallelisms().forEach(
+                    (id, requirement) -> {
+                        var parallelism = requirement.getParallelism();
+                        builder.setParallelismForJobVertex(
+                                id,
+                                parallelism.getLowerBound(),
+                                parallelism.getUpperBound(),
+                                jobInformation.getVertexInformation(id)
+                                        .getSlotSharingGroup().getResourceProfile());
+                    });
             updateJustinResourceRequirements(builder.build());
             return;
         }
-        this.justinRescale = false;
         if (executionMode == SchedulerExecutionMode.REACTIVE) {
             throw new UnsupportedOperationException(
                     "Cannot change the parallelism of a job running in reactive mode.");
@@ -1037,8 +1031,7 @@ public class AdaptiveScheduler
 
     @Override
     public boolean hasSufficientResources() {
-        if (justinRescale) {
-            // Justin builds a fixed target plan. A lower-bound allocation is not sufficient.
+        if (requiresFixedSchedulingPlan()) {
             return hasDesiredResources();
         }
         return slotAllocator
@@ -1049,7 +1042,7 @@ public class AdaptiveScheduler
     private JobSchedulingPlan determineParallelism(
             SlotAllocator slotAllocator, @Nullable ExecutionGraph previousExecutionGraph)
             throws NoResourceAvailableException {
-        if (true) {
+        if (requiresFixedSchedulingPlan()) {
             return createJustinSchedulingPlan(previousExecutionGraph);
         }
 
@@ -1062,6 +1055,12 @@ public class AdaptiveScheduler
                         () ->
                                 new NoResourceAvailableException(
                                         "Not enough resources available for scheduling."));
+    }
+
+    private boolean requiresFixedSchedulingPlan() {
+        return justinRescale
+                || jobInformation.getSlotSharingGroups().stream()
+                        .anyMatch(group -> !ResourceProfile.UNKNOWN.equals(group.getResourceProfile()));
     }
 
     private JobSchedulingPlan createJustinSchedulingPlan(ExecutionGraph previousExecutionGraph)
@@ -1106,9 +1105,13 @@ public class AdaptiveScheduler
 
     @Override
     public void goToWaitingForResources(@Nullable ExecutionGraph previousExecutionGraph) {
-        declareJustinDesiredResources();
-        firstJustinRescale = false;
-        releaseSlotsExceedingDesiredResources();
+        if (requiresFixedSchedulingPlan()) {
+            declareJustinDesiredResources();
+            firstJustinRescale = false;
+            releaseSlotsExceedingDesiredResources();
+        } else {
+            declareDesiredResources();
+        }
 
         transitionToState(
                 new WaitingForResources.Factory(
