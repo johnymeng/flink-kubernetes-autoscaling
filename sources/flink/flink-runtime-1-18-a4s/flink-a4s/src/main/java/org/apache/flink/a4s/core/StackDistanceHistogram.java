@@ -5,6 +5,7 @@ import org.apache.flink.util.jackson.JacksonMapperFactory;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.DeserializationFeature;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.Serializable;
@@ -15,7 +16,9 @@ import java.util.List;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class StackDistanceHistogram implements Serializable {
     private static final long serialVersionUID = 1L;
-    private static final ObjectMapper OBJECT_MAPPER = JacksonMapperFactory.createObjectMapper();
+    private static final ObjectMapper OBJECT_MAPPER =
+            JacksonMapperFactory.createObjectMapper()
+                    .enable(DeserializationFeature.FAIL_ON_NULL_FOR_PRIMITIVES);
 
     private final long[] bucketCounts;
     private final long completeMisses;
@@ -26,7 +29,7 @@ public class StackDistanceHistogram implements Serializable {
     @JsonCreator
     public StackDistanceHistogram(
             @JsonProperty("bucketCounts") long[] bucketCounts,
-            @JsonProperty("completeMisses") long completeMisses,
+            @JsonProperty(value = "completeMisses", required = true) long completeMisses,
             @JsonProperty("numPartitions") int numPartitions,
             @JsonProperty("bucketSizeScaling") long bucketSizeScaling,
             @JsonProperty("cacheItemSizeBytes") long cacheItemSizeBytes) {
@@ -157,7 +160,7 @@ public class StackDistanceHistogram implements Serializable {
         long mergedBucketSizeScaling = histograms.get(0).getBucketSizeScaling();
         long mergedCacheItemSizeBytes = histograms.get(0).getCacheItemSizeBytes();
 
-        int totalPartitions = histograms.stream().mapToInt(StackDistanceHistogram::getNumPartitions).sum();
+        int totalPartitions = 0;
         for (StackDistanceHistogram histogram : histograms) {
             if (histogram.getBucketSizeScaling() != mergedBucketSizeScaling) {
                 throw new IllegalArgumentException(
@@ -168,9 +171,12 @@ public class StackDistanceHistogram implements Serializable {
                         "Cannot merge histograms with different cacheItemSizeBytes values");
             }
             for (int i = 0; i < histogram.getNumBuckets(); i++) {
-                mergedFiniteCounts[i] += histogram.getFrequency(i);
+                mergedFiniteCounts[i] =
+                        Math.addExact(mergedFiniteCounts[i], histogram.getFrequency(i));
             }
-            mergedCompleteMisses += histogram.getCompleteMisses();
+            mergedCompleteMisses =
+                    Math.addExact(mergedCompleteMisses, histogram.getCompleteMisses());
+            totalPartitions = Math.addExact(totalPartitions, histogram.getNumPartitions());
         }
 
         return new StackDistanceHistogram(
@@ -182,11 +188,10 @@ public class StackDistanceHistogram implements Serializable {
     }
 
     public long getTotalFrequency() {
-        long total = 0L;
+        long total = completeMisses;
         for (long count : this.bucketCounts) {
-            total += count;
+            total = Math.addExact(total, count);
         }
-        total += completeMisses;
         return total;
     }
 

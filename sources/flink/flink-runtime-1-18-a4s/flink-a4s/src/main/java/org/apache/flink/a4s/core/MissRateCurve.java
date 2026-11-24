@@ -4,6 +4,8 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCre
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonValue;
 
+import javax.annotation.Nullable;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -23,6 +25,22 @@ public class MissRateCurve {
         return points;
     }
 
+    /** Whether the curve contains supported, ordered cache sizes and monotonic miss rates. */
+    public boolean isUsable() {
+        long previousSize = -1;
+        double previousRate = 1.0;
+        for (Point point : points) {
+            long size = point.getCacheSizeBytes();
+            double rate = point.getMissRate();
+            if (size <= previousSize || !Double.isFinite(rate) || rate < 0 || rate > previousRate) {
+                return false;
+            }
+            previousSize = size;
+            previousRate = rate;
+        }
+        return !points.isEmpty();
+    }
+
     /** Represents a point on the Miss Rate Curve: cache size -> miss rate. */
     public static class Point {
         public static final String FIELD_NAME_CACHE_SIZE_BYTES = "cacheSizeBytes";
@@ -34,12 +52,19 @@ public class MissRateCurve {
         @JsonProperty(FIELD_NAME_MISS_RATE)
         private final double missRate;
 
-        @JsonCreator
-        public Point(
-                @JsonProperty(FIELD_NAME_CACHE_SIZE_BYTES) long cacheSizeBytes,
-                @JsonProperty(FIELD_NAME_MISS_RATE) double missRate) {
+        public Point(long cacheSizeBytes, double missRate) {
             this.cacheSizeBytes = cacheSizeBytes;
             this.missRate = missRate;
+        }
+
+        @JsonCreator
+        private static Point fromMeasurements(
+                @JsonProperty(FIELD_NAME_CACHE_SIZE_BYTES) @Nullable Long cacheSizeBytes,
+                @JsonProperty(FIELD_NAME_MISS_RATE) @Nullable Double missRate) {
+            // Keep incomplete wire or stored points distinguishable from genuine measurements.
+            return new Point(
+                    cacheSizeBytes == null ? -1 : cacheSizeBytes,
+                    missRate == null ? Double.NaN : missRate);
         }
 
         public long getCacheSizeBytes() {
@@ -75,11 +100,12 @@ public class MissRateCurve {
 
         for (int i = 0; i < numBuckets; i++) {
             cumulativeFreqAtSize += histogram.getFrequency(i);
-            long currentCacheSize = (i + 1L) * bucketSizeScaling;
+            long currentCacheSize = Math.multiplyExact(i + 1L, bucketSizeScaling);
             double missRate = 1.0 - ((double) cumulativeFreqAtSize / totalFrequency);
             missRate = Math.max(0.0, Math.min(1.0, missRate));
-            long cacheSizeItems = currentCacheSize * cacheItemSizeBytes;
-            long scaledCacheSizeBytes = cacheSizeItems * histogram.getNumPartitions();
+            long cacheSizeBytes = Math.multiplyExact(currentCacheSize, cacheItemSizeBytes);
+            long scaledCacheSizeBytes =
+                    Math.multiplyExact(cacheSizeBytes, histogram.getNumPartitions());
             mrc.add(new Point(scaledCacheSizeBytes, missRate));
         }
 

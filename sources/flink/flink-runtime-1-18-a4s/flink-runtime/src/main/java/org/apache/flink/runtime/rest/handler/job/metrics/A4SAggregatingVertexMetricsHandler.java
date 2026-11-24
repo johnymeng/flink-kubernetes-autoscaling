@@ -21,6 +21,7 @@ package org.apache.flink.runtime.rest.handler.job.metrics;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -44,7 +45,6 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -60,6 +60,8 @@ public class A4SAggregatingVertexMetricsHandler
                 AggregatedSubtaskMetricsParameters> {
 
     private static final String STACK_DISTANCE_HISTOGRAM_METRIC_NAME = "stack-distance-histogram";
+    private static final String ROCKSDB_SANITIZED_HISTOGRAM_METRIC_NAME =
+            "rocksdb_" + STACK_DISTANCE_HISTOGRAM_METRIC_NAME;
 
     private final Executor executor;
     private final MetricFetcher fetcher;
@@ -115,47 +117,76 @@ public class A4SAggregatingVertexMetricsHandler
         MetricStore.TaskMetricStore taskMetricStore =
                 store.getTaskMetricStore(jobId.toString(), vertexID.toString());
         if (taskMetricStore == null) {
-            MissRateCurve emptyMrc = buildScaledMrcPoints(Collections.emptyList());
-            return new A4SAggregatedMetricsResponseBody(emptyMrc);
+            return new A4SAggregatedMetricsResponseBody(Status.TASK_METRICS_UNAVAILABLE, null);
         }
 
-        List<StackDistanceHistogram> subtaskHistograms = new ArrayList<>();
-        for (Map.Entry<Integer, MetricStore.SubtaskMetricStore> entry :
-                taskMetricStore.getAllSubtaskMetricStores().entrySet()) {
-            MetricStore.SubtaskMetricStore storeItem = entry.getValue();
-            String histogramRaw = getStackDistanceHistogramRaw(storeItem.metrics);
-            if (histogramRaw == null) {
-                continue;
+        Map<Integer, MetricStore.SubtaskMetricStore> subtasks =
+                taskMetricStore.getAllSubtaskMetricStores();
+        if (subtasks.isEmpty()) {
+            return new A4SAggregatedMetricsResponseBody(Status.TASK_METRICS_UNAVAILABLE, null);
+        }
+
+        try {
+            List<StackDistanceHistogram> subtaskHistograms = new ArrayList<>();
+            boolean hasUnsampledSubtask = false;
+            for (MetricStore.SubtaskMetricStore subtask : subtasks.values()) {
+                String histogramRaw = getStackDistanceHistogramRaw(subtask.metrics);
+                if (histogramRaw != null) {
+                    StackDistanceHistogram histogram =
+                            StackDistanceHistogram.fromMetricString(histogramRaw);
+                    if (histogram.getNumPartitions() <= 0) {
+                        throw new IllegalArgumentException("Histogram has no positive partition count");
+                    }
+                    hasUnsampledSubtask |= histogram.getTotalFrequency() == 0;
+                    subtaskHistograms.add(histogram);
+                }
             }
-            StackDistanceHistogram histogram =
-                    StackDistanceHistogram.fromMetricString(histogramRaw);
-            subtaskHistograms.add(histogram);
-        }
 
-        MissRateCurve scaledMrc = buildScaledMrcPoints(subtaskHistograms);
-        return new A4SAggregatedMetricsResponseBody(scaledMrc);
+            if (subtaskHistograms.isEmpty()) {
+                return new A4SAggregatedMetricsResponseBody(Status.HISTOGRAM_UNAVAILABLE, null);
+            }
+            if (subtaskHistograms.size() != subtasks.size()) {
+                return new A4SAggregatedMetricsResponseBody(Status.INCOMPLETE_HISTOGRAMS, null);
+            }
+
+            StackDistanceHistogram merged = StackDistanceHistogram.merge(subtaskHistograms);
+            long totalFrequency = merged.getTotalFrequency();
+            if (totalFrequency == 0) {
+                return new A4SAggregatedMetricsResponseBody(Status.NO_SAMPLES, null);
+            }
+            if (hasUnsampledSubtask) {
+                return new A4SAggregatedMetricsResponseBody(Status.INCOMPLETE_HISTOGRAMS, null);
+            }
+            if (totalFrequency == merged.getCompleteMisses()) {
+                return new A4SAggregatedMetricsResponseBody(Status.NO_FINITE_BUCKETS, null);
+            }
+            return new A4SAggregatedMetricsResponseBody(
+                    Status.AVAILABLE, MissRateCurve.fromStackDistanceHistogram(merged));
+        } catch (IllegalArgumentException | ArithmeticException e) {
+            log.debug("Invalid QuickMRC histogram for job {} vertex {}", jobId, vertexID, e);
+            return new A4SAggregatedMetricsResponseBody(Status.INVALID_HISTOGRAM, null);
+        }
     }
 
     @Nullable
     private String getStackDistanceHistogramRaw(Map<String, String> metrics) {
+        String histogram = null;
         for (Map.Entry<String, String> metricEntry : metrics.entrySet()) {
             String metricKey = metricEntry.getKey();
             String metricValue = metricEntry.getValue();
             if (metricKey == null || metricValue == null) {
                 continue;
             }
-            if (metricKey.contains(STACK_DISTANCE_HISTOGRAM_METRIC_NAME)) {
-                return metricValue;
+            if (metricKey.equals(STACK_DISTANCE_HISTOGRAM_METRIC_NAME)
+                    || metricKey.endsWith("." + STACK_DISTANCE_HISTOGRAM_METRIC_NAME)
+                    || metricKey.equals(ROCKSDB_SANITIZED_HISTOGRAM_METRIC_NAME)
+                    || metricKey.endsWith("." + ROCKSDB_SANITIZED_HISTOGRAM_METRIC_NAME)) {
+                if (histogram != null) {
+                    throw new IllegalArgumentException("Expected one QuickMRC histogram per subtask");
+                }
+                histogram = metricValue;
             }
         }
-        return null;
-    }
-
-    private MissRateCurve buildScaledMrcPoints(List<StackDistanceHistogram> subtaskHistograms) {
-        if (subtaskHistograms.isEmpty()) {
-            return new MissRateCurve(Collections.emptyList());
-        }
-        StackDistanceHistogram mergedHistogram = StackDistanceHistogram.merge(subtaskHistograms);
-        return MissRateCurve.fromStackDistanceHistogram(mergedHistogram);
+        return histogram;
     }
 }

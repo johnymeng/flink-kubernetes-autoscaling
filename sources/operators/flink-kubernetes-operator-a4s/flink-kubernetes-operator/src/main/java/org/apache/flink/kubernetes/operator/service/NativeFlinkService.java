@@ -33,7 +33,6 @@ import org.apache.flink.client.deployment.application.cli.ApplicationClusterDepl
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
-import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
@@ -412,37 +411,8 @@ public class NativeFlinkService extends AbstractFlinkService {
 
     }
 
-    public static ResourceProfile parseResourceProfile(String s) {
-        String delim = "[{}]+";
-        String[] strings = s.split(delim);
-        if (strings.length <= 0 || !strings[0].equals(ResourceProfile.class.getSimpleName())) {
-            return ResourceProfile.UNKNOWN;
-        } else if (strings.length == 2) {
-            if (strings[1].contains("UNKNOWN")) {
-                return ResourceProfile.UNKNOWN;
-            }
-            String[] profiles = strings[1].split(", ");
-            ResourceProfile.Builder resourceProfile =
-                    ResourceProfile.newBuilder()
-                            .setCpuCores(Double.parseDouble(profiles[0].split("=")[1]))
-                            .setTaskHeapMemory(parseMemoryFromResourceProfile(profiles[1]))
-                            .setTaskOffHeapMemory(parseMemoryFromResourceProfile(profiles[2]))
-                            .setManagedMemory(parseMemoryFromResourceProfile(profiles[3]))
-                            .setNetworkMemory(parseMemoryFromResourceProfile(profiles[4]));
-            return resourceProfile.build();
-
-        } else {
-            return ResourceProfile.UNKNOWN;
-        }
-    }
-
-    private static MemorySize parseMemoryFromResourceProfile(String s) {
-        String value = s.substring(s.indexOf('=') + 1);
-        int exactBytes = value.indexOf('(');
-        if (exactBytes >= 0) {
-            value = value.substring(exactBytes + 1, value.indexOf(')', exactBytes));
-        }
-        return MemorySize.parse(value);
+    public static ResourceProfile parseResourceProfile(String override) {
+        return ResourceProfileParser.parse(override);
     }
 
     protected Map<JobVertexID, JustinVertexResourceRequirements> getJustinResources(

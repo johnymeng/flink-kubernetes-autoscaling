@@ -19,6 +19,7 @@
 package org.apache.flink.runtime.rest.handler.job.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
@@ -27,7 +28,6 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.metrics.dump.MetricDump;
 import org.apache.flink.runtime.metrics.dump.QueryScopeInfo;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
-import org.apache.flink.runtime.rest.handler.RestHandlerException;
 import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricFetcher;
 import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricFetcherImpl;
 import org.apache.flink.runtime.rest.handler.legacy.metrics.MetricStore;
@@ -41,8 +41,6 @@ import org.apache.flink.testutils.TestingUtils;
 import org.apache.flink.util.TestLogger;
 import org.apache.flink.util.concurrent.Executors;
 
-import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
-
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -53,14 +51,12 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.closeTo;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
-import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.assertFalse;
 
 /** Tests for {@link A4SAggregatingVertexMetricsHandler}. */
 public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
@@ -152,7 +148,7 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                                 restfulGateway)
                         .get();
 
-        MissRateCurve curve = response.getScaledMrc();
+        MissRateCurve curve = response.getCurve().orElseThrow();
         assertThat(curve.getPoints(), hasSize(3));
         assertThat(curve.getPoints().get(0).getCacheSizeBytes(), equalTo(8192L));
         assertThat(curve.getPoints().get(0).getMissRate(), closeTo(0.5, 1.0e-9));
@@ -187,7 +183,7 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                                 restfulGateway)
                         .get();
 
-        MissRateCurve curve1 = response1.getScaledMrc();
+        MissRateCurve curve1 = response1.getCurve().orElseThrow();
         assertThat(curve1.getPoints(), hasSize(3));
         assertThat(curve1.getPoints().get(0).getCacheSizeBytes(), equalTo(4096L));
         assertThat(curve1.getPoints().get(0).getMissRate(), closeTo(0.5, 1.0e-9));
@@ -201,7 +197,7 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                                 createRequest(jobId.toString(), jobVertexId2.toString()),
                                 restfulGateway)
                         .get();
-        MissRateCurve curve2 = response2.getScaledMrc();
+        MissRateCurve curve2 = response2.getCurve().orElseThrow();
         assertThat(curve2.getPoints(), hasSize(3));
         assertThat(curve2.getPoints().get(0).getCacheSizeBytes(), equalTo(4096L));
         assertThat(curve2.getPoints().get(0).getMissRate(), closeTo(2.0 / 3.0, 1.0e-9));
@@ -226,22 +222,24 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                                 restfulGateway)
                         .get();
 
-        assertTrue(response.getScaledMrc().getPoints().isEmpty());
+        assertThat(response.getMrcStatus(), equalTo(Status.HISTOGRAM_UNAVAILABLE));
+        assertFalse(response.getCurve().isPresent());
     }
 
     @Test
-    public void testHandleRequestReturnsEmptyCurveWhenTaskMetricStoreMissing() throws Exception {
+    public void testHandleRequestReturnsAbsentCurveWhenTaskMetricStoreMissing() throws Exception {
         A4SAggregatedMetricsResponseBody response =
                 handler.handleRequest(
                                 createRequest(jobId.toString(), jobVertexId.toString()),
                                 restfulGateway)
                         .get();
 
-        assertTrue(response.getScaledMrc().getPoints().isEmpty());
+        assertThat(response.getMrcStatus(), equalTo(Status.TASK_METRICS_UNAVAILABLE));
+        assertFalse(response.getCurve().isPresent());
     }
 
     @Test
-    public void testHandleRequestWrapsMalformedHistogramAsInternalServerError() throws Exception {
+    public void testHandleRequestReportsMalformedHistogram() throws Exception {
         metricStore.add(
                 new MetricDump.GaugeDump(
                         new QueryScopeInfo.TaskQueryScopeInfo(
@@ -249,18 +247,12 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                         "stack-distance-histogram",
                         "{\"bucketCounts\": [1, \"bad\", 3]}"));
 
-        try {
-            handler.handleRequest(
-                            createRequest(jobId.toString(), jobVertexId.toString()), restfulGateway)
-                    .get();
-            fail("Expected an exception.");
-        } catch (ExecutionException e) {
-            Throwable completionCause = e.getCause();
-            assertTrue(completionCause instanceof RestHandlerException);
-            RestHandlerException rhe = (RestHandlerException) completionCause;
-            assertThat(
-                    rhe.getHttpResponseStatus(), equalTo(HttpResponseStatus.INTERNAL_SERVER_ERROR));
-            assertThat(rhe.getMessage(), equalTo("Could not retrieve A4S metrics."));
-        }
+        var response =
+                handler.handleRequest(
+                                createRequest(jobId.toString(), jobVertexId.toString()),
+                                restfulGateway)
+                        .get();
+        assertThat(response.getMrcStatus(), equalTo(Status.INVALID_HISTOGRAM));
+        assertFalse(response.getCurve().isPresent());
     }
 }

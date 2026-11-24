@@ -3,7 +3,10 @@ package org.apache.flink.runtime.jobgraph.justin;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
+
+import javax.annotation.Nullable;
 
 import java.io.Serializable;
 import java.util.Objects;
@@ -16,6 +19,7 @@ public class JustinVertexResourceRequirements implements Serializable {
 
     private static final String FIELD_NAME_PARALLELISM = "parallelism";
     private static final String FIELD_NAME_RESOURCE_PROFILE = "resourceProfile";
+    private static final String FIELD_NAME_APPLIED_RESOURCE_PROFILE = "appliedResourceProfile";
 
     public static class Parallelism implements Serializable {
 
@@ -73,11 +77,22 @@ public class JustinVertexResourceRequirements implements Serializable {
     @JsonProperty(FIELD_NAME_RESOURCE_PROFILE)
     private final ResourceProfile resourceProfile;
 
+    @Nullable private final ResourceProfile appliedResourceProfile;
+
+    public JustinVertexResourceRequirements(
+            Parallelism parallelism, ResourceProfile resourceProfile) {
+        this(parallelism, resourceProfile, null);
+    }
+
+    @JsonCreator
     public JustinVertexResourceRequirements(
             @JsonProperty(FIELD_NAME_PARALLELISM) Parallelism parallelism,
-            @JsonProperty(FIELD_NAME_RESOURCE_PROFILE) ResourceProfile resourceProfile) {
+            @JsonProperty(FIELD_NAME_RESOURCE_PROFILE) ResourceProfile resourceProfile,
+            @JsonProperty(FIELD_NAME_APPLIED_RESOURCE_PROFILE) @Nullable
+                    ResourceProfile appliedResourceProfile) {
         this.parallelism = checkNotNull(parallelism);
         this.resourceProfile = resourceProfile;
+        this.appliedResourceProfile = appliedResourceProfile;
     }
 
     public Parallelism getParallelism() {
@@ -86,6 +101,14 @@ public class JustinVertexResourceRequirements implements Serializable {
 
     public ResourceProfile getResourceProfile() {
         return resourceProfile;
+    }
+
+    /** Slot profile confirmed for all running subtasks, when available on a GET response. */
+    @Nullable
+    @JsonProperty(FIELD_NAME_APPLIED_RESOURCE_PROFILE)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public ResourceProfile getAppliedResourceProfile() {
+        return appliedResourceProfile;
     }
 
     @Override

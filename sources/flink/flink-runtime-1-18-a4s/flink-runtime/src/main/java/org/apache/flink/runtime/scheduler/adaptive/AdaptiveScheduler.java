@@ -75,6 +75,7 @@ import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.JustinVertexResourceRequirements;
 import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
 import org.apache.flink.runtime.jobmanager.scheduler.NoResourceAvailableException;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
@@ -143,10 +144,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledFuture;
@@ -871,19 +874,79 @@ public class AdaptiveScheduler
 
     @Override
     public JustinResourceRequirements requestJustinResourceRequirements() {
-        final JustinResourceRequirements.Builder builder = JustinResourceRequirements.newBuilder();
+        final ExecutionGraph runningGraph =
+                state.as(Executing.class).map(Executing::getExecutionGraph).orElse(null);
+        final Map<AllocationID, ResourceProfile> exclusiveSlots =
+                runningGraph == null
+                        ? Collections.emptyMap()
+                        : getExclusiveSlotProfiles(runningGraph);
+        final Map<JobVertexID, JustinVertexResourceRequirements> requirements = new HashMap<>();
         for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
-            ResourceProfile rp = vertex.getSlotSharingGroup().getResourceProfile();
-            if (rp.equals(ResourceProfile.UNKNOWN)) {
-                rp = getResourceProfile(configuration);
+            final JobVertexID vertexId = vertex.getJobVertexID();
+            ResourceProfile requestedProfile = vertex.getSlotSharingGroup().getResourceProfile();
+            if (requestedProfile.equals(ResourceProfile.UNKNOWN)) {
+                requestedProfile = getLegacyFallbackResourceProfile(configuration);
             }
-            builder.setParallelismForJobVertex(
-                    vertex.getJobVertexID(),
-                    vertex.getMinParallelism(),
-                    vertex.getParallelism(),
-                    rp);
+            final ResourceProfile appliedProfile =
+                    runningGraph == null
+                            ? null
+                            : getAppliedResourceProfile(
+                                    runningGraph.getJobVertex(vertexId), exclusiveSlots);
+            requirements.put(
+                    vertexId,
+                    new JustinVertexResourceRequirements(
+                            new JustinVertexResourceRequirements.Parallelism(
+                                    vertex.getMinParallelism(), vertex.getParallelism()),
+                            requestedProfile,
+                            appliedProfile));
         }
-        return builder.build();
+        return new JustinResourceRequirements(requirements);
+    }
+
+    private Map<AllocationID, ResourceProfile> getExclusiveSlotProfiles(ExecutionGraph graph) {
+        final Map<AllocationID, ResourceProfile> profiles = new HashMap<>();
+        for (SlotInfo slot : declarativeSlotPool.getAllSlotsInformation()) {
+            profiles.put(slot.getAllocationId(), slot.getResourceProfile());
+        }
+
+        // A shared slot's total budget cannot be carried forward as a per-vertex request.
+        final Set<AllocationID> assigned = new HashSet<>();
+        for (ExecutionVertex task : graph.getAllExecutionVertices()) {
+            final LogicalSlot slot = task.getCurrentAssignedResource();
+            if (slot != null && !assigned.add(slot.getAllocationId())) {
+                profiles.remove(slot.getAllocationId());
+            }
+        }
+        return profiles;
+    }
+
+    @Nullable
+    private static ResourceProfile getAppliedResourceProfile(
+            @Nullable ExecutionJobVertex vertex,
+            Map<AllocationID, ResourceProfile> exclusiveSlots) {
+        if (vertex == null) {
+            return null;
+        }
+        ResourceProfile appliedProfile = null;
+        for (ExecutionVertex task : vertex.getTaskVertices()) {
+            final LogicalSlot slot = task.getCurrentAssignedResource();
+            if (task.getExecutionState() != ExecutionState.RUNNING
+                    || slot == null
+                    || !slot.isAlive()) {
+                return null;
+            }
+            final ResourceProfile profile = exclusiveSlots.get(slot.getAllocationId());
+            if (profile == null
+                    || profile.equals(ResourceProfile.UNKNOWN)
+                    || profile.equals(ResourceProfile.ANY)
+                    // The Justin REST profile format cannot round-trip external resources.
+                    || !profile.getExtendedResources().isEmpty()
+                    || (appliedProfile != null && !appliedProfile.equals(profile))) {
+                return null;
+            }
+            appliedProfile = profile;
+        }
+        return appliedProfile;
     }
 
     @Override
@@ -1545,8 +1608,12 @@ public class AdaptiveScheduler
                         TimeUnit.MILLISECONDS);
     }
 
-    private static ResourceProfile getResourceProfile(Configuration conf) {
+    // Retain the historical requirement returned to Justin clients for unspecified groups.
+    private static ResourceProfile getLegacyFallbackResourceProfile(Configuration conf) {
         MemorySize memory = conf.get(TaskManagerOptions.TOTAL_PROCESS_MEMORY);
+        if (memory == null) {
+            return ResourceProfile.UNKNOWN;
+        }
         if (memory.getGibiBytes() > 3) { // 4 GB
             return ResourceProfile.newBuilder()
                     .setCpuCores(1.0)

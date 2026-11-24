@@ -30,18 +30,28 @@ import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirements;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
+import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
+import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneClientHAServices;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.MessageHeaders;
+import org.apache.flink.runtime.rest.messages.MessageParameters;
+import org.apache.flink.runtime.rest.messages.RequestBody;
+import org.apache.flink.runtime.rest.messages.ResponseBody;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -55,6 +65,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -123,6 +134,123 @@ public class ScalingExecutorTest {
         conf.set(AutoScalerOptions.CATCH_UP_DURATION, Duration.ZERO);
     }
 
+    @ParameterizedTest
+    @CsvSource({"true, true", "false, true", "false, false"})
+    void handlesMissingCurveOnThroughputRescale(
+            boolean scaleStateful, boolean statefulProfileAvailable) throws Exception {
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
+        conf.set(AutoScalerOptions.MEMORY_SCALING_ENABLED, false);
+        conf.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(4096));
+        if (!scaleStateful) {
+            conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
+        }
+
+        var source = new JobVertexID();
+        var stateful = new JobVertexID();
+        var sourceProfile = ResourceProfile.newBuilder().setCpuCores(1).build();
+        var statefulProfile =
+                ResourceProfile.newBuilder()
+                        .setCpuCores(1)
+                        .setTaskHeapMemoryMB(363)
+                        .setManagedMemoryMB(192)
+                        .setNetworkMemoryMB(84)
+                        .build();
+        // The legacy GET field can contain this template for an UNKNOWN group on a 4 GiB TM.
+        var legacyProfile =
+                ResourceProfile.newBuilder()
+                        .setCpuCores(1)
+                        .setTaskHeapMemoryMB(363)
+                        .setManagedMemoryMB(343)
+                        .setNetworkMemoryMB(84)
+                        .build();
+        var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 1);
+        var requirements =
+                new JustinResourceRequirements(
+                        Map.of(
+                                source,
+                                new JustinVertexResourceRequirements(
+                                        parallelism, sourceProfile, sourceProfile),
+                                stateful,
+                                new JustinVertexResourceRequirements(
+                                        parallelism,
+                                        legacyProfile,
+                                        statefulProfileAvailable ? statefulProfile : null)));
+        context =
+                context.toBuilder()
+                        .restClientSupplier(() -> resourceRequirementsClient(requirements))
+                        .build();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(source, Map.of(), 1, MAX_PARALLELISM),
+                        new VertexInfo(stateful, Map.of(source, HASH), 1, MAX_PARALLELISM));
+        var statefulMetrics = evaluated(1, scaleStateful ? 110 : 60, 100);
+        statefulMetrics.put(
+                ScalingMetric.ROCKS_DB_BLOCK_CACHE_HIT_RATE, EvaluatedScalingMetric.of(0));
+        var globalMetrics = new HashMap<>(dummyGlobalMetrics);
+        globalMetrics.put(ScalingMetric.HEAP_MEMORY_USED, EvaluatedScalingMetric.avg(0));
+        globalMetrics.put(ScalingMetric.MANAGED_MEMORY_USED, EvaluatedScalingMetric.avg(0));
+        globalMetrics.put(ScalingMetric.METASPACE_MEMORY_USED, EvaluatedScalingMetric.avg(0));
+        var metrics =
+                new EvaluatedMetrics(
+                        Map.of(
+                                source, evaluated(1, scaleStateful ? 60 : 110, 100),
+                                stateful, statefulMetrics),
+                        globalMetrics,
+                        Map.of());
+
+        var scalingHistory = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
+        boolean scaled =
+                scalingExecutor.scaleResource(
+                        context,
+                        metrics,
+                        scalingHistory,
+                        scalingTracking,
+                        Instant.now(),
+                        topology,
+                        new DelayedScaleDown());
+
+        assertEquals(statefulProfileAvailable, scaled);
+        if (!statefulProfileAvailable) {
+            assertThat(scalingHistory).isEmpty();
+            assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+            return;
+        }
+        assertThat(getScaledParallelism(stateStore, context))
+                .containsEntry(source, scaleStateful ? 1 : 2)
+                .containsEntry(stateful, scaleStateful ? 2 : 1);
+        assertThat(stateStore.getResourceProfileOverrides(context))
+                .containsEntry(stateful.toString(), statefulProfile.toString())
+                .containsEntry(source.toString(), sourceProfile.toString());
+    }
+
+    private static RestClusterClient<String> resourceRequirementsClient(
+            JustinResourceRequirements requirements) throws Exception {
+        return new RestClusterClient<>(
+                new Configuration(),
+                "test-cluster",
+                (config, executor) -> new StandaloneClientHAServices("localhost")) {
+            @Override
+            public <
+                            M extends MessageHeaders<R, P, U>,
+                            U extends MessageParameters,
+                            R extends RequestBody,
+                            P extends ResponseBody>
+                    CompletableFuture<P> sendRequest(M headers, U parameters, R request) {
+                assertThat(headers).isSameAs(JustinResourceRequirementsHeaders.INSTANCE);
+                assertThat(
+                                MessageParameters.resolveUrl(
+                                        headers.getTargetRestEndpointURL(), parameters))
+                        .endsWith("/justin?include-applied-profile=true");
+                return CompletableFuture.completedFuture(
+                        headers.getResponseClass()
+                                .cast(new JustinResourceRequirementsBody(requirements)));
+            }
+        };
+    }
+
     @Test
     void testA4SMemoryOnlyScaling() throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
@@ -154,8 +282,8 @@ public class ScalingExecutorTest {
                         .build();
         var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 1);
         var live = new HashMap<JobVertexID, JustinVertexResourceRequirements>();
-        live.put(source, new JustinVertexResourceRequirements(parallelism, original));
-        live.put(stateful, new JustinVertexResourceRequirements(parallelism, original));
+        live.put(source, new JustinVertexResourceRequirements(parallelism, original, original));
+        live.put(stateful, new JustinVertexResourceRequirements(parallelism, original, original));
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
                     @Override
@@ -237,7 +365,7 @@ public class ScalingExecutorTest {
                 .containsExactlyInAnyOrderEntriesOf(Map.of(source, 1, stateful, 1));
         assertThat(history).isEmpty();
 
-        live.put(stateful, new JustinVertexResourceRequirements(parallelism, expected));
+        live.put(stateful, new JustinVertexResourceRequirements(parallelism, expected, expected));
         assertFalse(
                 scalingExecutor.scaleResource(
                         context,
@@ -279,6 +407,7 @@ public class ScalingExecutorTest {
                                 vertex,
                                 new JustinVertexResourceRequirements(
                                         new JustinVertexResourceRequirements.Parallelism(1, 1),
+                                        original,
                                         original));
                     }
 

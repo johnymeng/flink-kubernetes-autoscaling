@@ -52,9 +52,10 @@ public class A4SAggregatedMetricsResponseBodyTest
     @Override
     protected void assertOriginalEqualsToUnmarshalled(
             A4SAggregatedMetricsResponseBody expected, A4SAggregatedMetricsResponseBody actual) {
-        assertThat(actual.getScaledMrc().getPoints(), hasSize(2));
-        assertThat(actual.getScaledMrc().getPoints().get(1).getCacheSizeBytes(), equalTo(1048576L));
-        assertThat(actual.getScaledMrc().getPoints().get(1).getMissRate(), equalTo(0.2));
+        var points = actual.getCurve().orElseThrow().getPoints();
+        assertThat(points, hasSize(2));
+        assertThat(points.get(1).getCacheSizeBytes(), equalTo(1048576L));
+        assertThat(points.get(1).getMissRate(), equalTo(0.2));
     }
 
     @Test

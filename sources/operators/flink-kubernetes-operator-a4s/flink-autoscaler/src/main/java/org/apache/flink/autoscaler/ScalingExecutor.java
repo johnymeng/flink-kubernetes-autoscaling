@@ -34,6 +34,7 @@ import org.apache.flink.autoscaler.utils.CalendarUtils;
 import org.apache.flink.autoscaler.utils.ResourceCheckUtils;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
+import org.apache.flink.autoscaler.utils.justin.ResourceProfileParser;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
@@ -41,7 +42,6 @@ import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
-import org.apache.flink.runtime.rest.messages.JobMessageParameters;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -143,7 +143,19 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 for (var entry : evaluatedMetrics.getVertexMetrics().entrySet()) {
                     var id = entry.getKey();
                     var metrics = entry.getValue();
-                    var currentProfile = currentRequirements.get(id).getResourceProfile();
+                    var current = currentRequirements.get(id);
+                    var currentProfile =
+                            current == null ? null : current.getAppliedResourceProfile();
+                    if (currentProfile == null
+                            || currentProfile.equals(ResourceProfile.UNKNOWN)
+                            || currentProfile.equals(ResourceProfile.ANY)
+                            || !currentProfile.equals(
+                                    ResourceProfileParser.parse(currentProfile.toString()))) {
+                        LOG.warn(
+                                "A4S: Deferring rescale because the applied resource profile for vertex {} cannot be preserved",
+                                id);
+                        return false;
+                    }
                     var profile = currentProfile;
                     var decision = decisions.get(id);
                     if (decision != null && !excluded.contains(id.toHexString())) {
@@ -265,13 +277,12 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     @VisibleForTesting
     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(Context context)
             throws Exception {
-        var parameters = new JobMessageParameters();
+        var headers = JustinResourceRequirementsHeaders.INSTANCE;
+        var parameters = headers.getUnresolvedMessageParameters();
         parameters.jobPathParameter.resolve(context.getJobID());
+        parameters.includeAppliedProfile.resolve(Collections.singletonList(true));
         try (var client = context.getRestClusterClient()) {
-            return client.sendRequest(
-                            new JustinResourceRequirementsHeaders(),
-                            parameters,
-                            EmptyRequestBody.getInstance())
+            return client.sendRequest(headers, parameters, EmptyRequestBody.getInstance())
                     .get(
                             context.getConfiguration().get(FLINK_CLIENT_TIMEOUT).toMillis(),
                             TimeUnit.MILLISECONDS)
