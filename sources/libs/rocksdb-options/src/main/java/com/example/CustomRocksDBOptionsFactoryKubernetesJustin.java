@@ -209,9 +209,11 @@ public class CustomRocksDBOptionsFactoryKubernetesJustin implements RocksDBOptio
     @Override
     public ReadOptions createReadOptions(
             ReadOptions currentOptions, Collection<AutoCloseable> handlesToClose) {
+        // Flink's timer queues scan across extractor prefixes when refilling their caches.
+        // Restricting those scans to the initial prefix can leave timers unfired.
         return currentOptions
-                .setPrefixSameAsStart(true)
-                .setTotalOrderSeek(false);
+                .setPrefixSameAsStart(false)
+                .setTotalOrderSeek(true);
     }
 
     private static BlockBasedTableConfig resolveBlockBasedTableConfig(ColumnFamilyOptions currentOptions) {

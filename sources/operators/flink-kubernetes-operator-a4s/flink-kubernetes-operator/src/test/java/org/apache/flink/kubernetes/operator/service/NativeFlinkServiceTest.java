@@ -19,8 +19,11 @@ package org.apache.flink.kubernetes.operator.service;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirements;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsUpdateHeaders;
+import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
@@ -536,18 +539,19 @@ public class NativeFlinkServiceTest {
                         .setNetworkMemory(new MemorySize(1048577))
                         .build();
         var current =
-                new JobResourceRequirements(
+                new JustinResourceRequirements(
                         Map.of(
                                 vertex,
-                                new JobVertexResourceRequirements(
-                                        new JobVertexResourceRequirements.Parallelism(1, 1))));
+                                new JustinVertexResourceRequirements(
+                                        new JustinVertexResourceRequirements.Parallelism(1, 1),
+                                        ResourceProfile.ZERO)));
         var updated = new CompletableFuture<JustinResourceRequirementsBody>();
         testingClusterClient.setRequestProcessor(
                 (h, p, r) -> {
                     assertEquals(jobId, ((JobMessageParameters) p).jobPathParameter.getValue());
-                    if (h instanceof JobResourceRequirementsHeaders) {
+                    if (h instanceof JustinResourceRequirementsHeaders) {
                         return CompletableFuture.completedFuture(
-                                new JobResourceRequirementsBody(current));
+                                new JustinResourceRequirementsBody(current));
                     }
                     assertTrue(h instanceof JustinResourceRequirementsUpdateHeaders);
                     updated.complete((JustinResourceRequirementsBody) r);

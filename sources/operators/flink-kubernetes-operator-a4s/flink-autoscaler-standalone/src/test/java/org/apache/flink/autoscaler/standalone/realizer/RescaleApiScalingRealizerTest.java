@@ -74,6 +74,20 @@ import static org.junit.jupiter.api.Assertions.fail;
 /** Test for {@link RescaleApiScalingRealizer}. */
 class RescaleApiScalingRealizerTest {
 
+    @Test
+    void testResourceProfilePreservesExactMemorySizes() {
+        var profile =
+                ResourceProfile.newBuilder()
+                        .setCpuCores(.25)
+                        .setTaskHeapMemory(new MemorySize(67108865))
+                        .setTaskOffHeapMemory(new MemorySize(4096))
+                        .setManagedMemoryMB(2048)
+                        .setNetworkMemory(new MemorySize(15728641))
+                        .build();
+        assertThat(RescaleApiScalingRealizer.parseResourceProfile(profile.toString()))
+                .isEqualTo(profile);
+    }
+
     /**
      * Test whether scalingRealizer behaves as expected when the resource is changed or isn't
      * changed.

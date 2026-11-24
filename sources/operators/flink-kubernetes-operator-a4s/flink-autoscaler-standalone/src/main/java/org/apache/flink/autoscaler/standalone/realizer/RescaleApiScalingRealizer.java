@@ -204,7 +204,9 @@ public class RescaleApiScalingRealizer<KEY, Context extends JobAutoScalerContext
 
                 // We have an override for the vertex
                 var p = Integer.parseInt(overrideParallelism);
-                var newParallelism = new JustinVertexResourceRequirements.Parallelism(1, p);
+                var newParallelism =
+                        new JustinVertexResourceRequirements.Parallelism(
+                                Math.min(p, parallelism.getLowerBound()), p);
                 var newResourceProfile = parseResourceProfile(overrideResourceProfile);
 
                 // If the requirements changed we mark this as scaling triggered

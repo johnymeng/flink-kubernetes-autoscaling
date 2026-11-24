@@ -91,9 +91,12 @@ public class TimerGauge implements Gauge<Long>, View {
 
     public synchronized void markEnd() {
         if (currentMeasurementStartTS != 0) {
-            long currentMeasurement = clock.absoluteTimeMillis() - currentMeasurementStartTS;
-            currentCount += currentMeasurement;
-            accumulatedCount += currentMeasurement;
+            long now = clock.absoluteTimeMillis();
+            long currentMeasurement = now - currentMeasurementStartTS;
+            // update() already accounted for the interval before currentUpdateTS.
+            long unreportedDuration = now - currentUpdateTS;
+            currentCount += unreportedDuration;
+            accumulatedCount += unreportedDuration;
             currentMaxSingleMeasurement = Math.max(currentMaxSingleMeasurement, currentMeasurement);
             currentUpdateTS = 0;
             currentMeasurementStartTS = 0;

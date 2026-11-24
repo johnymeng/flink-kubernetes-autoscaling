@@ -121,7 +121,8 @@ public class JustinVertexResourceRequirements {
             return false;
         }
         final JustinVertexResourceRequirements that = (JustinVertexResourceRequirements) o;
-        return parallelism.equals(that.parallelism);
+        return parallelism.equals(that.parallelism)
+                && Objects.equals(resourceProfile, that.resourceProfile);
     }
 
     @Override

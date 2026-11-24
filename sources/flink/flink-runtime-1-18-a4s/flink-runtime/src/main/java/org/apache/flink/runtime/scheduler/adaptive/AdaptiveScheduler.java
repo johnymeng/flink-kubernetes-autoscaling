@@ -47,6 +47,7 @@ import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.client.JobExecutionException;
+import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptorFactory;
@@ -1378,31 +1379,24 @@ public class AdaptiveScheduler
     private ExecutionGraph assignSlotsToExecutionGraph(
             ExecutionGraph executionGraph, ReservedSlots reservedSlots) {
         for (ExecutionVertex executionVertex : executionGraph.getAllExecutionVertices()) {
-            boolean assigned = false;
-            do {
-                try {
-                    final LogicalSlot assignedSlot =
-                            reservedSlots.getSlotFor(executionVertex.getID());
-                    final CompletableFuture<Void> registrationFuture =
-                            executionVertex
-                                    .getCurrentExecutionAttempt()
-                                    .registerProducedPartitions(
-                                            assignedSlot.getTaskManagerLocation());
-                    Preconditions.checkState(
-                            registrationFuture.isDone(),
-                            "Partition registration must be completed immediately for reactive mode");
+            try {
+                final LogicalSlot assignedSlot = reservedSlots.getSlotFor(executionVertex.getID());
+                final CompletableFuture<Void> registrationFuture =
+                        executionVertex
+                                .getCurrentExecutionAttempt()
+                                .registerProducedPartitions(assignedSlot.getTaskManagerLocation());
+                Preconditions.checkState(
+                        registrationFuture.isDone(),
+                        "Partition registration must be completed immediately for reactive mode");
 
-                    executionVertex.tryAssignResource(assignedSlot);
-                    assigned = true;
-                } catch (Exception e) {
-                    LOG.error(e.getMessage());
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException ignored) {
-
-                    }
-                }
-            } while (!assigned);
+                executionVertex.tryAssignResource(assignedSlot);
+            } catch (Exception e) {
+                LOG.error(
+                        "Failed to assign a reserved slot to execution vertex {}.",
+                        executionVertex.getID(),
+                        e);
+                ExceptionUtils.rethrow(e);
+            }
         }
 
         return executionGraph;
