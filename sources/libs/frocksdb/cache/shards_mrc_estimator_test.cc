@@ -190,12 +190,51 @@ TEST(ShardsMrcEstimatorTest, CapEvictsLeastRecentlyUsed) {
   ASSERT_EQ(s[ShardsMrcEstimator::kTrackedEntries], 0U);
   ASSERT_EQ(s[ShardsMrcEstimator::kEvictedByCap], 6U);
 
-  // The scaled charge is bounded: at R = 0.5 only 15 sampled bytes fit.
+  // At R = 0.5 the second block contributes 20 bytes to the oldest block's
+  // hit size, so exactly two 10-byte blocks fit at the 30-byte cap.
   ShardsMrcEstimator half(0.5, 0, 1, 30);
   for (int i = 0; i < 1000; ++i) {
     half.Access("block-" + std::to_string(i), 10);
-    ASSERT_LE(half.Snapshot()[ShardsMrcEstimator::kTrackedBytes], 15U);
+    ASSERT_LE(half.Snapshot()[ShardsMrcEstimator::kTrackedBytes], 20U);
   }
+}
+
+TEST(ShardsMrcEstimatorTest, SampleCapScalesOnlyNewerBlocks) {
+  std::vector<std::string> keys;
+  for (int i = 0; keys.size() < 3; ++i) {
+    std::string key = "block-" + std::to_string(i);
+    if (GetSliceNPHash64(key, 0) <= std::numeric_limits<uint64_t>::max() / 2) {
+      keys.push_back(std::move(key));
+    }
+  }
+
+  ShardsMrcEstimator repeated(0.5, 0, 1, 8);
+  repeated.Access(keys[0], 5);
+  repeated.Access(keys[0], 5);
+  auto snapshot = repeated.Snapshot();
+  ASSERT_EQ(BinCounts(snapshot)[4], 1U);
+  ASSERT_EQ(BinCounts(snapshot)[8], 1U);
+  ASSERT_EQ(snapshot[ShardsMrcEstimator::kEvictedByCap], 0U);
+
+  ShardsMrcEstimator mixed(0.5, 0, 1, 8);
+  mixed.Access(keys[0], 6);
+  mixed.Access(keys[1], 1);
+  ASSERT_EQ(mixed.Snapshot()[ShardsMrcEstimator::kTrackedEntries], 2U);
+  mixed.Access(keys[0], 6);  // A hits at exactly 6 + 1 / 0.5 = 8 bytes.
+  ASSERT_EQ(BinCounts(mixed.Snapshot())[7], 1U);
+  mixed.Access(keys[2], 2);  // A now needs 6 + 2 / 0.5 = 10 bytes.
+  snapshot = mixed.Snapshot();
+  ASSERT_EQ(snapshot[ShardsMrcEstimator::kTrackedEntries], 1U);
+  ASSERT_EQ(snapshot[ShardsMrcEstimator::kTrackedBytes], 2U);
+  ASSERT_EQ(snapshot[ShardsMrcEstimator::kEvictedByCap], 2U);
+}
+
+TEST(ShardsMrcEstimatorTest, PartialFinalBinStopsAtCap) {
+  ShardsMrcEstimator estimator(1.0, 0, 3, 8);
+  estimator.Access("block", 8);
+  estimator.Access("block", 8);
+  estimator.Access("block", 9);
+  EXPECT_EQ(BinCounts(estimator.Snapshot()), (std::vector<uint64_t>{0, 0, 1, 2}));
 }
 
 TEST(ShardsMrcEstimatorTest, CountersAreMonotonicAndNotResetByReads) {

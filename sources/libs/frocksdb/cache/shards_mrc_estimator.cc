@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -17,6 +18,25 @@ constexpr uint64_t kMinSlots = 1024;
 
 uint64_t ShardsMrcEstimator::BinOf(uint64_t distance, uint64_t bin_bytes) {
   return distance == 0 ? 0 : (distance - 1) / bin_bytes;
+}
+
+uint64_t ShardsMrcEstimator::HitBin(uint64_t newer, uint64_t charge) const {
+  if (charge > max_distance_bytes_) {
+    return num_bins_;
+  }
+  uint64_t newer_bytes = newer;
+  if (sampling_rate_ < 1.0) {
+    const double scaled = static_cast<double>(newer) / sampling_rate_;
+    // The conversion truncates to bytes. Check the range before converting.
+    if (scaled >= std::ldexp(1.0, std::numeric_limits<uint64_t>::digits)) {
+      return num_bins_;
+    }
+    newer_bytes = static_cast<uint64_t>(scaled);
+  }
+  if (newer_bytes > max_distance_bytes_ - charge) {
+    return num_bins_;
+  }
+  return BinOf(newer_bytes + charge, bin_bytes_);
 }
 
 ShardsMrcEstimator::ShardsMrcEstimator(double sampling_rate, uint64_t hash_seed,
@@ -58,10 +78,7 @@ void ShardsMrcEstimator::Access(const Slice& block_key, uint64_t charge) {
     // bytes. Blocks accessed since its last access (the slots after its slot)
     // are a 1/R sample, so scale them; its own charge is exact.
     const uint64_t newer = tracked_bytes_ - FenwickPrefix(it->second);
-    const uint64_t distance =
-        static_cast<uint64_t>(static_cast<double>(newer) / sampling_rate_) +
-        charge;
-    ++histogram_[std::min(BinOf(distance, bin_bytes_), num_bins_)];
+    ++histogram_[HitBin(newer, charge)];
     RemoveSlot(it->second);
   }
 
@@ -75,10 +92,13 @@ void ShardsMrcEstimator::Access(const Slice& block_key, uint64_t charge) {
   FenwickAdd(slot, charge);
   tracked_bytes_ += charge;
 
-  while (static_cast<double>(tracked_bytes_) / sampling_rate_ >
-         static_cast<double>(max_distance_bytes_)) {
+  while (!blocks_.empty()) {
     while (slot_block_[oldest_slot_] == nullptr) {
       ++oldest_slot_;
+    }
+    const uint64_t oldest_charge = slot_charge_[oldest_slot_];
+    if (HitBin(tracked_bytes_ - oldest_charge, oldest_charge) != num_bins_) {
+      break;
     }
     KeyMap::value_type* victim = slot_block_[oldest_slot_];
     RemoveSlot(oldest_slot_);
