@@ -3,6 +3,57 @@
 For the current five-terminal operator runbook, see
 [`instruction.md`](instruction.md).
 
+## Continuous-input Q8 on main
+
+The `continuous` profile runs the same Nexmark `q8_unique` Kafka job with
+DS2 (parallelism), Justin (parallelism and memory), or A4S. Each policy
+uses the active main Flink and operator source trees, a 12-core and 9 GiB
+TaskManager budget, and periodic checkpoints. Kafka keeps accepting events
+through a resize. In the standard mixed Nexmark stream, Q8 consumes people
+and auctions, or 8% of generated events.
+
+From the repository root in a fresh shell, select the profile before
+rendering. Use the same built images for all three policies. The default
+tag includes the checkout's commit. To reuse images, set
+`FLINK_RUNTIME_IMAGE_TAG`, `FLINK_BENCHMARK_IMAGE_TAG`, and
+`OPERATOR_IMAGE_TAG` before sourcing the environment.
+
+```bash
+export EXPERIMENT_PROFILE=continuous QUERY=q8 POLICY=justin RUN_ID=q8-justin-01
+source experiments/1729-checkpoint-aware-rescaling/run-env.sh
+experiments/1729-checkpoint-aware-rescaling/render-job.sh
+```
+
+The Flink image needs the project's FRocksDB JNI library. For image
+builds, use `images/flink-runtime-a4s/build.sh --local-image "${FLINK_RUNTIME_LOCAL}"`
+and layer the benchmark image over that runtime. The operator Dockerfile
+uses the matching runtime source as a named Docker build context
+(`--build-context "flink-src=${FLINK_RUNTIME_SOURCE}"`). Deploy that
+operator in the benchmark namespace before applying the rendered job.
+
+The job expects the shared Flink state volume and the Kafka service from
+the lab setup. Set `KAFKA_BOOTSTRAP` before rendering for a different broker.
+Once the consumer is running, start the standalone producer once and let it
+continue through every resize.
+
+```bash
+kubectl apply -f "${RENDERED_MANIFEST}"
+# Once the job has reached RUNNING
+experiments/1724-kafka-q20-unique/external-kafka/run/manage-standalone-producer.sh start
+```
+
+Give each policy a fresh, equivalent input stream and its own `RUN_ID`.
+Render the next run with `POLICY=ds2` or `POLICY=a4s`.
+
+Record the offered input, per-topic Kafka end and consumer offsets,
+completed checkpoints, and realized TaskManager resources. Only the
+person and auction topics contribute to Q8 lag. A task reaching
+`RUNNING` and the consumer catching up are separate timestamps.
+The standard query uses a blackhole sink. Use a result-checking sink
+whenever the experiment needs to verify recovery correctness.
+
+## Checkpoint-gated runs
+
 This experiment preserves the standalone producer container and Kafka topics
 while each A4S, Justin, or DS2 rescale is gated by a fresh completed Flink
 checkpoint. A transaction-aware controller pauses generation before the

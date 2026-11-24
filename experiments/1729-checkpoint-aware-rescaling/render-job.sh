@@ -15,16 +15,18 @@ if [[ "${EXPERIMENT_PROFILE}" == "normalized" ]]; then
     echo "S3_BUCKET must be a valid bucket name for the normalized profile" >&2
     exit 1
   fi
-  if [[ ! "${KAFKA_BOOTSTRAP:-}" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]]; then
-    echo "KAFKA_BOOTSTRAP must be a host:port value" >&2
-    exit 1
-  fi
   if [[ ! "${FLINK_BENCHMARK_IMAGE}" =~ \.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/ ]]; then
     echo "FLINK_BENCHMARK_IMAGE must point to ECR for the normalized profile" >&2
     exit 1
   fi
+elif [[ "${EXPERIMENT_PROFILE}" == continuous ]]; then
+  SOURCE_MANIFEST="${SCRIPT_DIR}/jobs-continuous/q8.yaml"
 else
   SOURCE_MANIFEST="${SCRIPT_DIR}/jobs/${QUERY}/${POLICY}/experiment.yaml"
+fi
+if [[ "${EXPERIMENT_PROFILE}" != paper && ! "${KAFKA_BOOTSTRAP:-}" =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]]; then
+  echo "KAFKA_BOOTSTRAP must be a host:port value" >&2
+  exit 1
 fi
 OUTPUT="${1:-${RENDERED_MANIFEST}}"
 
@@ -37,7 +39,17 @@ mkdir -p "$(dirname "${OUTPUT}")"
 TEMP_OUTPUT="$(mktemp "${OUTPUT}.tmp.XXXXXX")"
 trap 'rm -f "${TEMP_OUTPUT}"' EXIT
 
+justin_enabled=false
+a4s_enabled=false
+case "${POLICY}" in
+  justin) justin_enabled=true ;;
+  a4s) justin_enabled=true; a4s_enabled=true ;;
+esac
+
 sed \
+  -e "s|__POLICY__|${POLICY}|g" \
+  -e "s|__JUSTIN_ENABLED__|${justin_enabled}|g" \
+  -e "s|__A4S_ENABLED__|${a4s_enabled}|g" \
   -e "s|__RUN_ID__|${RUN_ID}|g" \
   -e "s|__FLINK_BENCHMARK_IMAGE__|${FLINK_BENCHMARK_IMAGE}|g" \
   -e "s|__S3_BUCKET__|${S3_BUCKET:-}|g" \

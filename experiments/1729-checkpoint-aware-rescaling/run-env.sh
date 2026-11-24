@@ -11,6 +11,14 @@ export POLICY="${POLICY:-justin}"
 export EXPERIMENT_PROFILE="${EXPERIMENT_PROFILE:-paper}"
 
 case "${EXPERIMENT_PROFILE}:${QUERY}" in
+  continuous:q8)
+    export TPS="${TPS:-80000}"
+    # Q8 reads people and auctions (1 + 3 of each 50 mixed Nexmark events).
+    export SOURCE_EVENT_SHARE=0.08
+    export CHECKPOINT_RESCALE=false
+    export CHECKPOINT_INTERVAL="${CHECKPOINT_INTERVAL:-10s}"
+    export KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-kafka-external:9092}"
+    ;;
   paper:q4|paper:q9)
     export TPS=40000
     export SOURCE_EVENT_SHARE=0.98
@@ -36,7 +44,7 @@ case "${EXPERIMENT_PROFILE}:${QUERY}" in
     export SOURCE_EVENT_SHARE=0.92
     ;;
   *)
-    echo "EXPERIMENT_PROFILE must be paper or normalized, and QUERY must be q4, q9, q18, q19, or q20" >&2
+    echo "Use paper or normalized with q4/q9/q18/q19/q20, or continuous with q8" >&2
     return 1 2>/dev/null || exit 1
     ;;
 esac
@@ -94,17 +102,29 @@ if [[ "${EXPERIMENT_PROFILE}" == "normalized" ]]; then
   export EXPECTED_JOB_NAME="${QUERY}_unique-normalized-checkpoint-aware-${POLICY}-${RUN_ID}"
 else
   export RUN_STORAGE_ROOT="/mnt/experiments/autoscaling-experiments/flink-state/runs/${RUN_ID}"
-  export EXPECTED_JOB_NAME="${QUERY}_unique-checkpoint-aware-${POLICY}-${RUN_ID}"
+  if [[ "${EXPERIMENT_PROFILE}" == continuous ]]; then
+    export EXPECTED_JOB_NAME="q8_unique-continuous-${POLICY}-${RUN_ID}"
+  else
+    export EXPECTED_JOB_NAME="${QUERY}_unique-checkpoint-aware-${POLICY}-${RUN_ID}"
+  fi
 fi
 export RENDERED_MANIFEST="/tmp/${QUERY}-${EXPERIMENT_PROFILE}-checkpoint-aware-${RUN_ID}.yaml"
 export RUN_RESULTS_DIR="experiments/1729-checkpoint-aware-rescaling/results/${RUN_ID}"
 
 # One image set runs all three policies; each job's manifest selects the policy.
 # Set the three tags to benchmark-checkpoint-rescale to reuse the older DS2/Justin images.
-export FLINK_RUNTIME_IMAGE_TAG="${FLINK_RUNTIME_IMAGE_TAG:-a4s-shards-mrc}"
-export FLINK_BENCHMARK_IMAGE_TAG="${FLINK_BENCHMARK_IMAGE_TAG:-a4s-shards-mrc}"
-export OPERATOR_IMAGE_TAG="${OPERATOR_IMAGE_TAG:-a4s-shards-mrc}"
-export OPERATOR_SOURCE_DIR="sources/operators/flink-kubernetes-operator-justin"
+if [[ "${EXPERIMENT_PROFILE}" == continuous ]]; then
+  checkpoint_default_tag="q8-$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --short HEAD)"
+  export FLINK_RUNTIME_SOURCE_DIR="sources/flink/flink-runtime-1-18-a4s"
+  export OPERATOR_SOURCE_DIR="sources/operators/flink-kubernetes-operator-a4s"
+else
+  checkpoint_default_tag=a4s-shards-mrc
+  export OPERATOR_SOURCE_DIR="sources/operators/flink-kubernetes-operator-justin"
+fi
+export FLINK_RUNTIME_IMAGE_TAG="${FLINK_RUNTIME_IMAGE_TAG:-${checkpoint_default_tag}}"
+export FLINK_BENCHMARK_IMAGE_TAG="${FLINK_BENCHMARK_IMAGE_TAG:-${checkpoint_default_tag}}"
+export OPERATOR_IMAGE_TAG="${OPERATOR_IMAGE_TAG:-${checkpoint_default_tag}}"
+unset checkpoint_default_tag
 
 # shellcheck source=scripts/env.sh
 source scripts/env.sh
