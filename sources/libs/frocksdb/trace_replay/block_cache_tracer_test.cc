@@ -186,6 +186,22 @@ TEST_F(BlockCacheTracerTest, ShardsR1MatchesTwoBlockLRU) {
   ASSERT_OK(env_->DeleteFile(trace_file_path_ + ".txt"));
 }
 
+TEST(ShardsMRCTest, NoInsertMissesDoNotWarmSmallerCaches) {
+  ShardsMRC mrc(1.0, 3, 1);
+  mrc.ProcessAccess("cold", true);
+  mrc.ProcessAccess("cold", true);
+  mrc.ProcessAccess("a");
+  mrc.ProcessAccess("b");
+  mrc.ProcessAccess("a", true);
+  mrc.ProcessAccess("a", true);  // Still a miss in a one-block cache.
+  mrc.ProcessAccess("a");        // Can now admit a at every size.
+  mrc.ProcessAccess("a", true);
+  ASSERT_EQ(mrc.num_entries_processed(), 8U);
+  const std::string histogram = mrc.GetHistogramJSON();
+  ASSERT_NE(histogram.find("\"histogram\":[1,3,0,4]"), std::string::npos)
+      << histogram;
+}
+
 TEST_F(BlockCacheTracerTest, ShardsHashSeedChangesSample) {
   constexpr uint64_t seed = 0x9e3779b97f4a7c15ULL;
   const uint64_t threshold = static_cast<uint64_t>(

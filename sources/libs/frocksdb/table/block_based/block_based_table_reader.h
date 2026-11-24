@@ -267,8 +267,8 @@ class BlockBasedTable : public TableReader {
   // Called next to BlockCacheTracer::WriteBlockAccess so that the estimator
   // sees exactly the accesses a block cache trace records.
   void RecordShardsMrcAccess(TraceType block_type, TableReaderCaller caller,
-                             const Slice& block_key,
-                             uint64_t block_size) const;
+                             const Slice& block_key, uint64_t block_size,
+                             bool no_insert) const;
 
   void UpdateCacheHitMetrics(BlockType block_type, GetContext* get_context,
                              size_t usage) const;

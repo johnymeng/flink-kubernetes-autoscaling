@@ -102,7 +102,8 @@ int ReplayEstimator(int argc, char** argv) {
   uint64_t total = 0;
   int rc = ForEachUserDataBlockAccess(
       argv[2], &total, [&](const BlockCacheTraceRecord& record) {
-        estimator.Access(record.block_key, record.block_size);
+        estimator.Access(record.block_key, record.block_size,
+                         record.no_insert == Boolean::kTrue);
         return true;
       });
   if (rc != 0) {
@@ -158,7 +159,7 @@ int Replay(int argc, char** argv) {
       argv[1], &total, [&](const BlockCacheTraceRecord& record) {
         ++eligible;
         block_bytes += record.block_size;
-        mrc.ProcessAccess(record.block_key);
+        mrc.ProcessAccess(record.block_key, record.no_insert == Boolean::kTrue);
         if (snapshot_every != 0 && eligible % snapshot_every == 0 &&
             !mrc.DumpMRC(std::string(argv[2]) + "." +
                          std::to_string(eligible / snapshot_every))) {

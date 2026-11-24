@@ -228,11 +228,12 @@ ShardsMrcEstimator* BlockBasedTable::GetShardsMrcEstimator() const {
 void BlockBasedTable::RecordShardsMrcAccess(TraceType block_type,
                                             TableReaderCaller caller,
                                             const Slice& block_key,
-                                            uint64_t block_size) const {
+                                            uint64_t block_size,
+                                            bool no_insert) const {
   ShardsMrcEstimator* estimator = GetShardsMrcEstimator();
   if (estimator != nullptr &&
       BlockCacheTraceHelper::IsUserDataBlockAccess(block_type, caller)) {
-    estimator->Access(block_key, block_size);
+    estimator->Access(block_key, block_size, no_insert);
   }
 }
 
@@ -1608,7 +1609,7 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
           /*block_size=*/usage, /*block_key=*/key.ToString(), nkeys);
     } else {
       RecordShardsMrcAccess(trace_block_type, lookup_context->caller, key,
-                            usage);
+                            usage, no_insert);
       if (tracing_enabled) {
         // Avoid making copy of block_key and cf_name when constructing the
         // access record.
@@ -2445,7 +2446,8 @@ Status BlockBasedTable::Get(const ReadOptions& read_options, const Slice& key,
       RecordShardsMrcAccess(lookup_data_block_context.block_type,
                             lookup_data_block_context.caller,
                             lookup_data_block_context.block_key,
-                            lookup_data_block_context.block_size);
+                            lookup_data_block_context.block_size,
+                            lookup_data_block_context.no_insert);
       // Write the block cache access record.
       if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
         // Avoid making copy of block_key, cf_name, and referenced_key when
@@ -2787,7 +2789,8 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
         RecordShardsMrcAccess(lookup_data_block_context.block_type,
                               lookup_data_block_context.caller,
                               lookup_data_block_context.block_key,
-                              lookup_data_block_context.block_size);
+                              lookup_data_block_context.block_size,
+                              lookup_data_block_context.no_insert);
         // Write the block cache access.
         if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
           // Avoid making copy of block_key, cf_name, and referenced_key when

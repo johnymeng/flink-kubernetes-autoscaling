@@ -18,11 +18,15 @@ namespace ROCKSDB_NAMESPACE {
 // spatial sampling as the offline ShardsMRC. For a re-access of a sampled
 // block, the distance is the sum of the charges of the distinct sampled blocks
 // accessed since its previous access, divided by sampling_rate, plus its own
-// charge: the smallest byte-LRU cache in which the access hits. Bin i counts
-// distances in (i * bin_bytes, (i + 1) * bin_bytes], i.e. accesses that hit in
+// charge. With ordinary cache fills this estimates the smallest byte-LRU cache
+// in which the access hits. Bin i counts distances in
+// (i * bin_bytes, (i + 1) * bin_bytes], i.e. accesses that hit in
 // a cache of (i + 1) * bin_bytes bytes, with the final bin limited to
 // max_distance_bytes. One infinite bin follows. It holds first accesses,
 // re-accesses of blocks evicted by the bound, and distances beyond the cap.
+// Lookup-only reads leave cold blocks out. A modeled hit refreshes the block
+// in the shared recency order. Smaller caches can have a different order if
+// they missed that lookup, so their hit counts remain approximate.
 //
 // The sample set is bounded by dropping the least recently used sampled
 // block while its estimated hit size exceeds max_distance_bytes. Each drop
@@ -55,6 +59,9 @@ class ShardsMrcEstimator {
   ShardsMrcEstimator& operator=(const ShardsMrcEstimator&) = delete;
 
   void Access(const Slice& block_key, uint64_t charge);
+  // A lookup that cannot insert still counts as a reference. It can refresh
+  // an already tracked block, using the charge from its admission.
+  void Access(const Slice& block_key, uint64_t charge, bool no_insert);
 
   // Header (see SnapshotField) followed by num_bins() + 1 histogram counts.
   std::vector<uint64_t> Snapshot() const;
@@ -65,9 +72,16 @@ class ShardsMrcEstimator {
   static uint64_t BinOf(uint64_t distance, uint64_t bin_bytes);
 
  private:
-  using KeyMap = std::unordered_map<std::string, uint64_t>;  // key -> slot
+  struct TrackedBlock {
+    uint64_t slot = 0;
+    // A lookup-only hit cannot warm a cache too small for that hit. Keep
+    // its minimum hit bin until an insertion-permitting access to the block.
+    uint64_t min_hit_bin = 0;
+  };
+  using KeyMap = std::unordered_map<std::string, TrackedBlock>;
 
   uint64_t HitBin(uint64_t newer, uint64_t charge) const;
+  void RecordSample(const Slice& block_key, uint64_t charge, bool no_insert);
 
   // Fenwick tree over access slots in recency order; a slot holds the charge
   // of the block whose most recent access it is.

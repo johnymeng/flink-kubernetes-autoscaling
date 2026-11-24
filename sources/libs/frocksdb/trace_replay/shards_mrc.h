@@ -39,8 +39,9 @@ class ShardsMRC {
   ShardsMRC(const ShardsMRC&) = delete;
   ShardsMRC& operator=(const ShardsMRC&) = delete;
 
-  // Process one block cache access. block_key is the unique block identifier.
   void ProcessAccess(const Slice& block_key);
+  // A no-insert lookup can refresh an admitted block but cannot admit one.
+  void ProcessAccess(const Slice& block_key, bool no_insert);
 
   // Write MRC binary file in online_mrc format:
   //   header:  (num_bins: uint64, bin_size: uint64)
@@ -81,8 +82,11 @@ class ShardsMRC {
   uint64_t num_entries_seen_{0};
   uint64_t num_entries_processed_{0};
 
-  // Maps block_key -> last-seen timestamp (sampled blocks only).
-  std::unordered_map<std::string, uint64_t> last_seen_;
+  struct SampledBlock {
+    uint64_t timestamp;
+    uint64_t min_hit_bin;  // Lower bound inherited from lookup-only hits.
+  };
+  std::unordered_map<std::string, SampledBlock> last_seen_;
 
   // Ordered set of last-seen timestamps for O(log n) rank queries.
   OrderedSet timestamp_tree_;
