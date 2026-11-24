@@ -26,7 +26,8 @@ namespace ROCKSDB_NAMESPACE {
 // re-accesses of blocks evicted by the bound, and distances beyond the cap.
 // Lookup-only reads leave cold blocks out. A modeled hit refreshes the block
 // in the shared recency order. Smaller caches can have a different order if
-// they missed that lookup, so their hit counts remain approximate.
+// they missed that lookup. With mixed fills a smaller cache can even hit more
+// often. Use shards_trace_replay --capacities for independent per-size counts.
 //
 // The sample set is bounded by dropping the least recently used sampled
 // block while its estimated hit size exceeds max_distance_bytes. Each drop
