@@ -41,6 +41,8 @@ import javax.annotation.concurrent.GuardedBy;
 
 import java.io.Closeable;
 import java.math.BigInteger;
+import java.util.Map;
+import java.util.WeakHashMap;
 
 /**
  * A monitor which pulls {{@link RocksDB}} native metrics and forwards them to Flink's metric group.
@@ -66,6 +68,12 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     private Statistics statistics;
 
     @Nullable private final LRUCache lruCache;
+    private final boolean shardsEnabled;
+
+    // Values indicate whether more than one monitor has used a cache. Once shared,
+    // its cumulative histogram cannot be attributed to a single backend.
+    @GuardedBy("SHARDS_CACHE_OWNERSHIP")
+    private static final Map<LRUCache, Boolean> SHARDS_CACHE_OWNERSHIP = new WeakHashMap<>();
 
     public RocksDBNativeMetricMonitor(
             @Nonnull RocksDBNativeMetricOptions options,
@@ -79,8 +87,21 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         this.statistics = statistics;
         this.lruCache = (blockCache instanceof LRUCache) ? (LRUCache) blockCache : null;
         this.lock = new Object();
+        this.shardsEnabled = lruCache != null && lruCache.getShardsMrcHistogram().length > 0;
+        if (shardsEnabled) {
+            synchronized (SHARDS_CACHE_OWNERSHIP) {
+                SHARDS_CACHE_OWNERSHIP.put(
+                        lruCache, SHARDS_CACHE_OWNERSHIP.containsKey(lruCache));
+            }
+        }
         registerStatistics();
         registerStackDistanceHistogram();
+    }
+
+    private boolean isSharedShardsCache() {
+        synchronized (SHARDS_CACHE_OWNERSHIP) {
+            return Boolean.TRUE.equals(SHARDS_CACHE_OWNERSHIP.get(lruCache));
+        }
     }
 
     /** Register gauges to pull native metrics for the database. */
@@ -97,7 +118,9 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     /** Registers the stack distance histogram metric if enabled. */
     private void registerStackDistanceHistogram() {
         if (options.isStackDistanceHistogramEnabled()) {
-            LOG.info("Registering stack distance histogram metric for RocksDB.");
+            LOG.info(
+                    "Registering RocksDB stack distance histogram for {}.",
+                    shardsEnabled ? "SHARDS" : "QuickMRC");
             RocksDBStackDistanceHistogramView view =
                     new RocksDBStackDistanceHistogramView(lruCache);
             metricGroup.gauge("rocksdb.stack-distance-histogram", view);
@@ -264,15 +287,17 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             this.bucketSizeScaling = options.getStackDistanceHistogramBucketSizeScaling();
             this.cacheItemSizeBytes = options.getStackDistanceHistogramCacheItemSizeBytes();
             this.latestHistogram =
-                    new StackDistanceHistogram(
-                            new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
+                    shardsEnabled
+                            ? null
+                            : new StackDistanceHistogram(
+                                    new long[0], 0L, 1, bucketSizeScaling, cacheItemSizeBytes);
         }
 
         @Override
         public void update() {
             synchronized (lock) {
                 // A queued update can outlive the monitor and its native cache handle.
-                if (rocksDB == null || isClosed()) {
+                if (rocksDB == null || isClosed() || (shardsEnabled && isSharedShardsCache())) {
                     return;
                 }
                 if (viewLruCache == null) {
@@ -289,6 +314,12 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                     return;
                 }
                 try {
+                    if (shardsEnabled) {
+                        latestHistogram =
+                                StackDistanceHistogram.fromShardsMrcArray(
+                                        viewLruCache.getShardsMrcHistogram());
+                        return;
+                    }
                     long[] histogramCounts = viewLruCache.getStackDistanceHistogram();
                     viewLruCache.resetQuickMRCStats();
                     if (histogramCounts == null) {
@@ -337,7 +368,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                             1,
                             e.getMessage(),
                             e);
-                    latestHistogram = empty;
+                    latestHistogram = shardsEnabled ? null : empty;
                 }
             }
         }
@@ -346,6 +377,11 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         public String getValue() {
             StackDistanceHistogram histogram;
             synchronized (lock) {
+                if (shardsEnabled
+                        && (rocksDB == null || isClosed() || isSharedShardsCache()
+                                || latestHistogram == null)) {
+                    return "";
+                }
                 histogram = latestHistogram;
             }
             if (histogram == null) {

@@ -24,6 +24,11 @@ import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.configuration.MetricOptions;
+import org.apache.flink.runtime.execution.ExecutionState;
+import org.apache.flink.runtime.executiongraph.ArchivedExecution;
+import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
+import org.apache.flink.runtime.executiongraph.ArchivedExecutionJobVertex;
+import org.apache.flink.runtime.executiongraph.ArchivedExecutionVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.metrics.dump.MetricDump;
 import org.apache.flink.runtime.metrics.dump.QueryScopeInfo;
@@ -49,6 +54,7 @@ import org.mockito.MockitoAnnotations;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
@@ -57,6 +63,8 @@ import static org.hamcrest.Matchers.closeTo;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.Assert.assertFalse;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Tests for {@link A4SAggregatingVertexMetricsHandler}. */
 public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
@@ -123,6 +131,52 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                 pathParameters,
                 Collections.emptyMap(),
                 Collections.emptyList());
+    }
+
+    @Test
+    public void testShardsRequiresTheCurrentAttemptAndClipsFinalCacheSize() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        ArchivedExecutionVertex task = mock(ArchivedExecutionVertex.class);
+        ArchivedExecution attempt = mock(ArchivedExecution.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(1);
+        when(vertex.getTaskVertices()).thenReturn(new ArchivedExecutionVertex[] {task});
+        when(task.getExecutionState()).thenReturn(ExecutionState.RUNNING);
+        when(task.getCurrentExecutionAttempt()).thenReturn(attempt);
+        when(attempt.getAttemptNumber()).thenReturn(1);
+
+        String histogram =
+                StackDistanceHistogram.fromShardsMrcArray(
+                                new long[] {Double.doubleToRawLongBits(1.0), 7, 3, 8,
+                                    4, 4, 0, 0, 0, 0, 1, 0, 1, 2})
+                        .toMetricString();
+        putShardsHistogram(0, histogram);
+        HandlerRequest<EmptyRequestBody> request =
+                createRequest(jobId.toString(), jobVertexId.toString());
+        assertThat(
+                handler.handleRequest(request, restfulGateway).get().getMrcStatus(),
+                equalTo(Status.INCOMPLETE_HISTOGRAMS));
+
+        putShardsHistogram(1, histogram);
+        A4SAggregatedMetricsResponseBody response =
+                handler.handleRequest(request, restfulGateway).get();
+        assertThat(response.getMrcStatus(), equalTo(Status.AVAILABLE));
+        List<MissRateCurve.Point> points = response.getCurve().orElseThrow().getPoints();
+        assertThat(points, hasSize(3));
+        assertThat(points.get(2).getCacheSizeBytes(), equalTo(8L));
+        assertThat(points.get(2).getMissRate(), closeTo(0.5, 1e-9));
+    }
+
+    private void putShardsHistogram(int attempt, String histogram) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), 0, attempt, ""),
+                        "rocksdb_stack-distance-histogram",
+                        histogram));
     }
 
     @Test

@@ -92,6 +92,10 @@ public class MissRateCurve {
             return new MissRateCurve(Collections.emptyList());
         }
 
+        if (histogram.getShards() != null) {
+            return fromShardsHistogram(histogram, totalFrequency);
+        }
+
         List<Point> mrc = new ArrayList<>();
         long cumulativeFreqAtSize = 0L;
         long bucketSizeScaling = histogram.getBucketSizeScaling();
@@ -109,6 +113,31 @@ public class MissRateCurve {
             mrc.add(new Point(scaledCacheSizeBytes, missRate));
         }
 
+        return new MissRateCurve(mrc);
+    }
+
+    /**
+     * SHARDS (v2): bins 0..i are the sampled hits at per-task cache size (i + 1) * binBytes; the
+     * infinite bin counts as a miss at every size, so the denominator is all sampled references.
+     * The operator-level point is MRC_operator(m * P) = MRC_task(m), with P the vertex parallelism
+     * carried in {@code numPartitions}.
+     */
+    private static MissRateCurve fromShardsHistogram(
+            StackDistanceHistogram histogram, long sampledRefs) {
+        StackDistanceHistogram.ShardsHeader header = histogram.getShards();
+        long binBytes = header.getBinBytes();
+        int parallelism = histogram.getNumPartitions();
+        List<Point> mrc = new ArrayList<>(histogram.getNumBuckets());
+        long hits = 0L;
+        for (int i = 0; i < histogram.getNumBuckets(); i++) {
+            hits += histogram.getFrequency(i);
+            double missRate = 1.0 - (double) hits / sampledRefs;
+            long cacheSize =
+                    i + 1 == histogram.getNumBuckets()
+                            ? header.getMaxDistanceBytes()
+                            : Math.multiplyExact(i + 1L, binBytes);
+            mrc.add(new Point(Math.multiplyExact(cacheSize, parallelism), missRate));
+        }
         return new MissRateCurve(mrc);
     }
 

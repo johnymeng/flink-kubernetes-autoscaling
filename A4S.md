@@ -36,6 +36,26 @@ Flink Runtime changes expose A4S metrics over REST through the Job Manager. The 
 | `JustinResourceRequirementsUpdateHandler.java` | Accepts and validates Justin override updates from clients.                                                                    |
 | `AdaptiveScheduler.java`                       | Applies resource requirement updates through existing adaptive scheduling flow.                                                |
 
+## Choose the MRC estimator
+
+Build the A4S runtime image with the updated FRocksDB JNI JAR. Use
+`spec.flinkConfiguration` to choose the estimator for the Flink deployment.
+QuickMRC is the default and can also be selected explicitly with `quickmrc`.
+To select SHARDS, set the following options:
+
+```yaml
+state.backend.rocksdb.a4s.mrc-estimator: shards
+state.backend.rocksdb.memory.managed: "true"
+state.backend.rocksdb.metrics.stack-distance-histogram: "true"
+```
+
+The setting takes effect when the RocksDB cache is created. SHARDS disables the
+QuickMRC hook on that cache and defaults to 1% sampling, 1 MiB bins, and a 4 GiB
+maximum distance. Use one stateful backend per slot to attribute the histogram
+to its vertex. The first integration reports a cumulative curve for the cache
+lifetime. For the first comparison, set `job.autoscaler.scaling.enabled` to
+`"false"` and use the same fixed profile in both runs.
+
 ## FRocksDB 6.20.3
 
 FRocksDB provides the low-level histogram signal required by A4S. The branch depends on custom RocksDB JNI/native support so stack-distance metrics can be collected in task managers at the task slot level and surfaced to runtime metric collection.
@@ -50,7 +70,7 @@ FRocksDB provides the low-level histogram signal required by A4S. The branch dep
 ## End-to-End Flow
 
 1. A task manager collect stack-distance histogram metrics emitted from RocksDB from each of its task slots. This is stored in the task manager's memory. This happens periodically (on the order of seconds) without intervention
-2. The task manager resets stack-distance histogram metrics in RocksDB after fetching this batch.
+2. For QuickMRC, the TaskManager resets the histogram after each update. SHARDS snapshots accumulate for the cache lifetime.
 3. Histogram data is serialized and sent to the Job Manager via RPC when requested.
 4. Job Manager gathers subtask values for each operator vertex and merges them and generate scaled miss-rate curves.
 5. Miss-rate curve metrics are published via `GET /jobs/:jobid/vertices/:vertexid/a4s-metrics` at the vertex level.
