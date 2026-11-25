@@ -169,6 +169,12 @@ public class MetricDumpSerialization {
                             gaugesBuffer, entry.getValue().f0, entry.getValue().f1, entry.getKey());
                     numGauges++;
                 } catch (Exception e) {
+                    if (entry.getValue().f1.contains("stack-distance-histogram")) {
+                        LOG.warn(
+                                "QuickMRC histogram gauge serialization failed: name={}",
+                                entry.getValue().f1,
+                                e);
+                    }
                     LOG.debug("Failed to serialize gauge.", e);
                 }
             }
@@ -282,6 +288,21 @@ public class MetricDumpSerialization {
         if (stringValue == null) {
             throw new NullPointerException(
                     "toString() of the value returned by gauge " + name + " returned null.");
+        }
+
+        if (name.contains("stack-distance-histogram")) {
+            long encodedBytes = 0;
+            for (int i = 0; i < stringValue.length(); i++) {
+                int c = stringValue.charAt(i);
+                encodedBytes += c >= 1 && c <= 0x7f ? 1 : (c <= 0x7ff ? 2 : 3);
+            }
+            if (encodedBytes >= 60000) {
+                LOG.warn(
+                        "QuickMRC histogram gauge size: name={} chars={} modifiedUtfBytes={} limit=65535",
+                        name,
+                        stringValue.length(),
+                        encodedBytes);
+            }
         }
 
         serializeMetricInfo(out, info);
