@@ -17,6 +17,7 @@
 
 package org.apache.flink.autoscaler.state;
 
+import org.apache.flink.autoscaler.CheckpointRescaleTransaction;
 import org.apache.flink.autoscaler.DelayedScaleDown;
 import org.apache.flink.autoscaler.JobAutoScalerContext;
 import org.apache.flink.autoscaler.ScalingSummary;
@@ -60,6 +61,8 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
 
     private final Map<KEY, DelayedScaleDown> delayedScaleDownStore;
 
+    private final Map<KEY, CheckpointRescaleTransaction> checkpointRescaleTransactions;
+
     public InMemoryAutoScalerStateStore() {
         scalingHistoryStore = new ConcurrentHashMap<>();
         collectedMetricsStore = new ConcurrentHashMap<>();
@@ -68,6 +71,7 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
         scalingTrackingStore = new ConcurrentHashMap<>();
         tmConfigOverrides = new ConcurrentHashMap<>();
         delayedScaleDownStore = new ConcurrentHashMap<>();
+        checkpointRescaleTransactions = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -172,6 +176,24 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
     }
 
     @Override
+    public void storeCheckpointRescaleTransaction(
+            Context jobContext, CheckpointRescaleTransaction transaction) {
+        checkpointRescaleTransactions.put(jobContext.getJobKey(), transaction);
+    }
+
+    @Nonnull
+    @Override
+    public Optional<CheckpointRescaleTransaction> getCheckpointRescaleTransaction(
+            Context jobContext) {
+        return Optional.ofNullable(checkpointRescaleTransactions.get(jobContext.getJobKey()));
+    }
+
+    @Override
+    public void removeCheckpointRescaleTransaction(Context jobContext) {
+        checkpointRescaleTransactions.remove(jobContext.getJobKey());
+    }
+
+    @Override
     public void storeDelayedScaleDown(Context jobContext, DelayedScaleDown delayedScaleDown) {
         delayedScaleDownStore.put(jobContext.getJobKey(), delayedScaleDown);
     }
@@ -191,6 +213,7 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
         tmConfigOverrides.remove(jobContext.getJobKey());
         scalingTrackingStore.remove(jobContext.getJobKey());
         delayedScaleDownStore.remove(jobContext.getJobKey());
+        checkpointRescaleTransactions.remove(jobContext.getJobKey());
     }
 
     @Override
@@ -203,5 +226,6 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
         scalingHistoryStore.remove(jobKey);
         collectedMetricsStore.remove(jobKey);
         parallelismOverridesStore.remove(jobKey);
+        checkpointRescaleTransactions.remove(jobKey);
     }
 }

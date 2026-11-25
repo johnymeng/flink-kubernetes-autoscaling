@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler.state;
 
 import org.apache.flink.annotation.Experimental;
+import org.apache.flink.autoscaler.CheckpointRescaleTransaction;
 import org.apache.flink.autoscaler.DelayedScaleDown;
 import org.apache.flink.autoscaler.JobAutoScalerContext;
 import org.apache.flink.autoscaler.ScalingSummary;
@@ -30,6 +31,7 @@ import javax.annotation.Nonnull;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 import java.util.SortedMap;
 
 /**
@@ -71,13 +73,25 @@ public interface AutoScalerStateStore<KEY, Context extends JobAutoScalerContext<
 
     void removeParallelismOverrides(Context jobContext) throws Exception;
 
-    void storeResourceProfileOverrides(Context jobContext, Map<String, String> resourceProfileOverrides)
+    void storeResourceProfileOverrides(
+            Context jobContext, Map<String, String> resourceProfileOverrides)
             throws Exception;
 
     @Nonnull
     Map<String, String> getResourceProfileOverrides(Context jobContext) throws Exception;
 
     void removeResourceProfileOverrides(Context jobContext) throws Exception;
+
+    default void storeCheckpointRescaleTransaction(
+            Context jobContext, CheckpointRescaleTransaction transaction) throws Exception {}
+
+    @Nonnull
+    default Optional<CheckpointRescaleTransaction> getCheckpointRescaleTransaction(
+            Context jobContext) throws Exception {
+        return Optional.empty();
+    }
+
+    default void removeCheckpointRescaleTransaction(Context jobContext) throws Exception {}
 
     void storeConfigChanges(Context jobContext, ConfigChanges configChanges) throws Exception;
 

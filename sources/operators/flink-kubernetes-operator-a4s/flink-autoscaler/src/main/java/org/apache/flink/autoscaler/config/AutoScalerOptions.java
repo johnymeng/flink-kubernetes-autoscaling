@@ -66,6 +66,51 @@ public class AutoScalerOptions {
                     .withFallbackKeys(oldOperatorConfigKey("justin.enabled"))
                     .withDescription("Enable Justin Autoscaler.");
 
+    public static final ConfigOption<Boolean> CHECKPOINT_RESCALE_ENABLED =
+            autoScalerConfig("checkpoint-rescale.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withFallbackKeys(oldOperatorConfigKey("checkpoint-rescale.enabled"))
+                    .withDescription(
+                            "Require a fresh completed checkpoint before applying an autoscaler "
+                                    + "scaling decision.");
+
+    public static final ConfigOption<Duration> CHECKPOINT_RESCALE_CHECKPOINT_TIMEOUT =
+            autoScalerConfig("checkpoint-rescale.checkpoint-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(5))
+                    .withFallbackKeys(oldOperatorConfigKey("checkpoint-rescale.checkpoint-timeout"))
+                    .withDescription(
+                            "Maximum time to wait for pending and explicitly triggered "
+                                    + "checkpoints during checkpoint-gated rescaling.");
+
+    public static final ConfigOption<Duration> CHECKPOINT_RESCALE_RESTORE_TIMEOUT =
+            autoScalerConfig("checkpoint-rescale.restore-timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(10))
+                    .withFallbackKeys(oldOperatorConfigKey("checkpoint-rescale.restore-timeout"))
+                    .withDescription(
+                            "Maximum time to wait for the checkpoint-gated target to return "
+                                    + "to RUNNING.");
+
+    public static final ConfigOption<Boolean> CHECKPOINT_RESCALE_PRODUCER_PAUSE_ENABLED =
+            autoScalerConfig("checkpoint-rescale.producer-pause.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withFallbackKeys(oldOperatorConfigKey("checkpoint-rescale.producer-pause.enabled"))
+                    .withDescription(
+                            "Require an external producer controller to pause input before the "
+                                    + "rescale checkpoint and resume it after restore verification.");
+
+    public static final ConfigOption<Duration> CHECKPOINT_RESCALE_PRODUCER_CONTROL_TIMEOUT =
+            autoScalerConfig("checkpoint-rescale.producer-pause.timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofMinutes(1))
+                    .withFallbackKeys(oldOperatorConfigKey("checkpoint-rescale.producer-pause.timeout"))
+                    .withDescription(
+                            "Maximum time to wait for producer pause or resume acknowledgement "
+                                    + "during checkpoint-gated rescaling.");
+
     public static final ConfigOption<Duration> METRICS_WINDOW =
             autoScalerConfig("metrics.window")
                     .durationType()

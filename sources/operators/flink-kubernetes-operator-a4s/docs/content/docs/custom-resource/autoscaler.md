@@ -83,6 +83,19 @@ Furthermore make sure you set Flink version to `v1_18` in your FlinkDeployment y
 jobmanager.scheduler: adaptive
 ```
 
+### Waiting for a checkpoint before an in-place resize
+
+For a checkpointed job using the adaptive scheduler, the Kubernetes operator can take a fresh checkpoint before applying an autoscaler decision. Set these options in the FlinkDeployment's `spec.flinkConfiguration` to keep input flowing during the resize.
+
+```yaml
+job.autoscaler.checkpoint-rescale.enabled: "true"
+job.autoscaler.checkpoint-rescale.producer-pause.enabled: "false"
+```
+
+Both options default to `false`. When checkpoint gating is enabled, the operator waits for any in-flight checkpoint, triggers one for the pending resize, and waits for it to complete before applying the new parallelism or resource profiles. This also covers an A4S memory-only change. Flink can restore a newer periodic checkpoint if one completes before the resize.
+
+The operator stores the target and progress in the job's autoscaler ConfigMap. If the checkpoint fails or times out, the resize stays blocked. After resolving the cause, increase the numeric `autoscaling.flink.apache.org/checkpoint-rescale-retry-nonce` annotation on the FlinkDeployment to retry. The optional producer pause requires an external controller that acknowledges pause and resume requests.
+
 ## Job Requirements and Limitations
 
 ### Requirements
