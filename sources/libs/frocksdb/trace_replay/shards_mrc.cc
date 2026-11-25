@@ -2,10 +2,12 @@
 
 #ifdef ROCKSDB_SHARDS_MRC_AVAILABLE
 
+#include <algorithm>
 #include <cassert>
 #include <cstdio>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 #include "util/hash.h"
 
@@ -27,6 +29,10 @@ ShardsMRC::ShardsMRC(double sampling_ratio, uint64_t num_bins,
       histogram_(num_bins + 1, 0.0) {}
 
 void ShardsMRC::ProcessAccess(const Slice& block_key) {
+  ProcessAccess(block_key, false);
+}
+
+void ShardsMRC::ProcessAccess(const Slice& block_key, bool no_insert) {
   ++num_entries_seen_;
   ++current_timestamp_;
 
@@ -43,34 +49,28 @@ void ShardsMRC::ProcessAccess(const Slice& block_key) {
   std::string key(block_key.data(), block_key.size());
   auto it = last_seen_.find(key);
 
-  if (it != last_seen_.end()) {
-    uint64_t old_ts = it->second;
-
-    // Stack distance = number of distinct sampled blocks accessed between
-    // old_ts and now = number of timestamps strictly greater than old_ts.
-    // order_of_key(t) = count of elements strictly less than t, so:
-    //   elements > old_ts = tree.size() - order_of_key(old_ts) - 1
-    uint64_t rank_left = timestamp_tree_.order_of_key(old_ts);
-    uint64_t distance = timestamp_tree_.size() - rank_left - 1;
-
-    // Update tree and map to reflect current access.
-    timestamp_tree_.erase(old_ts);
-    timestamp_tree_.insert(current_timestamp_);
-    it->second = current_timestamp_;
-
-    // Record in histogram, scaled by 1/sampling_ratio.
-    uint64_t bin = (bin_size_ > 0) ? (distance / bin_size_) : distance;
-    if (bin >= num_bins_) {
-      histogram_[num_bins_] += scale_;
-    } else {
-      histogram_[bin] += scale_;
-    }
-  } else {
-    // First time seeing this block — infinite stack distance (compulsory miss).
-    last_seen_[key] = current_timestamp_;
-    timestamp_tree_.insert(current_timestamp_);
+  if (it == last_seen_.end()) {
     histogram_[num_bins_] += scale_;
+    if (!no_insert) {
+      last_seen_.emplace(std::move(key), SampledBlock{current_timestamp_, 0});
+      timestamp_tree_.insert(current_timestamp_);
+    }
+    return;
   }
+
+  const uint64_t old_ts = it->second.timestamp;
+  // The newer timestamps represent distinct sampled blocks above this one.
+  const uint64_t distance =
+      timestamp_tree_.size() - timestamp_tree_.order_of_key(old_ts) - 1;
+  const uint64_t bin = std::max(bin_size_ > 0 ? distance / bin_size_ : distance,
+                                it->second.min_hit_bin);
+  histogram_[std::min(bin, num_bins_)] += scale_;
+  if (no_insert && bin >= num_bins_) {
+    return;
+  }
+  timestamp_tree_.erase(old_ts);
+  timestamp_tree_.insert(current_timestamp_);
+  it->second = {current_timestamp_, no_insert ? bin : 0};
 }
 
 bool ShardsMRC::DumpMRC(const std::string& path) const {

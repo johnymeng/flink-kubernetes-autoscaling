@@ -228,11 +228,12 @@ ShardsMrcEstimator* BlockBasedTable::GetShardsMrcEstimator() const {
 void BlockBasedTable::RecordShardsMrcAccess(TraceType block_type,
                                             TableReaderCaller caller,
                                             const Slice& block_key,
-                                            uint64_t block_size) const {
+                                            uint64_t block_size,
+                                            bool no_insert) const {
   ShardsMrcEstimator* estimator = GetShardsMrcEstimator();
   if (estimator != nullptr &&
       BlockCacheTraceHelper::IsUserDataBlockAccess(block_type, caller)) {
-    estimator->Access(block_key, block_size);
+    estimator->Access(block_key, block_size, no_insert);
   }
 }
 
@@ -1567,12 +1568,12 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
       lookup_context) {
     size_t usage = 0;
     uint64_t nkeys = 0;
-    if (block_entry->GetValue()) {
+    const auto* value = block_entry->GetValue();
+    if (value) {
       // Approximate the number of keys in the block using restarts.
-      nkeys =
-          rep_->table_options.block_restart_interval *
-          BlocklikeTraits<TBlocklike>::GetNumRestarts(*block_entry->GetValue());
-      usage = block_entry->GetValue()->ApproximateMemoryUsage();
+      nkeys = rep_->table_options.block_restart_interval *
+              BlocklikeTraits<TBlocklike>::GetNumRestarts(*value);
+      usage = value->ApproximateMemoryUsage();
     }
     TraceType trace_block_type = TraceType::kTraceMax;
     switch (block_type) {
@@ -1596,7 +1597,10 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
         assert(false);
         break;
     }
-    bool no_insert = no_io || !ro.fill_cache;
+    // PutDataBlockToCache bypasses the cache for borrowed bytes, for example
+    // an uncompressed data block backed directly by a memory-mapped file.
+    const bool no_insert =
+        no_io || !ro.fill_cache || (value && !value->own_bytes());
     if (BlockCacheTraceHelper::IsGetOrMultiGetOnDataBlock(
             trace_block_type, lookup_context->caller)) {
       // Defer logging the access to Get() and MultiGet() to trace additional
@@ -1608,7 +1612,7 @@ Status BlockBasedTable::MaybeReadBlockAndLoadToCache(
           /*block_size=*/usage, /*block_key=*/key.ToString(), nkeys);
     } else {
       RecordShardsMrcAccess(trace_block_type, lookup_context->caller, key,
-                            usage);
+                            usage, no_insert);
       if (tracing_enabled) {
         // Avoid making copy of block_key and cf_name when constructing the
         // access record.
@@ -1656,7 +1660,8 @@ void BlockBasedTable::RetrieveMultipleBlocks(
     const autovector<BlockHandle, MultiGetContext::MAX_BATCH_SIZE>* handles,
     autovector<Status, MultiGetContext::MAX_BATCH_SIZE>* statuses,
     autovector<CachableEntry<Block>, MultiGetContext::MAX_BATCH_SIZE>* results,
-    char* scratch, const UncompressionDict& uncompression_dict) const {
+    char* scratch, const UncompressionDict& uncompression_dict,
+    BlockCacheLookupContext* lookup_contexts) const {
   RandomAccessFileReader* file = rep_->file.get();
   const Footer& footer = rep_->footer;
   const ImmutableCFOptions& ioptions = rep_->ioptions;
@@ -1667,18 +1672,16 @@ void BlockBasedTable::RetrieveMultipleBlocks(
     size_t idx_in_batch = 0;
     for (auto mget_iter = batch->begin(); mget_iter != batch->end();
          ++mget_iter, ++idx_in_batch) {
-      BlockCacheLookupContext lookup_data_block_context(
-          TableReaderCaller::kUserMultiGet);
       const BlockHandle& handle = (*handles)[idx_in_batch];
       if (handle.IsNull()) {
         continue;
       }
 
-      (*statuses)[idx_in_batch] =
-          RetrieveBlock(nullptr, options, handle, uncompression_dict,
-                        &(*results)[idx_in_batch], BlockType::kData,
-                        mget_iter->get_context, &lookup_data_block_context,
-                        /* for_compaction */ false, /* use_cache */ true);
+      (*statuses)[idx_in_batch] = RetrieveBlock(
+          nullptr, options, handle, uncompression_dict,
+          &(*results)[idx_in_batch], BlockType::kData, mget_iter->get_context,
+          lookup_contexts ? &lookup_contexts[idx_in_batch] : nullptr,
+          /* for_compaction */ false, /* use_cache */ true);
     }
     return;
   }
@@ -1868,8 +1871,6 @@ void BlockBasedTable::RetrieveMultipleBlocks(
 
     if (s.ok()) {
       if (options.fill_cache) {
-        BlockCacheLookupContext lookup_data_block_context(
-            TableReaderCaller::kUserMultiGet);
         CachableEntry<Block>* block_entry = &(*results)[idx_in_batch];
         // MaybeReadBlockAndLoadToCache will insert into the block caches if
         // necessary. Since we're passing the raw block contents, it will
@@ -1877,7 +1878,8 @@ void BlockBasedTable::RetrieveMultipleBlocks(
         s = MaybeReadBlockAndLoadToCache(
             nullptr, options, handle, uncompression_dict, block_entry,
             BlockType::kData, mget_iter->get_context,
-            &lookup_data_block_context, &raw_block_contents);
+            lookup_contexts ? &lookup_contexts[idx_in_batch] : nullptr,
+            &raw_block_contents);
 
         // block_entry value could be null if no block cache is present, i.e
         // BlockBasedTableOptions::no_block_cache is true and no compressed
@@ -2445,7 +2447,8 @@ Status BlockBasedTable::Get(const ReadOptions& read_options, const Slice& key,
       RecordShardsMrcAccess(lookup_data_block_context.block_type,
                             lookup_data_block_context.caller,
                             lookup_data_block_context.block_key,
-                            lookup_data_block_context.block_size);
+                            lookup_data_block_context.block_size,
+                            lookup_data_block_context.no_insert);
       // Write the block cache access record.
       if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
         // Avoid making copy of block_key, cf_name, and referenced_key when
@@ -2545,6 +2548,15 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
     autovector<BlockHandle, MultiGetContext::MAX_BATCH_SIZE> block_handles;
     autovector<CachableEntry<Block>, MultiGetContext::MAX_BATCH_SIZE> results;
     autovector<Status, MultiGetContext::MAX_BATCH_SIZE> statuses;
+    // The first block for each key is looked up before any keys are served.
+    // Carry that lookup through the batched read to the tracing site below.
+    const bool track_lookups =
+        GetShardsMrcEstimator() != nullptr ||
+        (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled());
+    std::vector<BlockCacheLookupContext> first_lookups;
+    if (track_lookups) {
+      first_lookups.reserve(sst_file_range.KeysLeft());
+    }
     char stack_buf[kMultiGetReadStackBufSize];
     std::unique_ptr<char[]> block_buf;
     {
@@ -2603,6 +2615,11 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
 
         statuses.emplace_back();
         results.emplace_back();
+        if (track_lookups) {
+          first_lookups.emplace_back(TableReaderCaller::kUserMultiGet,
+                                     tracing_mget_id,
+                                     read_options.snapshot != nullptr);
+        }
         if (v.handle.offset() == offset) {
           // We're going to reuse the block for this key later on. No need to
           // look it up now. Place a null handle
@@ -2614,14 +2631,12 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
         // initialize block to the contents of the data block.
         offset = v.handle.offset();
         BlockHandle handle = v.handle;
-        BlockCacheLookupContext lookup_data_block_context(
-            TableReaderCaller::kUserMultiGet);
         const UncompressionDict& dict = uncompression_dict.GetValue()
                                             ? *uncompression_dict.GetValue()
                                             : UncompressionDict::GetEmptyDict();
         Status s = RetrieveBlock(
             nullptr, ro, handle, dict, &(results.back()), BlockType::kData,
-            miter->get_context, &lookup_data_block_context,
+            miter->get_context, track_lookups ? &first_lookups.back() : nullptr,
             /* for_compaction */ false, /* use_cache */ true);
         if (s.IsIncomplete()) {
           s = Status::OK();
@@ -2664,7 +2679,8 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
           }
         }
         RetrieveMultipleBlocks(read_options, &data_block_range, &block_handles,
-                               &statuses, &results, scratch, dict);
+                               &statuses, &results, scratch, dict,
+                               track_lookups ? first_lookups.data() : nullptr);
         if (sst_file_range.begin()->get_context) {
           ++(sst_file_range.begin()
                  ->get_context->get_context_stats_.num_sst_read);
@@ -2688,13 +2704,25 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
         bool reusing_block = true;
         uint64_t referenced_data_size = 0;
         bool does_referenced_key_exist = false;
-        BlockCacheLookupContext lookup_data_block_context(
+        BlockCacheLookupContext next_lookup(
             TableReaderCaller::kUserMultiGet, tracing_mget_id,
             /*get_from_user_specified_snapshot=*/read_options.snapshot !=
                 nullptr);
+        auto& lookup_data_block_context = first_block && track_lookups
+                                              ? first_lookups[idx_in_batch]
+                                              : next_lookup;
         if (first_block) {
           if (!block_handles[idx_in_batch].IsNull() ||
               !results[idx_in_batch].IsEmpty()) {
+            // A null handle with a result is a hit in the initial cache probe.
+            // That probe used kBlockCacheTier even when the caller allowed
+            // fills.
+            lookup_data_block_context.is_cache_hit =
+                block_handles[idx_in_batch].IsNull();
+            if (lookup_data_block_context.is_cache_hit) {
+              lookup_data_block_context.no_insert =
+                  no_io || !read_options.fill_cache;
+            }
             first_biter.Invalidate(Status::OK());
             NewDataBlockIterator<DataBlockIter>(
                 read_options, results[idx_in_batch], &first_biter,
@@ -2728,30 +2756,14 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
           reusing_block = false;
         }
 
-        if (read_options.read_tier == kBlockCacheTier &&
-            biter->status().IsIncomplete()) {
-          // couldn't get block from block_cache
-          // Update Saver.state to Found because we are only looking for
-          // whether we can guarantee the key is not there when "no_io" is set
-          get_context->MarkKeyMayExist();
-          break;
+        // A failed read or a negative hash seek still performed a block lookup.
+        if (!biter->status().ok() && !lookup_data_block_context.is_cache_hit) {
+          lookup_data_block_context.no_insert = true;
         }
-        if (!biter->status().ok()) {
-          s = biter->status();
-          break;
-        }
-
-        bool may_exist = biter->SeekForGet(key);
-        if (!may_exist) {
-          // HashSeek cannot find the key this block and the the iter is not
-          // the end of the block, i.e. cannot be in the following blocks
-          // either. In this case, the seek_key cannot be found, so we break
-          // from the top level for-loop.
-          break;
-        }
+        const bool may_exist = biter->status().ok() && biter->SeekForGet(key);
 
         // Call the *saver function on each entry/block until it returns false
-        for (; biter->Valid(); biter->Next()) {
+        for (; may_exist && biter->Valid(); biter->Next()) {
           ParsedInternalKey parsed_key;
           Cleanable dummy;
           Cleanable* value_pinner = nullptr;
@@ -2787,9 +2799,12 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
         RecordShardsMrcAccess(lookup_data_block_context.block_type,
                               lookup_data_block_context.caller,
                               lookup_data_block_context.block_key,
-                              lookup_data_block_context.block_size);
+                              lookup_data_block_context.block_size,
+                              lookup_data_block_context.no_insert);
         // Write the block cache access.
-        if (block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
+        if (lookup_data_block_context.block_type ==
+                TraceType::kBlockTraceDataBlock &&
+            block_cache_tracer_ && block_cache_tracer_->is_tracing_enabled()) {
           // Avoid making copy of block_key, cf_name, and referenced_key when
           // constructing the access record.
           Slice referenced_key;
@@ -2818,8 +2833,12 @@ void BlockBasedTable::MultiGet(const ReadOptions& read_options,
                                  rep_->cf_name_for_tracing(), referenced_key)
               .PermitUncheckedError();
         }
+        if (no_io && biter->status().IsIncomplete()) {
+          get_context->MarkKeyMayExist();
+          break;
+        }
         s = biter->status();
-        if (done) {
+        if (!may_exist || done) {
           // Avoid the extra Next which is expensive in two-level indexes
           break;
         }

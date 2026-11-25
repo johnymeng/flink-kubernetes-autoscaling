@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <utility>
 
 #include "util/hash.h"
 #include "util/mutexlock.h"
@@ -60,33 +61,59 @@ ShardsMrcEstimator::ShardsMrcEstimator(double sampling_rate, uint64_t hash_seed,
 }
 
 void ShardsMrcEstimator::Access(const Slice& block_key, uint64_t charge) {
-  total_refs_.fetch_add(1, std::memory_order_relaxed);
+  Access(block_key, charge, false);
+}
+
+void ShardsMrcEstimator::Access(const Slice& block_key, uint64_t charge,
+                                bool no_insert) {
   if (GetSliceNPHash64(block_key, hash_seed_) > threshold_) {
+    total_refs_.fetch_add(1, std::memory_order_relaxed);
     return;
   }
   MutexLock l(&mutex_);
   const auto start = std::chrono::steady_clock::now();
+  total_refs_.fetch_add(1, std::memory_order_relaxed);
   ++sampled_refs_;
+  RecordSample(block_key, charge, no_insert);
+  estimator_nanos_ += static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - start)
+          .count());
+}
 
+void ShardsMrcEstimator::RecordSample(const Slice& block_key, uint64_t charge,
+                                      bool no_insert) {
   std::string key = block_key.ToString();
   auto it = blocks_.find(key);
   if (it == blocks_.end()) {
-    it = blocks_.emplace(std::move(key), 0).first;
     ++histogram_[num_bins_];
+    if (no_insert) {
+      return;
+    }
+    it = blocks_.emplace(std::move(key), TrackedBlock{}).first;
   } else {
     // Byte-LRU stack distance: the block hits in a cache of at least this many
     // bytes. Blocks accessed since its last access (the slots after its slot)
     // are a 1/R sample, so scale them; its own charge is exact.
-    const uint64_t newer = tracked_bytes_ - FenwickPrefix(it->second);
-    ++histogram_[HitBin(newer, charge)];
-    RemoveSlot(it->second);
+    const uint64_t old_slot = it->second.slot;
+    if (no_insert) {
+      // A miss in the observed cache can have no measured charge even when
+      // a larger modeled cache would still hold the block.
+      charge = slot_charge_[old_slot];
+    }
+    const uint64_t newer = tracked_bytes_ - FenwickPrefix(old_slot);
+    const uint64_t bin =
+        std::max(HitBin(newer, charge), it->second.min_hit_bin);
+    ++histogram_[bin];
+    it->second.min_hit_bin = no_insert ? bin : 0;
+    RemoveSlot(old_slot);
   }
 
   if (next_slot_ == slot_block_.size()) {
     Compact();
   }
   const uint64_t slot = next_slot_++;
-  it->second = slot;
+  it->second.slot = slot;
   slot_block_[slot] = &*it;
   slot_charge_[slot] = charge;
   FenwickAdd(slot, charge);
@@ -105,11 +132,6 @@ void ShardsMrcEstimator::Access(const Slice& block_key, uint64_t charge) {
     blocks_.erase(blocks_.find(victim->first));
     ++evicted_by_cap_;
   }
-
-  estimator_nanos_ += static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now() - start)
-          .count());
 }
 
 std::vector<uint64_t> ShardsMrcEstimator::Snapshot() const {
@@ -118,8 +140,9 @@ std::vector<uint64_t> ShardsMrcEstimator::Snapshot() const {
   out[kHashSeed] = hash_seed_;
   out[kBinBytes] = bin_bytes_;
   out[kMaxDistanceBytes] = max_distance_bytes_;
-  out[kTotalRefs] = total_refs_.load(std::memory_order_relaxed);
   MutexLock l(&mutex_);
+  // Publish sampled accesses and their contribution to total_refs_ together.
+  out[kTotalRefs] = total_refs_.load(std::memory_order_relaxed);
   out[kSampledRefs] = sampled_refs_;
   out[kEvictedByCap] = evicted_by_cap_;
   out[kTrackedEntries] = blocks_.size();
@@ -156,7 +179,7 @@ void ShardsMrcEstimator::Compact() {
   std::vector<uint64_t> charges;
   for (uint64_t s = oldest_slot_; s < next_slot_; ++s) {
     if (slot_block_[s] != nullptr) {
-      slot_block_[s]->second = blocks.size();
+      slot_block_[s]->second.slot = blocks.size();
       blocks.push_back(slot_block_[s]);
       charges.push_back(slot_charge_[s]);
     }

@@ -1,11 +1,16 @@
-// Replay one RocksDB binary block-cache trace through the online ShardsMRC,
-// or (--estimator) through the cache-owned ShardsMrcEstimator.
+// Replay a RocksDB binary block-cache trace through ShardsMRC, the cache-owned
+// estimator (--estimator), or independent byte-capacity LRUs (--capacities).
+// For an unsampled trace, --capacities reports per-size hits and misses on
+// user data blocks with one cache shard and only the recorded block charges.
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
+#include <limits>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -15,6 +20,7 @@
 #include "rocksdb/trace_reader_writer.h"
 #include "trace_replay/block_cache_tracer.h"
 #include "trace_replay/shards_mrc.h"
+#include "utilities/simulator_cache/cache_simulator.h"
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
@@ -102,7 +108,8 @@ int ReplayEstimator(int argc, char** argv) {
   uint64_t total = 0;
   int rc = ForEachUserDataBlockAccess(
       argv[2], &total, [&](const BlockCacheTraceRecord& record) {
-        estimator.Access(record.block_key, record.block_size);
+        estimator.Access(record.block_key, record.block_size,
+                         record.no_insert == Boolean::kTrue);
         return true;
       });
   if (rc != 0) {
@@ -132,6 +139,58 @@ int ReplayEstimator(int argc, char** argv) {
   return 0;
 }
 
+// A no-insert hit refreshes only caches that already hold the block. Replay
+// each requested size independently on the same user data-block stream.
+int ReplayCapacities(int argc, char** argv) {
+  if (argc < 5) {
+    std::fprintf(stderr,
+                 "Usage: %s --capacities TRACE OUTPUT CAPACITY_BYTES "
+                 "[CAPACITY_BYTES ...]\n",
+                 argv[0]);
+    return 2;
+  }
+  std::map<uint64_t, std::unique_ptr<CacheSimulator>> caches;
+  LRUCacheOptions options;
+  options.num_shard_bits = 0;
+  options.high_pri_pool_ratio = 0.0;
+  options.metadata_charge_policy = kDontChargeCacheMetadata;
+  for (int i = 4; i < argc; ++i) {
+    uint64_t bytes;
+    if (argv[i][0] < '0' || argv[i][0] > '9' || !ParseUint(argv[i], &bytes) ||
+        bytes > std::numeric_limits<size_t>::max()) {
+      std::fprintf(stderr, "Invalid cache capacity in bytes: %s\n", argv[i]);
+      return 2;
+    }
+    options.capacity = static_cast<size_t>(bytes);
+    caches[bytes].reset(new CacheSimulator(nullptr, NewLRUCache(options)));
+  }
+  auto access = [&caches](const BlockCacheTraceRecord& record) {
+    for (auto& entry : caches) {
+      entry.second->Access(record);
+    }
+    return true;
+  };
+  uint64_t total = 0;
+  const int rc = ForEachUserDataBlockAccess(argv[2], &total, access);
+  if (rc != 0) {
+    return rc;
+  }
+  std::ofstream out(argv[3]);
+  out << "capacity_bytes,accesses,hits,misses\n";
+  for (const auto& entry : caches) {
+    const auto& stats = entry.second->miss_ratio_stats();
+    out << entry.first << ',' << stats.total_accesses() << ','
+        << stats.total_accesses() - stats.total_misses() << ','
+        << stats.total_misses() << '\n';
+  }
+  out.close();
+  if (!out) {
+    std::fprintf(stderr, "Cannot write %s\n", argv[3]);
+    return 1;
+  }
+  return 0;
+}
+
 #ifdef ROCKSDB_SHARDS_MRC_AVAILABLE
 int Replay(int argc, char** argv) {
   if (argc < 6 || argc > 8) {
@@ -158,7 +217,7 @@ int Replay(int argc, char** argv) {
       argv[1], &total, [&](const BlockCacheTraceRecord& record) {
         ++eligible;
         block_bytes += record.block_size;
-        mrc.ProcessAccess(record.block_key);
+        mrc.ProcessAccess(record.block_key, record.no_insert == Boolean::kTrue);
         if (snapshot_every != 0 && eligible % snapshot_every == 0 &&
             !mrc.DumpMRC(std::string(argv[2]) + "." +
                          std::to_string(eligible / snapshot_every))) {
@@ -189,6 +248,9 @@ int Replay(int argc, char** argv) {
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {
+  if (argc > 1 && std::strcmp(argv[1], "--capacities") == 0) {
+    return ROCKSDB_NAMESPACE::ReplayCapacities(argc, argv);
+  }
   if (argc > 1 && std::strcmp(argv[1], "--estimator") == 0) {
     return ROCKSDB_NAMESPACE::ReplayEstimator(argc, argv);
   }
@@ -196,8 +258,10 @@ int main(int argc, char** argv) {
   return ROCKSDB_NAMESPACE::Replay(argc, argv);
 #else
   (void)argc;
-  std::fprintf(stderr, "%s: ShardsMRC requires libstdc++; use --estimator\n",
-               argv[0]);
+  std::fprintf(
+      stderr,
+      "%s: ShardsMRC requires libstdc++; use --estimator or --capacities\n",
+      argv[0]);
   return 1;
 #endif
 }

@@ -267,8 +267,8 @@ class BlockBasedTable : public TableReader {
   // Called next to BlockCacheTracer::WriteBlockAccess so that the estimator
   // sees exactly the accesses a block cache trace records.
   void RecordShardsMrcAccess(TraceType block_type, TableReaderCaller caller,
-                             const Slice& block_key,
-                             uint64_t block_size) const;
+                             const Slice& block_key, uint64_t block_size,
+                             bool no_insert) const;
 
   void UpdateCacheHitMetrics(BlockType block_type, GetContext* get_context,
                              size_t usage) const;
@@ -323,7 +323,8 @@ class BlockBasedTable : public TableReader {
       autovector<Status, MultiGetContext::MAX_BATCH_SIZE>* statuses,
       autovector<CachableEntry<Block>, MultiGetContext::MAX_BATCH_SIZE>*
           results,
-      char* scratch, const UncompressionDict& uncompression_dict) const;
+      char* scratch, const UncompressionDict& uncompression_dict,
+      BlockCacheLookupContext* lookup_contexts) const;
 
   // Get the iterator from the index reader.
   //

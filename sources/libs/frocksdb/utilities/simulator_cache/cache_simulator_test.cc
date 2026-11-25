@@ -6,6 +6,8 @@
 #include "utilities/simulator_cache/cache_simulator.h"
 
 #include <cstdlib>
+#include <utility>
+
 #include "rocksdb/env.h"
 #include "test_util/testharness.h"
 #include "test_util/testutil.h"
@@ -138,6 +140,38 @@ TEST_F(CacheSimulatorTest, CacheSimulator) {
   sim_cache->Release(handle);
   handle = sim_cache->Lookup(compaction_access.block_key);
   ASSERT_EQ(nullptr, handle);
+}
+
+TEST_F(CacheSimulatorTest, LookupOnlyReadsCanHitMoreAtASmallerCapacity) {
+  struct Access {
+    const char* key;
+    uint64_t insert_bytes;  // Zero denotes a lookup-only read.
+  };
+  const Access stream[] = {{"h", 8}, {"a", 4}, {"h", 0},
+                           {"b", 4}, {"a", 0}, {"a", 0}};
+  // At 8 bytes h is gone when it is looked up. At 12 it is refreshed,
+  // so inserting b evicts a and both final lookups miss. All fit at 16.
+  for (const auto& point : {std::make_pair(8U, 2U), std::make_pair(12U, 1U),
+                            std::make_pair(16U, 3U)}) {
+    LRUCacheOptions opts;
+    opts.capacity = point.first;
+    opts.num_shard_bits = 0;
+    opts.high_pri_pool_ratio = 0.0;
+    opts.metadata_charge_policy = kDontChargeCacheMetadata;
+    CacheSimulator cache(nullptr, NewLRUCache(opts));
+    auto record = GenerateGetRecord(kGetId);
+    for (const auto& access : stream) {
+      record.block_key = access.key;
+      record.block_size = access.insert_bytes;
+      record.no_insert =
+          access.insert_bytes == 0 ? Boolean::kTrue : Boolean::kFalse;
+      cache.Access(record);
+    }
+    const auto& stats = cache.miss_ratio_stats();
+    EXPECT_EQ(stats.total_accesses(), 6U);
+    EXPECT_EQ(stats.total_accesses() - stats.total_misses(), point.second)
+        << point.first;
+  }
 }
 
 TEST_F(CacheSimulatorTest, GhostCacheSimulator) {
