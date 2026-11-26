@@ -1,0 +1,233 @@
+{
+  "apiVersion": "flink.apache.org/v1beta1",
+  "kind": "FlinkDeployment",
+  "metadata": {
+    "name": "flink",
+    "namespace": "RENDER_NAMESPACE",
+    "labels": {
+      "a4s-pr2-run": "RENDER_RUN_ID"
+    }
+  },
+  "spec": {
+    "flinkConfiguration": {
+      "$internal.pipeline.job-id": "RENDER_JOB_ID",
+      "execution.checkpointing.interval": "20 s",
+      "high-availability": "org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory",
+      "high-availability.storageDir": "file:///q8-state/ha",
+      "job.autoscaler.a4s.cache-metrics.exempt-vertices": "cbc357ccb763df2852fee8c4fc7d55f2;6cdc5bb954874d922eaee11a8e7b5dd5",
+      "job.autoscaler.a4s.enabled": "true",
+      "job.autoscaler.a4s.hit-latency-sec": "0.000005",
+      "job.autoscaler.a4s.memory-base.mb": "32",
+      "job.autoscaler.a4s.miss-latency-sec": "0.005",
+      "job.autoscaler.a4s.online-cache-costs.enabled": "false",
+      "job.autoscaler.a4s.online-cache-costs.shadow": "false",
+      "job.autoscaler.a4s.online-cache-costs.use-fixed-baseline": "false",
+      "job.autoscaler.cache-hit-rate.min.threshold": "0.8",
+      "job.autoscaler.enabled": "true",
+      "job.autoscaler.justin.enabled": "true",
+      "job.autoscaler.metrics.window": "3m",
+      "job.autoscaler.scale-down.interval": "1 h",
+      "job.autoscaler.scaling.enabled": "true",
+      "job.autoscaler.stabilization.interval": "2m",
+      "job.autoscaler.state-latency.threshold": "1000000.0",
+      "job.autoscaler.target.utilization": "0.7",
+      "job.autoscaler.target.utilization.boundary": "0.1",
+      "job.autoscaler.vertex.exclude.ids": "cbc357ccb763df2852fee8c4fc7d55f2;6cdc5bb954874d922eaee11a8e7b5dd5",
+      "job.autoscaler.vertex.max-parallelism": "24",
+      "jobmanager.adaptive-scheduler.resource-stabilization-timeout": "300 s",
+      "jobmanager.scheduler": "adaptive",
+      "kubernetes.operator.job.drain-on-savepoint-deletion": "false",
+      "kubernetes.operator.job.upgrade.inplace-scaling.enabled": "true",
+      "kubernetes.operator.job.upgrade.last-state-fallback.enabled": "false",
+      "metrics.fetcher.update-interval": "1000",
+      "pipeline.jobvertex-resourceprofile-overrides-on-submit.enabled": "false",
+      "pipeline.max-parallelism": "24",
+      "state.backend": "rocksdb",
+      "state.backend.latency-track.keyed-state-enabled": "true",
+      "state.backend.rocksdb.a4s.quick-mrc.enabled": "true",
+      "state.backend.rocksdb.a4s.quick-mrc.ghost-cache-multiplier": "1",
+      "state.backend.rocksdb.a4s.quick-mrc.histogram-bin-size": "64",
+      "state.backend.rocksdb.a4s.quick-mrc.sampling-rate": "0.02",
+      "state.backend.rocksdb.localdir": "/data/rocksdb",
+      "state.backend.rocksdb.memory.lru-cache-num-shard-bits": "0",
+      "state.backend.rocksdb.metrics.a4s-block-latency": "true",
+      "state.backend.rocksdb.metrics.block-cache-hit": "true",
+      "state.backend.rocksdb.metrics.block-cache-miss": "true",
+      "state.backend.rocksdb.metrics.block-cache-usage": "true",
+      "state.backend.rocksdb.metrics.bytes-read": "true",
+      "state.backend.rocksdb.metrics.bytes-written": "true",
+      "state.backend.rocksdb.metrics.column-family-as-variable": "true",
+      "state.backend.rocksdb.metrics.compaction-pending": "true",
+      "state.backend.rocksdb.metrics.compaction-read-bytes": "true",
+      "state.backend.rocksdb.metrics.compaction-write-bytes": "true",
+      "state.backend.rocksdb.metrics.cur-size-active-mem-table": "true",
+      "state.backend.rocksdb.metrics.cur-size-all-mem-tables": "true",
+      "state.backend.rocksdb.metrics.estimate-live-data-size": "true",
+      "state.backend.rocksdb.metrics.estimate-num-keys": "true",
+      "state.backend.rocksdb.metrics.estimate-pending-compaction-bytes": "true",
+      "state.backend.rocksdb.metrics.estimate-table-readers-mem": "true",
+      "state.backend.rocksdb.metrics.live-sst-files-size": "true",
+      "state.backend.rocksdb.metrics.size-all-mem-tables": "true",
+      "state.backend.rocksdb.metrics.stack-distance-histogram": "true",
+      "state.backend.rocksdb.metrics.total-sst-files-size": "true",
+      "state.backend.rocksdb.use-direct-reads": "true",
+      "state.backend.rocksdb.use-direct-writes": "true",
+      "state.checkpoints.dir": "file:///q8-state/checkpoints",
+      "state.savepoints.dir": "file:///q8-state/savepoints",
+      "taskmanager.cpu.cores": "4",
+      "taskmanager.memory.managed.fraction": "0.4",
+      "taskmanager.memory.managed.size": "768m",
+      "taskmanager.numberOfTaskSlots": "4",
+      "web.cancel.enable": "true",
+      "web.submit.enable": "true",
+      "job.autoscaler.quota.cpu": "20",
+      "execution.shutdown-on-application-finish": "false",
+      "state.backend.rocksdb.memory.managed": "true",
+      "state.backend.rocksdb.memory.write-buffer-ratio": "0.5",
+      "job.autoscaler.memory.tuning.enabled": "true",
+      "job.autoscaler.a4s.managed-memory-override.enabled": "false"
+    },
+    "flinkVersion": "v1_18",
+    "image": "RENDER_RUNTIME_IMAGE",
+    "imagePullPolicy": "IfNotPresent",
+    "job": {
+      "args": [
+        "--auction-srcRate",
+        "31111",
+        "--person-srcRate",
+        "8889",
+        "--p-auction-source",
+        "2",
+        "--p-person-source",
+        "2",
+        "--p-window",
+        "1",
+        "--q8-input-plan",
+        "600:8889:31111",
+        "--q8-release-epoch-ms",
+        "RENDER_RELEASE_EPOCH_MS"
+      ],
+      "entryClass": "be.uclouvain.gepiciad.nexmark.Query8",
+      "jarURI": "local:///opt/flink/usrlib/Query8.jar",
+      "parallelism": 1,
+      "state": "running",
+      "upgradeMode": "stateless"
+    },
+    "jobManager": {
+      "podTemplate": {
+        "spec": {
+          "containers": [
+            {
+              "env": [
+                {
+                  "name": "FLINK_A4S_COUNT_CACHE_LOOKUPS",
+                  "value": "1"
+                },
+                {
+                  "name": "FLINK_A4S_SAMPLE_BLOCK_LATENCY",
+                  "value": "1"
+                }
+              ],
+              "name": "flink-main-container",
+              "volumeMounts": [
+                {
+                  "mountPath": "/q8-state",
+                  "name": "state"
+                },
+                {
+                  "mountPath": "/data/rocksdb",
+                  "name": "rocksdb"
+                }
+              ]
+            }
+          ],
+          "nodeSelector": {
+            "kubernetes.io/hostname": "RENDER_WORKER"
+          },
+          "securityContext": {
+            "fsGroup": 999
+          },
+          "volumes": [
+            {
+              "hostPath": {
+                "path": "RENDER_STATE_HOST_PATH",
+                "type": "Directory"
+              },
+              "name": "state"
+            },
+            {
+              "emptyDir": {},
+              "name": "rocksdb"
+            }
+          ]
+        }
+      },
+      "resource": {
+        "cpu": 1,
+        "memory": "2048m"
+      }
+    },
+    "serviceAccount": "flink",
+    "taskManager": {
+      "podTemplate": {
+        "spec": {
+          "containers": [
+            {
+              "env": [
+                {
+                  "name": "FLINK_A4S_COUNT_CACHE_LOOKUPS",
+                  "value": "1"
+                },
+                {
+                  "name": "FLINK_A4S_SAMPLE_BLOCK_LATENCY",
+                  "value": "1"
+                },
+                {
+                  "name": "FLINK_Q8_REPORT_PENDING_RECORDS",
+                  "value": "1"
+                }
+              ],
+              "name": "flink-main-container",
+              "volumeMounts": [
+                {
+                  "mountPath": "/q8-state",
+                  "name": "state"
+                },
+                {
+                  "mountPath": "/data/rocksdb",
+                  "name": "rocksdb"
+                }
+              ]
+            }
+          ],
+          "nodeSelector": {
+            "kubernetes.io/hostname": "RENDER_WORKER"
+          },
+          "securityContext": {
+            "fsGroup": 999
+          },
+          "volumes": [
+            {
+              "hostPath": {
+                "path": "RENDER_STATE_HOST_PATH",
+                "type": "Directory"
+              },
+              "name": "state"
+            },
+            {
+              "hostPath": {
+                "path": "RENDER_ROCKSDB_HOST_PATH",
+                "type": "Directory"
+              },
+              "name": "rocksdb"
+            }
+          ]
+        }
+      },
+      "resource": {
+        "cpu": 4,
+        "memory": "2220m"
+      }
+    }
+  }
+}
