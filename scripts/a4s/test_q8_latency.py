@@ -1,4 +1,6 @@
 import copy
+import io
+import json
 import runpy
 import unittest
 from pathlib import Path
@@ -12,6 +14,33 @@ timed_interval = collector["timed_interval"]
 
 def histogram(counts, invalid=0):
     return {"attempt": 0, "binMs": 10, "overflowAtMs": 120_000, "counts": counts, "invalid": invalid}
+
+
+def extended_histogram(counts):
+    return {"attempt": 0, "segments": [[2_000, 10], [60_000, 100], [900_000, 1_000]],
+            "overflowAtMs": 900_000, "counts": counts, "invalid": 0, "sampledAtMs": 100}
+
+
+class CaptureTest(unittest.TestCase):
+    def test_detects_q8_gauge_version_and_retains_legacy_capture_shape(self):
+        capture = collector["capture"]
+        vertex = "2" * 32
+        detail = {"id": vertex, "parallelism": 1, "subtasks": [
+            {"status": "RUNNING", "start-time": 1, "attempt": 0, "subtask": 0, "taskmanager-id": "tm"},
+        ]}
+        for gauge, value in (("q8AuctionLatencyV1", histogram({"12000": 1})),
+                             ("q8AuctionLatencyV2", extended_histogram({"870": 1}))):
+            with self.subTest(gauge=gauge):
+                metric = {"id": "0.sink." + gauge}
+                reply = [detail, [metric], [{**metric, "value": json.dumps(value)}], detail]
+                responses = [io.BytesIO(json.dumps(item).encode()) for item in reply]
+                with mock.patch.dict(capture.__globals__, {"urlopen": mock.Mock(side_effect=responses)}):
+                    result = capture("http://127.0.0.1:8081", "1" * 32, vertex)
+                self.assertEqual(result["histograms"], {"0": value})
+                if gauge.endswith("V1"):
+                    self.assertNotIn("metric", result)
+                else:
+                    self.assertEqual(result["metric"], gauge)
 
 
 class LatencySummaryTest(unittest.TestCase):
@@ -76,6 +105,17 @@ class LatencySummaryTest(unittest.TestCase):
         self.after["histograms"]["0"]["counts"]["1621"] = 1
         with self.assertRaises(ValueError):
             summarize(self.before, self.after)
+
+    def test_q8_v2_returns_finite_percentiles_beyond_the_v1_limit(self):
+        for snapshot in (self.before, self.after):
+            snapshot["metric"] = "q8AuctionLatencyV2"
+            snapshot["histograms"] = {"0": extended_histogram({}), "1": extended_histogram({})}
+        self.after["histograms"]["0"]["counts"] = {"870": 99, "1620": 1}
+        summary = summarize(self.before, self.after)
+        self.assertEqual(summary["p99"], {"lowerMs": 150_000, "upperMs": 150_999})
+        self.assertEqual(summary["overflowSamples"], 1)
+        self.after["histograms"]["0"]["counts"]["1620"] = 2
+        self.assertEqual(summarize(self.before, self.after)["p99"], {"lowerMs": 900_000, "upperMs": None})
 
     def test_rejects_resets_and_incomplete_or_changed_attempts(self):
         changes = [

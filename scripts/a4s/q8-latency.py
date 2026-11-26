@@ -12,11 +12,14 @@ from urllib.request import urlopen
 
 
 METRIC = "q8AuctionLatencyV1"
+Q8_EXTENDED_METRIC = "q8AuctionLatencyV2"
 Q20_METRIC = "q20KafkaLatencyV2"
+SEGMENTED_LAYOUT = ((2_000, 10), (60_000, 100), (900_000, 1_000))
 BUCKET_LAYOUTS = {
     METRIC: ((120_000, 10),),
+    Q8_EXTENDED_METRIC: SEGMENTED_LAYOUT,
     "q20KafkaLatencyV1": ((900_000, 10),),
-    Q20_METRIC: ((2_000, 10), (60_000, 100), (900_000, 1_000)),
+    Q20_METRIC: SEGMENTED_LAYOUT,
 }
 
 
@@ -27,8 +30,7 @@ def bucket_segments(layout):
         start = end
 
 
-def capture(rest_url, job, vertex, gauge=METRIC):
-    layout = BUCKET_LAYOUTS[gauge]
+def capture(rest_url, job, vertex, gauge=None):
     if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in (job, vertex)):
         raise ValueError("Job and vertex IDs must be 32 lowercase hexadecimal digits")
 
@@ -59,7 +61,14 @@ def capture(rest_url, job, vertex, gauge=METRIC):
     vertex_path = f"/jobs/{job}/vertices/{vertex}"
     metrics_path = vertex_path + "/metrics"
     before = roster()
-    ids = [metric["id"] for metric in fetch(metrics_path) if metric["id"].endswith("." + gauge)]
+    catalog = [metric["id"] for metric in fetch(metrics_path)]
+    if gauge is None:
+        observed_gauges = {name.rsplit(".", 1)[-1] for name in catalog} & {METRIC, Q8_EXTENDED_METRIC}
+        if len(observed_gauges) != 1:
+            raise ValueError("Expected one Q8 latency gauge version in the metric catalog")
+        [gauge] = observed_gauges
+    layout = BUCKET_LAYOUTS[gauge]
+    ids = [name for name in catalog if name.endswith("." + gauge)]
     if not ids:
         raise ValueError(f"The latency gauge {gauge} is unavailable for this vertex")
     response = fetch(metrics_path + "?" + urlencode({"get": ",".join(ids)}))
@@ -212,12 +221,12 @@ def main():
     capture_command.add_argument("rest_url")
     capture_command.add_argument("job_id")
     capture_command.add_argument("vertex_id")
-    capture_command.add_argument("--metric", choices=BUCKET_LAYOUTS, default=METRIC)
+    capture_command.add_argument("--metric", choices=BUCKET_LAYOUTS, help="select a gauge explicitly (default: detect Q8)")
     series_command = commands.add_parser("capture-series", help="record time-bounded Q8 or Q20 latency intervals")
     series_command.add_argument("rest_url")
     series_command.add_argument("job_id")
     series_command.add_argument("vertex_id")
-    series_command.add_argument("--metric", choices=(METRIC, Q20_METRIC), default=Q20_METRIC)
+    series_command.add_argument("--metric", choices=(METRIC, Q8_EXTENDED_METRIC, Q20_METRIC), default=Q20_METRIC)
     series_command.add_argument("--duration-sec", required=True, type=int)
     series_command.add_argument("--interval-sec", default=5, type=int)
     summarize_command = commands.add_parser("summarize")
