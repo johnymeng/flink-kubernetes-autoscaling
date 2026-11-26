@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import io.a4s.api.EvaluationRequest;
 import io.a4s.api.MigrationEstimate;
 import io.a4s.api.ScalingPlan;
+import io.a4s.api.Worker;
 import io.a4s.core.A4sPolicy;
 import io.a4s.http.DecisionClient;
 import io.a4s.http.SnapshotRecorder;
@@ -37,6 +38,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
+import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -211,6 +213,61 @@ class DecisionServerTest {
         var historical = decode(Files.readString(Path.of("../examples/q8-archived-curve.json")));
         assertEquals(
                 ScalingPlan.Action.INFEASIBLE_CONFIGURATION, policy.evaluate(historical).action);
+    }
+
+    @Test
+    void provesTheTasksFitTogetherInTheSuppliedWorkers() throws Exception {
+        var policy = new A4sPolicy();
+        var feasible =
+                withWorkers(
+                        EXAMPLE_JSON,
+                        new Worker("first", 1_500_000_000, 3),
+                        new Worker("second", 1_500_000_000, 3));
+        var plan = policy.evaluate(feasible);
+        assertEquals(ScalingPlan.Action.RESCALE, plan.action);
+        assertEquals(6, plan.operators.get("join").target.parallelism);
+        assertTrue(policy.isApplicable(feasible, plan, 10_002));
+
+        // Both fleets have spare capacity in aggregate, but can fit only five tasks.
+        var fragmentedMemory =
+                withWorkers(
+                        EXAMPLE_JSON,
+                        new Worker("first", 1_499_999_999, 3),
+                        new Worker("second", 1_550_000_000, 3));
+        var fragmentedCpu =
+                withWorkers(
+                        EXAMPLE_JSON,
+                        new Worker("first", 1_500_000_000, 2.9),
+                        new Worker("second", 1_500_000_000, 3.2));
+        for (var fragmented : List.of(fragmentedMemory, fragmentedCpu)) {
+            assertEquals(
+                    ScalingPlan.Action.INFEASIBLE_CONFIGURATION,
+                    policy.evaluate(fragmented).action);
+            assertFalse(policy.isApplicable(fragmented, plan, 10_002));
+        }
+
+        var decimalCpu =
+                withWorkers(
+                        EXAMPLE_JSON
+                                .replace("\"cpuCoresPerTask\": 1", "\"cpuCoresPerTask\": 0.1")
+                                .replace("\"cpuBudgetCores\": 6", "\"cpuBudgetCores\": 0.6"),
+                        new Worker("first", 1_500_000_000, 0.3),
+                        new Worker("second", 1_500_000_000, 0.3));
+        assertEquals(ScalingPlan.Action.RESCALE, policy.evaluate(decimalCpu).action);
+    }
+
+    private static EvaluationRequest withWorkers(String fixture, Worker... workers)
+            throws IOException {
+        return decode(
+                fixture.replace(
+                                "\"workers\": []",
+                                "\"workers\": "
+                                        + new String(
+                                                Wire.encode(List.of(workers)),
+                                                StandardCharsets.UTF_8))
+                        .replace(
+                                "\"upstreamOperators\": []",
+                                "\"upstreamOperators\": [], \"telemetry\": {\"allocatedMemoryPerTaskBytes\":500000000}"));
     }
 
     @Test

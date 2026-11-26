@@ -27,8 +27,11 @@ import io.a4s.api.PolicyConfiguration;
 import io.a4s.api.PolicyConfiguration.Mode;
 import io.a4s.api.ScalingPlan;
 import io.a4s.api.ScalingPlan.Action;
+import io.a4s.api.Worker;
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +40,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 
 public final class A4sPolicy implements ScalingPolicy {
     public static final String MODEL_VERSION = "fixed-latency-v1";
@@ -149,7 +153,7 @@ public final class A4sPolicy implements ScalingPolicy {
                 return hold(
                         request,
                         Action.INFEASIBLE_CONFIGURATION,
-                        "No placement fits resource budgets",
+                        "Could not verify a placement within resource budgets",
                         attempt);
             }
         }
@@ -238,7 +242,8 @@ public final class A4sPolicy implements ScalingPolicy {
                         ? Long.MAX_VALUE
                         : request.constraints.totalCacheBudgetBytes;
         boolean limitCache = request.constraints.totalCacheBudgetBytes != null;
-        double cpu = 0;
+        var cpuBudget = request.constraints.cpuBudgetCores;
+        BigDecimal remainingCpu = cpuBudget == null ? null : BigDecimal.valueOf(cpuBudget);
         for (var decision : selected) {
             var target = decision.target;
             if (!withinManagedBudget(request, decision)) {
@@ -257,12 +262,15 @@ public final class A4sPolicy implements ScalingPolicy {
                 }
                 remainingCache -= decision.targetTotalCacheBytes;
             }
-            if (request.constraints.cpuBudgetCores != null) {
+            if (remainingCpu != null) {
                 if (target.cpuCoresPerTask == null) {
                     return false;
                 }
-                cpu += target.cpuCoresPerTask * target.parallelism;
-                if (cpu > request.constraints.cpuBudgetCores) {
+                remainingCpu =
+                        remainingCpu.subtract(
+                                BigDecimal.valueOf(target.cpuCoresPerTask)
+                                        .multiply(BigDecimal.valueOf(target.parallelism)));
+                if (remainingCpu.signum() < 0) {
                     return false;
                 }
             }
@@ -293,12 +301,7 @@ public final class A4sPolicy implements ScalingPolicy {
         if (workers.isEmpty()) {
             return true;
         }
-        long bytesLeft = 0;
-        double cpuLeft = 0;
-        for (var worker : workers) {
-            bytesLeft += Math.min(Long.MAX_VALUE - bytesLeft, worker.allocatableBytes);
-            cpuLeft += worker.allocatableCpuCores;
-        }
+        var tasks = new ArrayList<TaskDemand>(selected.size());
         for (int i = 0; i < selected.size(); i++) {
             var operator = request.snapshot.operators.get(i);
             var target = selected.get(i).target;
@@ -319,24 +322,77 @@ public final class A4sPolicy implements ScalingPolicy {
                     || cacheGrowth > Long.MAX_VALUE - perTaskBytes - managedGrowth) {
                 return false;
             }
-            perTaskBytes += managedGrowth + cacheGrowth;
-            final long bytes = perTaskBytes;
-            if (bytes > bytesLeft / target.parallelism
-                    || workers.stream()
-                            .noneMatch(
-                                    worker ->
-                                            worker.allocatableBytes >= bytes
-                                                    && worker.allocatableCpuCores
-                                                            >= target.cpuCoresPerTask)) {
-                return false;
+            tasks.add(
+                    new TaskDemand(
+                            perTaskBytes + managedGrowth + cacheGrowth,
+                            BigDecimal.valueOf(target.cpuCoresPerTask),
+                            target.parallelism));
+        }
+        tasks.sort(
+                Comparator.comparingLong((TaskDemand task) -> task.bytes)
+                        .thenComparing(task -> task.cpuCores)
+                        .reversed());
+        var balances =
+                workers.stream()
+                        .sorted(Comparator.comparing(worker -> worker.workerId))
+                        .map(WorkerBalance::new)
+                        .collect(Collectors.toList());
+        // Produce a placement witness. A greedy packing can decline a feasible plan,
+        // but it cannot approve a plan whose tasks do not fit together.
+        for (var task : tasks) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new CancellationException("A4S evaluation interrupted");
             }
-            bytesLeft -= bytes * target.parallelism;
-            cpuLeft -= target.cpuCoresPerTask * target.parallelism;
-            if (cpuLeft < 0 || Double.isNaN(cpuLeft)) {
+            int remaining = task.count;
+            for (var worker : balances) {
+                remaining -= worker.reserve(task, remaining);
+                if (remaining == 0) {
+                    break;
+                }
+            }
+            if (remaining > 0) {
                 return false;
             }
         }
         return true;
+    }
+
+    private static final class TaskDemand {
+        private final long bytes;
+        private final BigDecimal cpuCores;
+        private final int count;
+
+        private TaskDemand(long bytes, BigDecimal cpuCores, int count) {
+            this.bytes = bytes;
+            this.cpuCores = cpuCores;
+            this.count = count;
+        }
+    }
+
+    private static final class WorkerBalance {
+        private long bytesLeft;
+        private BigDecimal cpuLeft;
+
+        private WorkerBalance(Worker worker) {
+            bytesLeft = worker.allocatableBytes;
+            cpuLeft = BigDecimal.valueOf(worker.allocatableCpuCores);
+        }
+
+        private int reserve(TaskDemand task, int count) {
+            // Pack identical subtasks in bulk even for high parallelism.
+            int fit = task.bytes == 0 ? count : (int) Math.min(count, bytesLeft / task.bytes);
+            if (fit == 0) {
+                return 0;
+            }
+            var cpu = task.cpuCores.multiply(BigDecimal.valueOf(fit));
+            if (cpu.compareTo(cpuLeft) > 0) {
+                fit = cpuLeft.divideToIntegralValue(task.cpuCores).intValueExact();
+                cpu = task.cpuCores.multiply(BigDecimal.valueOf(fit));
+            }
+            bytesLeft -= task.bytes * fit;
+            cpuLeft = cpuLeft.subtract(cpu);
+            return fit;
+        }
     }
 
     private static long growth(Long current, Long target) {
