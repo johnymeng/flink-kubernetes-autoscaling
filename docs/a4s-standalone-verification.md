@@ -379,7 +379,7 @@ python3 scripts/a4s/score-q8-crossover.py "$Q8_RUN_BUNDLE" \
 
 ### Check source backlog in a paced Q8 comparison
 
-The pinned replay job accepts a flat `--q8-input-plan` in `seconds:personRate:auctionRate` form. The rates apply to each source subtask. For a 600-second comparison at 10,000 offered records/s with two subtasks per source, use `600:1111:3889` and set `--person-srcRate 1111` and `--auction-srcRate 3889` in the copied launch configuration. Update the corresponding input-plan assertion in the archived launcher before it seals either bundle. Keep the same release-relative windows, task placement and starting profiles in both deployments. The lower offered rate is a control for latency under lighter load. The saturated runs supply the capacity observations.
+The pinned replay job accepts a flat `--q8-input-plan` in `seconds:personRate:auctionRate` form. The rates apply to each source subtask. For a 600-second comparison at 10,000 offered records/s with two subtasks per source, use `600:1111:3889` and set `--person-srcRate 1111` and `--auction-srcRate 3889` in the copied launch configuration. Record the expected input plan and latency sample stride in the execution spec and check both against the live job arguments in the startup witness. Keep the same release-relative windows, task placement and starting profiles in both deployments. The lower offered rate is a control for latency under lighter load. The saturated runs supply the capacity observations.
 
 Use a backlog limit of 10,000 records to check for no more than one second of the planned input in the combined source backlog at the sampled points. The scorer reads the raw operational series, requires `q8Offered` and `q8Backlog` from all four source subtasks on the measured attempts, and reports the observed offer rate, peak backlog and sample coverage for each window. The limit covers the recorded observations. REST gauge refresh can affect the observed offer rate over short spans.
 
@@ -390,6 +390,8 @@ python3 scripts/a4s/score-q8-crossover.py "$Q8_PACED_BUNDLE" \
 ```
 
 A local in-memory MiniCluster smoke used the same source split with a 30-second plan. Over 9.97 seconds of warmed input, Flink reported 9,999.6 offered records/s, 9,999.0 emitted records/s and 9,983.7 join inputs/s. Peak observed backlog was 83 records. The short smoke recorded zero joined-result latency samples. Local RocksDB exhausted RAM scratch, so the complete pacing check used in-memory state. The gate independently rejected `live-b85805f4` at its first saturated window with 11,195,976 observed backlogged records, and scoring with the option omitted reproduced the archived comparison byte for byte.
+
+The paced preflight rendered both Flink manifests and the isolated operator chart from the `live-d2911435` artifact receipt. It held the images, starting profiles, timing and placement fixed. It set `--q8-latency-sample-every 256` to give the lighter input more latency samples. The startup witness accepted archived admission evidence with the new plan and stride and rejected the old saturated plan and the old sampling stride independently. This was an offline check of the launcher and startup witness. The paced lab latency comparison remains unverified.
 
 ### Prepare the Q20 follow-up
 
