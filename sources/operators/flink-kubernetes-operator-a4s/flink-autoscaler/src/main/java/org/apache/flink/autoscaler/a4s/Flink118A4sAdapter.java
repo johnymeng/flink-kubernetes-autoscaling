@@ -247,7 +247,7 @@ public final class Flink118A4sAdapter {
                 null,
                 null,
                 null,
-                count(metrics.get(ScalingMetric.LAG)),
+                count(metrics.get(ScalingMetric.OBSERVED_SOURCE_BACKLOG)),
                 Map.of());
     }
 

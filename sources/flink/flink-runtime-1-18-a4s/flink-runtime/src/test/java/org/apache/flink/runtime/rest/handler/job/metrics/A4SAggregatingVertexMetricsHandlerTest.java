@@ -40,6 +40,7 @@ import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
 import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
+import org.apache.flink.runtime.rest.util.RestMapperUtils;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 import org.apache.flink.testutils.TestingUtils;
@@ -62,7 +63,9 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.closeTo;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -177,6 +180,97 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                                 jobId.toString(), jobVertexId.toString(), 0, attempt, ""),
                         "rocksdb_stack-distance-histogram",
                         histogram));
+    }
+
+    @Test
+    public void testSourceBacklogRequiresEveryCurrentAttempt() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(2);
+        ArchivedExecutionVertex[] tasks = {runningBacklogTask(0, 1), runningBacklogTask(1, 2)};
+        when(vertex.getTaskVertices()).thenReturn(tasks);
+
+        Map<String, String> paths = new HashMap<>();
+        paths.put(JobIDPathParameter.KEY, jobId.toString());
+        paths.put(JobVertexIdPathParameter.KEY, jobVertexId.toString());
+        HandlerRequest<EmptyRequestBody> request =
+                HandlerRequest.resolveParametersAndCreate(
+                        EmptyRequestBody.getInstance(),
+                        handler.getMessageHeaders().getUnresolvedMessageParameters(),
+                        paths,
+                        Collections.singletonMap(
+                                "get",
+                                Collections.singletonList(
+                                        A4SAggregatedMetricsResponseBody
+                                                .FIELD_NAME_OBSERVED_BACKLOG)),
+                        Collections.emptyList());
+
+        putPendingRecords(0, 0, "Source", "95");
+        putPendingRecords(1, 0, "Source", "7");
+        putPendingRecords(0, 1, "Source", "0");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedSourceBacklogRecords());
+
+        putPendingRecords(1, 2, "Source", "0");
+        A4SAggregatedMetricsResponseBody complete =
+                handler.handleRequest(request, restfulGateway).get();
+        assertEquals(Long.valueOf(0), complete.getObservedSourceBacklogRecords());
+        assertEquals(Status.HISTOGRAM_UNAVAILABLE, complete.getMrcStatus());
+        A4SAggregatedMetricsResponseBody legacy =
+                handler.handleRequest(
+                                createRequest(jobId.toString(), jobVertexId.toString()),
+                                restfulGateway)
+                        .get();
+        assertNull(legacy.getObservedSourceBacklogRecords());
+        assertFalse(
+                RestMapperUtils.getStrictObjectMapper()
+                        .writeValueAsString(legacy)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG));
+
+        putPendingRecords(1, 2, "Source", "13");
+        assertEquals(
+                Long.valueOf(13),
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedSourceBacklogRecords());
+
+        putPendingRecords(1, 2, "Source", "NaN");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedSourceBacklogRecords());
+        putPendingRecords(1, 2, "Source", "13");
+
+        putPendingRecords(1, 2, "Alias", "13");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedSourceBacklogRecords());
+    }
+
+    private static ArchivedExecutionVertex runningBacklogTask(int index, int attemptNumber) {
+        ArchivedExecutionVertex task = mock(ArchivedExecutionVertex.class);
+        ArchivedExecution attempt = mock(ArchivedExecution.class);
+        when(task.getExecutionState()).thenReturn(ExecutionState.RUNNING);
+        when(task.getParallelSubtaskIndex()).thenReturn(index);
+        when(task.getCurrentExecutionAttempt()).thenReturn(attempt);
+        when(task.getCurrentExecutions()).thenReturn(Collections.singletonList(attempt));
+        when(attempt.getAttemptNumber()).thenReturn(attemptNumber);
+        return task;
+    }
+
+    private void putPendingRecords(int index, int attempt, String scope, String value) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), index, attempt, scope),
+                        "pendingRecords",
+                        value));
     }
 
     @Test

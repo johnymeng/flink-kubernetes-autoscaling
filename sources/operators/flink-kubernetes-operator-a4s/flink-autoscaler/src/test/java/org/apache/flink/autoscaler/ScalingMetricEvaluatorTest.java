@@ -155,6 +155,48 @@ public class ScalingMetricEvaluatorTest {
                 expectedRate, request.snapshot.operators.get(0).telemetry.outputRecordsPerSecond);
     }
 
+    @ParameterizedTest
+    @CsvSource({"0, 0", "27, 27", ","})
+    void normalizesOnlyObservedSourceBacklog(Double observed, Long expected) {
+        var source = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(source, Map.of(), 1, 8));
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        for (int second : new int[] {0, 10}) {
+            var metrics = new HashMap<ScalingMetric, Double>();
+            metrics.put(ScalingMetric.LAG, 0.0);
+            metrics.put(ScalingMetric.NUM_RECORDS_IN, second * 10.0);
+            if (observed != null) {
+                metrics.put(ScalingMetric.OBSERVED_SOURCE_BACKLOG, observed);
+            }
+            history.put(
+                    Instant.ofEpochSecond(second),
+                    new CollectedMetrics(Map.of(source, metrics), Map.of(), Map.of()));
+        }
+        var evaluated =
+                evaluator.evaluate(
+                        conf,
+                        new CollectedMetricHistory(topology, history, history.firstKey()),
+                        Duration.ZERO);
+        var profile = ResourceProfile.newBuilder().setManagedMemoryMB(116).build();
+        var request =
+                new Flink118A4sAdapter()
+                        .request(
+                                "test-job",
+                                "generation-1",
+                                history.lastKey(),
+                                topology,
+                                evaluated,
+                                Map.of(),
+                                Map.of(source, profile),
+                                conf);
+        assertEquals(expected, request.snapshot.operators.get(0).telemetry.sourceBacklogRecords);
+        assertEquals(
+                0.0, evaluated.getVertexMetrics().get(source).get(ScalingMetric.LAG).getCurrent());
+    }
+
     @Test
     public void testLagBasedSourceScaling() {
         var source = new JobVertexID();

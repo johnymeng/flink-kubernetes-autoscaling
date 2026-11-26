@@ -222,7 +222,10 @@ public enum ScalingMetric {
     OBSERVED_NUM_RECORDS_OUT(false),
 
     /** Observed output throughput over the complete autoscaler measurement window. */
-    OUTPUT_RATE(false);
+    OUTPUT_RATE(false),
+
+    /** Pending records covered by the current source attempt roster. */
+    OBSERVED_SOURCE_BACKLOG(false);
 
     @Getter private final boolean calculateAverage;
 

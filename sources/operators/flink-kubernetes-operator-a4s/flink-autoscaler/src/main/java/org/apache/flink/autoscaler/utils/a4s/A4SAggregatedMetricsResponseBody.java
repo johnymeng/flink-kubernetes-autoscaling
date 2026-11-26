@@ -22,6 +22,7 @@ import org.apache.flink.a4s.core.MissRateCurveObservation;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
 import javax.annotation.Nullable;
@@ -30,14 +31,32 @@ import javax.annotation.Nullable;
 public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
         implements ResponseBody {
 
+    public static final String FIELD_NAME_OBSERVED_BACKLOG = "observedSourceBacklogRecords";
+
+    @Nullable private final Long observedSourceBacklogRecords;
+
     public A4SAggregatedMetricsResponseBody(@Nullable MissRateCurve scaledMrc) {
         this(null, scaledMrc);
+    }
+
+    public A4SAggregatedMetricsResponseBody(
+            @Nullable Status status, @Nullable MissRateCurve scaledMrc) {
+        this(status, scaledMrc, null);
     }
 
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
             @JsonProperty(FIELD_NAME_STATUS) @Nullable Status status,
-            @JsonProperty(FIELD_NAME_SCALED_MRC) @Nullable MissRateCurve scaledMrc) {
+            @JsonProperty(FIELD_NAME_SCALED_MRC) @Nullable MissRateCurve scaledMrc,
+            @JsonProperty(FIELD_NAME_OBSERVED_BACKLOG) @Nullable Long observedSourceBacklogRecords) {
         super(status, scaledMrc);
+        this.observedSourceBacklogRecords = observedSourceBacklogRecords;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty(FIELD_NAME_OBSERVED_BACKLOG)
+    @Nullable
+    public Long getObservedSourceBacklogRecords() {
+        return observedSourceBacklogRecords;
     }
 }

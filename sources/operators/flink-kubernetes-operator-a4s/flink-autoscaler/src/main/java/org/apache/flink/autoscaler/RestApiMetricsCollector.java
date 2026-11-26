@@ -18,11 +18,12 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedVertexMetricsHeaders;
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.FlinkMetric;
+import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
@@ -88,18 +89,28 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
     }
 
     @Override
-    protected Map<JobVertexID, MissRateCurve> queryAllMissRateCurves(
-            Context ctx, Collection<JobVertexID> jobVertexIds) {
-        var curves = new HashMap<JobVertexID, MissRateCurve>();
+    protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
+            Context ctx, JobTopology topology, Collection<JobVertexID> jobVertexIds) {
+        var conf = ctx.getConfiguration();
+        boolean captureBacklog =
+                conf.get(AutoScalerOptions.JUSTIN_ENABLED)
+                        && conf.get(AutoScalerOptions.A4S_ENABLED);
+        var observations = new HashMap<JobVertexID, A4SAggregatedMetricsResponseBody>();
         for (JobVertexID vertex : jobVertexIds) {
-            var observation = queryVertexMissRateCurve(ctx, ctx.getJobID(), vertex);
-            observation.getCurve().ifPresent(curve -> curves.put(vertex, curve));
+            var observation =
+                    captureBacklog && topology.isSource(vertex)
+                            ? queryVertexA4sMetrics(ctx, ctx.getJobID(), vertex, true)
+                            : queryVertexMissRateCurve(ctx, ctx.getJobID(), vertex);
+            observations.put(vertex, observation);
             if (observation.getMrcStatus() != Status.AVAILABLE) {
-                LOG.debug("QuickMRC status for job {}, vertex {}: {}",
-                        ctx.getJobID(), vertex, observation.getMrcStatus());
+                LOG.debug(
+                        "QuickMRC status for job {}, vertex {}: {}",
+                        ctx.getJobID(),
+                        vertex,
+                        observation.getMrcStatus());
             }
         }
-        return curves;
+        return observations;
     }
 
     @SneakyThrows
@@ -136,10 +147,19 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
 
     protected A4SAggregatedMetricsResponseBody queryVertexMissRateCurve(
             Context ctx, JobID jobId, JobVertexID jobVertexID) {
+        return queryVertexA4sMetrics(ctx, jobId, jobVertexID, false);
+    }
+
+    protected A4SAggregatedMetricsResponseBody queryVertexA4sMetrics(
+            Context ctx, JobID jobId, JobVertexID jobVertexID, boolean includeBacklog) {
         var parameters = new AggregatedSubtaskMetricsParameters();
         var pathIt = parameters.getPathParameters().iterator();
         ((JobIDPathParameter) pathIt.next()).resolve(jobId);
         ((JobVertexIdPathParameter) pathIt.next()).resolve(jobVertexID);
+        if (includeBacklog) {
+            var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
+            filter.resolve(List.of(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG));
+        }
 
         try (var restClient = ctx.getRestClusterClient()) {
             A4SAggregatedMetricsResponseBody responseBody =

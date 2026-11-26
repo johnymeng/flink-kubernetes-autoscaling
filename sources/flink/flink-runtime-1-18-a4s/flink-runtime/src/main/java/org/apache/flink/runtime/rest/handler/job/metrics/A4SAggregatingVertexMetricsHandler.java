@@ -39,6 +39,7 @@ import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedVertexMetricsHeaders;
 import org.apache.flink.runtime.rest.messages.job.metrics.AggregatedSubtaskMetricsParameters;
+import org.apache.flink.runtime.rest.messages.job.metrics.MetricsFilterParameter;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 
@@ -48,6 +49,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -92,26 +94,41 @@ public class A4SAggregatingVertexMetricsHandler
             throws RestHandlerException {
         JobID jobId = request.getPathParameter(JobIDPathParameter.class);
         JobVertexID vertexID = request.getPathParameter(JobVertexIdPathParameter.class);
+        boolean includeBacklog =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG);
 
         return CompletableFuture.supplyAsync(
-                () -> {
-                    try {
-                        return processRequest(jobId, vertexID, gateway);
-                    } catch (Exception e) {
-                        log.warn(
-                                "A4S [{}]: jobId={} vertexId={} message={}",
-                                A4SMetricsFlowStep.HANDLER_FAILED.name(),
-                                jobId,
-                                vertexID,
-                                e.getMessage(),
-                                e);
-                        throw new CompletionException(
-                                new RestHandlerException(
-                                        "Could not retrieve A4S metrics.",
-                                        HttpResponseStatus.INTERNAL_SERVER_ERROR));
-                    }
-                },
-                this.executor).thenCompose(response -> response);
+                        () -> {
+                            try {
+                                CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
+                                        processRequest(jobId, vertexID, gateway);
+                                if (!includeBacklog) {
+                                    return curve;
+                                }
+                                return curve.thenCombine(
+                                        observeSourceBacklog(jobId, vertexID, gateway),
+                                        (response, backlog) ->
+                                                new A4SAggregatedMetricsResponseBody(
+                                                        response.getMrcStatus(),
+                                                        response.getCurve().orElse(null),
+                                                        backlog));
+                            } catch (Exception e) {
+                                log.warn(
+                                        "A4S [{}]: jobId={} vertexId={} message={}",
+                                        A4SMetricsFlowStep.HANDLER_FAILED.name(),
+                                        jobId,
+                                        vertexID,
+                                        e.getMessage(),
+                                        e);
+                                throw new CompletionException(
+                                        new RestHandlerException(
+                                                "Could not retrieve A4S metrics.",
+                                                HttpResponseStatus.INTERNAL_SERVER_ERROR));
+                            }
+                        },
+                        this.executor)
+                .thenCompose(response -> response);
     }
 
     private CompletableFuture<A4SAggregatedMetricsResponseBody> processRequest(
@@ -162,6 +179,89 @@ public class A4SAggregatingVertexMetricsHandler
         } catch (IllegalArgumentException | ArithmeticException e) {
             return completedFuture(invalidHistogram(jobId, vertexID, e));
         }
+    }
+
+    private CompletableFuture<Long> observeSourceBacklog(
+            JobID jobId, JobVertexID vertexId, RestfulGateway gateway) {
+        return gateway.requestJob(jobId, timeout)
+                .thenApply(
+                        graph ->
+                                aggregateCurrentAttemptBacklog(
+                                        fetcher.getMetricStore(),
+                                        jobId,
+                                        vertexId,
+                                        graph.getJobVertex(vertexId)))
+                .exceptionally(
+                        failure -> {
+                            log.debug(
+                                    "Unable to observe source backlog for job {} vertex {}",
+                                    jobId,
+                                    vertexId,
+                                    failure);
+                            return null;
+                        });
+    }
+
+    @Nullable
+    private static Long aggregateCurrentAttemptBacklog(
+            MetricStore store,
+            JobID jobId,
+            JobVertexID vertexId,
+            @Nullable AccessExecutionJobVertex vertex) {
+        if (vertex == null
+                || vertex.getParallelism() <= 0
+                || vertex.getTaskVertices().length != vertex.getParallelism()) {
+            return null;
+        }
+        long total = 0;
+        HashSet<Integer> indices = new HashSet<>();
+        for (AccessExecutionVertex task : vertex.getTaskVertices()) {
+            int index = task.getParallelSubtaskIndex();
+            if (index < 0
+                    || index >= vertex.getParallelism()
+                    || !indices.add(index)
+                    || task.getExecutionState() != ExecutionState.RUNNING
+                    || task.getCurrentExecutions().size() != 1) {
+                return null;
+            }
+            MetricStore.ComponentMetricStore attempt =
+                    store.getSubtaskAttemptMetricStore(
+                            jobId.toString(),
+                            vertexId.toString(),
+                            index,
+                            task.getCurrentExecutionAttempt().getAttemptNumber());
+            Long pending = attempt == null ? null : readPendingRecords(attempt.metrics);
+            if (pending == null || pending > Long.MAX_VALUE - total) {
+                return null;
+            }
+            total += pending;
+        }
+        return total;
+    }
+
+    @Nullable
+    private static Long readPendingRecords(Map<String, String> metrics) {
+        Long pending = null;
+        for (Map.Entry<String, String> metric : metrics.entrySet()) {
+            String name = metric.getKey();
+            if (!"pendingRecords".equals(name) && !name.endsWith(".pendingRecords")) {
+                continue;
+            }
+            // A vertex may expose connector-specific aliases or multiple readers.
+            // Only an unambiguous counter is safe to attribute to this subtask.
+            if (pending != null) {
+                return null;
+            }
+            try {
+                pending = Long.parseLong(metric.getValue());
+                if (pending < 0) {
+                    return null;
+                }
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return pending;
     }
 
     private A4SAggregatedMetricsResponseBody buildShardsResponse(

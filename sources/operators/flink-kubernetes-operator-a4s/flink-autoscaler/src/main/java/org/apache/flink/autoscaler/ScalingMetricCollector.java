@@ -32,6 +32,7 @@ import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.execution.ExecutionState;
@@ -132,9 +133,13 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         var filteredVertexMetricNames = queryFilteredMetricNames(ctx, topology, isStabilizing);
 
         // Aggregated job vertex metrics collected from Flink based on the filtered metric names
-        var collectedVertexMetrics = queryAllAggregatedMetrics(ctx, filteredVertexMetricNames);        
-        var collectedMissRateCurves =
-                queryAllMissRateCurves(ctx, filteredVertexMetricNames.keySet());
+        var collectedVertexMetrics = queryAllAggregatedMetrics(ctx, filteredVertexMetricNames);
+        var a4sObservations = queryAllA4sMetrics(ctx, topology, filteredVertexMetricNames.keySet());
+        var collectedMissRateCurves = new HashMap<JobVertexID, MissRateCurve>();
+        a4sObservations.forEach(
+                (vertex, response) ->
+                        response.getCurve()
+                                .ifPresent(curve -> collectedMissRateCurves.put(vertex, curve)));
 
         var collectedJmMetrics = queryJmMetrics(ctx);
         var collectedTmMetrics = queryTmMetrics(ctx);
@@ -522,8 +527,8 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                     Context ctx,
                     Map<JobVertexID, Map<String, FlinkMetric>> filteredVertexMetricNames);
 
-    protected Map<JobVertexID, MissRateCurve> queryAllMissRateCurves(
-            Context ctx, Collection<JobVertexID> jobVertexIds) {
+    protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
+            Context ctx, JobTopology topology, Collection<JobVertexID> jobVertexIds) {
         return Collections.emptyMap();
     }
 
