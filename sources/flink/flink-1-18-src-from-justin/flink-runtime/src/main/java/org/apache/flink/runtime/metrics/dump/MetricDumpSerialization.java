@@ -37,6 +37,7 @@ import java.io.DataInput;
 import java.io.DataOutput;
 import java.io.IOException;
 import java.io.Serializable;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -129,11 +130,6 @@ public class MetricDumpSerialization {
          * <p>Should a {@link Metric} accessed in this method throw an exception it will be omitted
          * from the returned {@link MetricSerializationResult}.
          *
-         * <p>If the serialization of any primitive or String fails then the returned {@link
-         * MetricSerializationResult} is partially corrupted. Such a result can be deserialized
-         * safely by {@link MetricDumpDeserializer#deserialize(MetricSerializationResult)}; however
-         * only metrics that were fully serialized before the failure will be returned.
-         *
          * @param counters counters to serialize
          * @param gauges gauges to serialize
          * @param histograms histograms to serialize
@@ -149,6 +145,7 @@ public class MetricDumpSerialization {
             countersBuffer.clear();
             int numCounters = 0;
             for (Map.Entry<Counter, Tuple2<QueryScopeInfo, String>> entry : counters.entrySet()) {
+                int position = countersBuffer.length();
                 try {
                     serializeCounter(
                             countersBuffer,
@@ -157,6 +154,7 @@ public class MetricDumpSerialization {
                             entry.getKey());
                     numCounters++;
                 } catch (Exception e) {
+                    countersBuffer.setPosition(position);
                     LOG.debug("Failed to serialize counter.", e);
                 }
             }
@@ -164,11 +162,13 @@ public class MetricDumpSerialization {
             gaugesBuffer.clear();
             int numGauges = 0;
             for (Map.Entry<Gauge<?>, Tuple2<QueryScopeInfo, String>> entry : gauges.entrySet()) {
+                int position = gaugesBuffer.length();
                 try {
                     serializeGauge(
                             gaugesBuffer, entry.getValue().f0, entry.getValue().f1, entry.getKey());
                     numGauges++;
                 } catch (Exception e) {
+                    gaugesBuffer.setPosition(position);
                     LOG.debug("Failed to serialize gauge.", e);
                 }
             }
@@ -177,6 +177,7 @@ public class MetricDumpSerialization {
             int numHistograms = 0;
             for (Map.Entry<Histogram, Tuple2<QueryScopeInfo, String>> entry :
                     histograms.entrySet()) {
+                int position = histogramsBuffer.length();
                 try {
                     serializeHistogram(
                             histogramsBuffer,
@@ -185,6 +186,7 @@ public class MetricDumpSerialization {
                             entry.getKey());
                     numHistograms++;
                 } catch (Exception e) {
+                    histogramsBuffer.setPosition(position);
                     LOG.debug("Failed to serialize histogram.", e);
                 }
             }
@@ -192,11 +194,13 @@ public class MetricDumpSerialization {
             metersBuffer.clear();
             int numMeters = 0;
             for (Map.Entry<Meter, Tuple2<QueryScopeInfo, String>> entry : meters.entrySet()) {
+                int position = metersBuffer.length();
                 try {
                     serializeMeter(
                             metersBuffer, entry.getValue().f0, entry.getValue().f1, entry.getKey());
                     numMeters++;
                 } catch (Exception e) {
+                    metersBuffer.setPosition(position);
                     LOG.debug("Failed to serialize meter.", e);
                 }
             }
@@ -286,7 +290,9 @@ public class MetricDumpSerialization {
 
         serializeMetricInfo(out, info);
         out.writeUTF(name);
-        out.writeUTF(stringValue);
+        byte[] bytes = stringValue.getBytes(StandardCharsets.UTF_8);
+        out.writeInt(bytes.length);
+        out.write(bytes);
     }
 
     private static void serializeHistogram(
@@ -411,8 +417,13 @@ public class MetricDumpSerialization {
     private static MetricDump.GaugeDump deserializeGauge(DataInputView dis) throws IOException {
         QueryScopeInfo scope = deserializeMetricInfo(dis);
         String name = dis.readUTF();
-        String value = dis.readUTF();
-        return new MetricDump.GaugeDump(scope, name, value);
+        int length = dis.readInt();
+        if (length < 0) {
+            throw new IOException("Negative gauge value length: " + length);
+        }
+        byte[] bytes = new byte[length];
+        dis.readFully(bytes);
+        return new MetricDump.GaugeDump(scope, name, new String(bytes, StandardCharsets.UTF_8));
     }
 
     private static MetricDump.HistogramDump deserializeHistogram(DataInputView dis)
