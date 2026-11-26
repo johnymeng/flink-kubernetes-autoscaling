@@ -116,6 +116,15 @@ scripts/a4s/smoke-local-flink-rescale.sh "$FLINK_CLASSPATH" /tmp/a4s-smoke
 
 The script starts a local Flink MiniCluster and a separate runner JVM on loopback. It checkpoints a deterministic source and keyed RocksDB state after the first 100 records. The Flink executor sends fixed demand and miss-rate inputs to the runner and validates the result against live Flink details. The test driver submits the stored overrides through Justin, waits for the stateful vertex to reach parallelism 2 with the same applied slot profile, then releases the remaining records. It checks every ID and keyed count through record 200 and verifies the recorded recommendation by replay. Logs and JSONL evidence go into a fresh directory under the requested output path.
 
+To run the same check with Kafka, pass the path to an unpacked Kafka 3.7.2 binary distribution. Append the Kafka connector and its dependencies to the classpath. The tested versions are `flink-connector-kafka:3.1.0-1.18`, `flink-connector-base:1.18.1`, and `kafka-clients:3.4.0`. This mode also requires Python 3 to choose free loopback ports.
+
+```bash
+scripts/a4s/smoke-local-flink-rescale.sh \
+  "$FLINK_CLASSPATH:$KAFKA_CONNECTOR_CLASSPATH" /tmp/a4s-kafka-smoke "$KAFKA_DIST"
+```
+
+The script owns a fresh, local Kafka broker and stops it on exit. It writes 100 inputs across two partitions before rescaling and 100 afterward. The check reads the source group's committed offsets in Kafka and scans the transactional sink with a separate `read_committed` consumer after the job stops. `committed-output.csv` records the broker offset, input ID and keyed count for every committed result.
+
 ## Native instrumentation and future adapters
 
 The C++11 [SHARDS estimator](../sources/libs/frocksdb/util/shards/) builds independently with CMake. FRocksDB still supplies its original seeded hash, scoped cache keys, charge and admission semantics. The RocksDB wrapper retains the JNI snapshot layout and cumulative counters. Flink's existing histogram aggregation and `scaledMrc` endpoint still publish aggregate observations. The network service receives no individual cache access.

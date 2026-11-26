@@ -24,7 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
@@ -54,6 +54,7 @@ import org.apache.flink.configuration.RestOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
+import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
@@ -67,6 +68,8 @@ import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequireme
 import org.apache.flink.runtime.state.FunctionInitializationContext;
 import org.apache.flink.runtime.state.FunctionSnapshotContext;
 import org.apache.flink.streaming.api.checkpoint.CheckpointedFunction;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
@@ -74,9 +77,58 @@ import org.apache.flink.streaming.api.functions.source.RichParallelSourceFunctio
 import org.apache.flink.util.Collector;
 
 public final class LocalAdaptiveA4sSmoke {
-    private static final AtomicBoolean SECOND_PHASE = new AtomicBoolean();
+    interface Workload {
+        DataStream<Long> source(StreamExecutionEnvironment env);
+
+        void sink(SingleOutputStreamOperator<Tuple2<Long, Long>> counts);
+
+        void publish(int first, int last) throws Exception;
+
+        void awaitResults(int expected) throws Exception;
+
+        default void verifyOffsets(int expected) throws Exception {}
+
+        Iterable<Tuple2<Long, Long>> results() throws Exception;
+    }
+
+    private static final AtomicInteger INPUT_LIMIT = new AtomicInteger();
     private static final ConcurrentLinkedQueue<Tuple2<Long, Long>> OUTPUT =
             new ConcurrentLinkedQueue<>();
+
+    private static final class InMemoryWorkload implements Workload {
+        @Override
+        public DataStream<Long> source(StreamExecutionEnvironment env) {
+            return env.addSource(new DeterministicSource())
+                    .name("deterministic-source")
+                    .slotSharingGroup("source");
+        }
+
+        @Override
+        public void sink(SingleOutputStreamOperator<Tuple2<Long, Long>> counts) {
+            counts.addSink(new CollectResults()).slotSharingGroup("stateful");
+        }
+
+        @Override
+        public void publish(int first, int last) {
+            INPUT_LIMIT.set(last);
+        }
+
+        @Override
+        public void awaitResults(int expected) throws InterruptedException {
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+            while (OUTPUT.size() < expected && System.nanoTime() - deadline < 0) {
+                Thread.sleep(25);
+            }
+            check(
+                    OUTPUT.size() == expected,
+                    "Expected " + expected + " outputs but got " + OUTPUT.size());
+        }
+
+        @Override
+        public Iterable<Tuple2<Long, Long>> results() {
+            return OUTPUT;
+        }
+    }
 
     public static final class DeterministicSource extends RichParallelSourceFunction<Long>
             implements CheckpointedFunction {
@@ -88,7 +140,7 @@ public final class LocalAdaptiveA4sSmoke {
         public void run(SourceContext<Long> ctx) throws Exception {
             while (running) {
                 synchronized (ctx.getCheckpointLock()) {
-                    long bound = SECOND_PHASE.get() ? 200 : 100;
+                    long bound = INPUT_LIMIT.get();
                     while (next <= bound && running) {
                         ctx.collect(next++);
                     }
@@ -146,6 +198,10 @@ public final class LocalAdaptiveA4sSmoke {
     }
 
     public static void main(String[] args) throws Exception {
+        run(args[0], Path.of(args[1]), new InMemoryWorkload());
+    }
+
+    static void run(String runnerUrl, Path evidence, Workload workload) throws Exception {
         var conf = new Configuration();
         conf.set(RestOptions.BIND_ADDRESS, "127.0.0.1");
         conf.set(RestOptions.BIND_PORT, "0");
@@ -179,22 +235,20 @@ public final class LocalAdaptiveA4sSmoke {
                                 .setMaxParallelism(8);
                 env.enableCheckpointing(250);
                 env.getCheckpointConfig()
-                        .setCheckpointStorage(Path.of(args[1], "checkpoints").toUri());
+                        .setCheckpointStorage(evidence.resolve("checkpoints").toUri());
                 env.setStateBackend(new EmbeddedRocksDBStateBackend(true));
-                env.addSource(new DeterministicSource())
-                        .name("deterministic-source")
-                        .slotSharingGroup("source")
-                        .keyBy(value -> (int) (value % 4))
-                        .process(new CountByKey())
-                        .name("stateful-count")
-                        .slotSharingGroup("stateful")
-                        .addSink(new CollectResults())
-                        .slotSharingGroup("stateful");
+                workload.sink(
+                        workload.source(env)
+                                .keyBy(value -> (int) (value % 4))
+                                .process(new CountByKey())
+                                .name("stateful-count")
+                                .slotSharingGroup("stateful"));
                 var graph = env.getStreamGraph().getJobGraph();
                 var id = graph.getJobID();
                 cluster.submitJob(graph).get(15, TimeUnit.SECONDS);
-                awaitOutput(100);
                 var before = awaitRunning(client, id, 1);
+                workload.publish(1, 100);
+                workload.awaitResults(100);
                 var source = find(before, "deterministic-source").getJobVertexID();
                 var stateful = find(before, "stateful-count").getJobVertexID();
                 var beforeProfiles = requirements(client, id).getJobVertexParallelisms();
@@ -205,6 +259,7 @@ public final class LocalAdaptiveA4sSmoke {
                         "Both live profiles are required");
                 var checkpoint = cluster.triggerCheckpoint(id).get(20, TimeUnit.SECONDS);
                 check(checkpoint != null, "Checkpoint path missing");
+                workload.verifyOffsets(100);
                 System.out.println(
                         "Phase 1 observed 100 records and completed a checkpoint: " + checkpoint);
 
@@ -223,7 +278,7 @@ public final class LocalAdaptiveA4sSmoke {
                         AutoScalerOptions.A4S_MANAGED_MEMORY_OVERRIDE_MB,
                         Math.toIntExact(
                                 statefulProfile.getManagedMemory().getBytes() / (1024L * 1024L)));
-                plannerConfig.set(AutoScalerOptions.A4S_RUNNER_URL, args[0]);
+                plannerConfig.set(AutoScalerOptions.A4S_RUNNER_URL, runnerUrl);
                 plannerConfig.set(
                         AutoScalerOptions.A4S_SNAPSHOT_RECORD_FILE, "local-adaptive.jsonl");
                 var ctx =
@@ -325,14 +380,21 @@ public final class LocalAdaptiveA4sSmoke {
                 System.out.println(
                         "Justin applied stateful parallelism 2 and preserved both exact slot profiles in a new running epoch.");
 
-                SECOND_PHASE.set(true);
-                awaitOutput(200);
+                workload.publish(101, 200);
+                workload.awaitResults(200);
+                workload.verifyOffsets(200);
+                cluster.cancelJob(id).get(10, TimeUnit.SECONDS);
+                var stopped = cluster.requestJobResult(id).get(15, TimeUnit.SECONDS);
+                check(
+                        stopped.getApplicationStatus() == ApplicationStatus.CANCELED,
+                        "The job did not finish cancellation");
                 var seen = new HashMap<Long, Long>();
-                for (var result : OUTPUT) {
+                for (var result : workload.results()) {
                     check(
                             seen.putIfAbsent(result.f0, result.f1) == null,
                             "Duplicate ID " + result.f0);
                 }
+                check(seen.size() == 200, "Expected 200 unique IDs but saw " + seen.size());
                 for (long i = 1; i <= 200; i++) {
                     check(
                             Long.valueOf((i - 1) / 4 + 1).equals(seen.get(i)),
@@ -340,7 +402,6 @@ public final class LocalAdaptiveA4sSmoke {
                 }
                 System.out.println(
                         "Verified all 200 unique IDs and keyed counts after the remote A4S-driven checkpoint rescale.");
-                cluster.cancelJob(id).get(10, TimeUnit.SECONDS);
             }
         } finally {
             cluster.closeAsync().get(20, TimeUnit.SECONDS);
@@ -399,16 +460,6 @@ public final class LocalAdaptiveA4sSmoke {
                 .get(5, TimeUnit.SECONDS)
                 .asJobResourceRequirements()
                 .orElseThrow();
-    }
-
-    private static void awaitOutput(int expected) throws Exception {
-        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
-        while (OUTPUT.size() < expected && System.nanoTime() - deadline < 0) {
-            Thread.sleep(25);
-        }
-        check(
-                OUTPUT.size() == expected,
-                "Expected " + expected + " outputs but got " + OUTPUT.size());
     }
 
     private static void check(boolean valid, String message) {
