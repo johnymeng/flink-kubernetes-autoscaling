@@ -12,11 +12,11 @@ done
 
 dependencies=$(jdeps --class-path "$api" -verbose:class -filter:none "$api" "$core")
 status=0
-rg \
+grep -E \
     -e '-> (java\.net\.|javax\.net\.|java\.rmi\.|javax\.naming\.|java\.nio\.channels\.)' \
-    -e '-> (java\.nio\.file\.|java\.io\.(File|RandomAccessFile)|java\.lang\.(Process|Runtime\s))' \
+    -e '-> (java\.nio\.file\.|java\.io\.(File|RandomAccessFile)|java\.lang\.(Process|Runtime[[:space:]]))' \
     -e '-> (org\.apache\.flink\.|org\.rocksdb\.|io\.kubernetes\.|io\.fabric8\.)' \
-    -e '\snot found\s*$' <<< "$dependencies" || status=$?
+    -e '[[:space:]]not found[[:space:]]*$' <<< "$dependencies" || status=$?
 case "$status" in
   0) printf 'A4S API or core has forbidden or unresolved bytecode dependencies.\n' >&2; exit 1 ;;
   1) exit 0 ;; # No forbidden dependencies matched.
