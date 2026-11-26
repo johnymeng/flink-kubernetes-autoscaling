@@ -23,6 +23,7 @@ import io.a4s.api.OperatorConfiguration;
 import io.a4s.api.OperatorDecision;
 import io.a4s.api.OperatorMetrics;
 import io.a4s.api.PlatformCapabilities;
+import io.a4s.api.PolicyConfiguration;
 import io.a4s.api.PolicyConfiguration.Mode;
 import io.a4s.api.ScalingPlan;
 import io.a4s.api.ScalingPlan.Action;
@@ -35,18 +36,30 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CancellationException;
+import java.util.function.Function;
 
 public final class A4sPolicy implements ScalingPolicy {
     public static final String MODEL_VERSION = "fixed-latency-v1";
     private static final long BYTES_PER_MIB = 1024L * 1024L;
     private final MigrationCostModel migrationModel;
+    private final String modelVersion;
+    private final Function<PolicyConfiguration, PerformanceModel> performanceModels;
 
     public A4sPolicy() {
         this((current, candidate) -> Optional.empty());
     }
 
     public A4sPolicy(MigrationCostModel migrationModel) {
+        this(migrationModel, MODEL_VERSION, FixedLatencyModel::new);
+    }
+
+    public A4sPolicy(
+            MigrationCostModel migrationModel,
+            String modelVersion,
+            Function<PolicyConfiguration, PerformanceModel> performanceModels) {
         this.migrationModel = Objects.requireNonNull(migrationModel);
+        this.modelVersion = Objects.requireNonNull(modelVersion);
+        this.performanceModels = Objects.requireNonNull(performanceModels);
     }
 
     @Override
@@ -76,7 +89,7 @@ public final class A4sPolicy implements ScalingPolicy {
                     request, Action.UNSUPPORTED_ACTION, "Requested objective has no v1 model", 0);
         }
 
-        var model = new FixedLatencyModel(request.policy);
+        var model = performanceModels.apply(request.policy);
         var frontiers = new ArrayList<Frontier>(snapshot.operators.size());
         var selected = new ArrayList<OperatorDecision>(snapshot.operators.size());
         for (var operator : snapshot.operators) {
@@ -85,6 +98,13 @@ public final class A4sPolicy implements ScalingPolicy {
                         request,
                         Action.INSUFFICIENT_METRICS,
                         "Missing demand for " + operator.operatorId,
+                        0);
+            }
+            if (!hasUsableCapacityAxis(request, operator)) {
+                return hold(
+                        request,
+                        Action.INSUFFICIENT_METRICS,
+                        "Actual cache capacity is unavailable for " + operator.operatorId,
                         0);
             }
             if (operator.histogram != null
@@ -134,6 +154,14 @@ public final class A4sPolicy implements ScalingPolicy {
             }
         }
         throw new IllegalStateException("Invalid attempt limit");
+    }
+
+    private static boolean hasUsableCapacityAxis(
+            EvaluationRequest request, OperatorMetrics operator) {
+        return !operator.cacheSensitive
+                || request.policy.mode == Mode.LEGACY_SLOT_RESERVATION
+                || operator.missRateCurve.isEmpty()
+                || operator.capacityAxis == OperatorMetrics.CapacityAxis.MEASURED_CACHE_BYTES;
     }
 
     private ScalingPlan recommend(
@@ -213,18 +241,7 @@ public final class A4sPolicy implements ScalingPolicy {
         double cpu = 0;
         for (var decision : selected) {
             var target = decision.target;
-            var maxManaged = request.constraints.maxManagedMemoryPerTaskBytes;
-            if (maxManaged != null
-                    && (request.policy.mode != Mode.LEGACY_SLOT_RESERVATION
-                            || decision.modeledMinimumTotalCacheBytes != null)
-                    && (target.managedMemoryPerTaskBytes == null
-                            || target.managedMemoryPerTaskBytes > maxManaged
-                            || request.policy.mode == Mode.LEGACY_SLOT_RESERVATION
-                                    && (request.policy.managedMemoryBaseBytes > maxManaged
-                                            || decision.modeledMinimumTotalCacheBytes
-                                                    > maxManaged
-                                                            - request.policy
-                                                                    .managedMemoryBaseBytes))) {
+            if (!withinManagedBudget(request, decision)) {
                 return false;
             }
             if (target.cachePerTaskBytes != null
@@ -250,7 +267,80 @@ public final class A4sPolicy implements ScalingPolicy {
                 }
             }
         }
+        return withinWorkerCapacity(request, selected);
+    }
+
+    private static boolean withinManagedBudget(
+            EvaluationRequest request, OperatorDecision decision) {
+        var max = request.constraints.maxManagedMemoryPerTaskBytes;
+        if (max == null) {
+            return true;
+        }
+        boolean legacy = request.policy.mode == Mode.LEGACY_SLOT_RESERVATION;
+        var minimum = decision.modeledMinimumTotalCacheBytes;
+        if (legacy && minimum == null) {
+            return true; // Legacy limit governs changed managed reservations only.
+        }
+        var managed = decision.target.managedMemoryPerTaskBytes;
+        return managed != null
+                && managed <= max
+                && (!legacy || minimum <= max - request.policy.managedMemoryBaseBytes);
+    }
+
+    private static boolean withinWorkerCapacity(
+            EvaluationRequest request, List<OperatorDecision> selected) {
+        var workers = request.snapshot.workers;
+        if (workers.isEmpty()) {
+            return true;
+        }
+        long bytesLeft = 0;
+        double cpuLeft = 0;
+        for (var worker : workers) {
+            bytesLeft += Math.min(Long.MAX_VALUE - bytesLeft, worker.allocatableBytes);
+            cpuLeft += worker.allocatableCpuCores;
+        }
+        for (int i = 0; i < selected.size(); i++) {
+            var operator = request.snapshot.operators.get(i);
+            var target = selected.get(i).target;
+            if (operator.telemetry == null
+                    || operator.telemetry.allocatedMemoryPerTaskBytes == null
+                    || target.cpuCoresPerTask == null) {
+                return false;
+            }
+            long perTaskBytes = operator.telemetry.allocatedMemoryPerTaskBytes;
+            // Credit no reductions, and reserve for both increases if the platform has not
+            // declared whether its managed and cache allocations overlap.
+            long managedGrowth =
+                    growth(
+                            operator.current.managedMemoryPerTaskBytes,
+                            target.managedMemoryPerTaskBytes);
+            long cacheGrowth = growth(operator.current.cachePerTaskBytes, target.cachePerTaskBytes);
+            if (managedGrowth > Long.MAX_VALUE - perTaskBytes
+                    || cacheGrowth > Long.MAX_VALUE - perTaskBytes - managedGrowth) {
+                return false;
+            }
+            perTaskBytes += managedGrowth + cacheGrowth;
+            final long bytes = perTaskBytes;
+            if (bytes > bytesLeft / target.parallelism
+                    || workers.stream()
+                            .noneMatch(
+                                    worker ->
+                                            worker.allocatableBytes >= bytes
+                                                    && worker.allocatableCpuCores
+                                                            >= target.cpuCoresPerTask)) {
+                return false;
+            }
+            bytesLeft -= bytes * target.parallelism;
+            cpuLeft -= target.cpuCoresPerTask * target.parallelism;
+            if (cpuLeft < 0 || Double.isNaN(cpuLeft)) {
+                return false;
+            }
+        }
         return true;
+    }
+
+    private static long growth(Long current, Long target) {
+        return target == null ? 0 : Math.max(0, target - (current == null ? 0 : current));
     }
 
     private static boolean advance(List<Frontier> frontiers, List<OperatorDecision> selected) {
@@ -291,7 +381,7 @@ public final class A4sPolicy implements ScalingPolicy {
                 || !plan.jobId.equals(snapshot.jobId)
                 || !plan.executionGeneration.equals(snapshot.executionGeneration)
                 || !plan.decisionId.equals(decisionId(request))
-                || !MODEL_VERSION.equals(plan.modelVersion)
+                || !modelVersion.equals(plan.modelVersion)
                 || plan.expiresAtMillis != expiry(request)
                 || nowMillis > plan.expiresAtMillis
                 || plan.attempts < 1
@@ -313,14 +403,15 @@ public final class A4sPolicy implements ScalingPolicy {
         }
 
         var selected = new ArrayList<OperatorDecision>(snapshot.operators.size());
-        var model = new FixedLatencyModel(request.policy);
+        var model = performanceModels.apply(request.policy);
         for (var operator : snapshot.operators) {
             var decision = plan.operators.get(operator.operatorId);
             var current = plan.currentConfiguration.get(operator.operatorId);
             if (decision == null
                     || current == null
                     || !sameAllocation(operator.current, current)
-                    || operator.cacheSensitive && operator.targetRecordsPerSecond == null) {
+                    || operator.cacheSensitive && operator.targetRecordsPerSecond == null
+                    || !hasUsableCapacityAxis(request, operator)) {
                 return false;
             }
             int parallelism = decision.target.parallelism;
@@ -384,12 +475,12 @@ public final class A4sPolicy implements ScalingPolicy {
         return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
     }
 
-    private static ScalingPlan hold(
+    private ScalingPlan hold(
             EvaluationRequest request, Action action, String rationale, int attempts) {
         return plan(request, action, Map.of(), null, false, attempts, rationale);
     }
 
-    private static ScalingPlan plan(
+    private ScalingPlan plan(
             EvaluationRequest request,
             Action action,
             Map<String, OperatorDecision> decisions,
@@ -411,7 +502,7 @@ public final class A4sPolicy implements ScalingPolicy {
                 decisions,
                 migration,
                 rationale,
-                MODEL_VERSION,
+                modelVersion,
                 expiry(request),
                 preserveState,
                 attempts,
@@ -422,11 +513,13 @@ public final class A4sPolicy implements ScalingPolicy {
         private final EvaluationRequest request;
         private final OperatorMetrics operator;
         private final MemoryParallelismCurve curve;
+        private final PerformanceModel model;
 
         private Frontier(
-                EvaluationRequest request, OperatorMetrics operator, FixedLatencyModel model) {
+                EvaluationRequest request, OperatorMetrics operator, PerformanceModel model) {
             this.request = request;
             this.operator = operator;
+            this.model = model;
             this.curve =
                     operator.cacheSensitive ? new MemoryParallelismCurve(operator, model) : null;
         }
@@ -482,8 +575,6 @@ public final class A4sPolicy implements ScalingPolicy {
                 } else {
                     long perTask = minimum / parallelism + (minimum % parallelism == 0 ? 0 : 1);
                     cache = Math.max(perTask, request.constraints.minCachePerTaskBytes);
-                    double predicted = curve.predict(parallelism, minimum);
-                    throughput = Double.isFinite(predicted) ? predicted : null;
                 }
             }
             if (cache != null && cache > Long.MAX_VALUE / parallelism) {
@@ -491,6 +582,10 @@ public final class A4sPolicy implements ScalingPolicy {
             }
             var target =
                     new OperatorConfiguration(parallelism, cache, managed, current.cpuCoresPerTask);
+            if (curve != null && request.policy.mode == Mode.CACHE) {
+                var prediction = model.predict(operator, target);
+                throughput = prediction.isPresent() ? prediction.getAsDouble() : null;
+            }
             return new OperatorDecision(
                     target, target.totalCacheBytes(), minimum, throughput, null);
         }

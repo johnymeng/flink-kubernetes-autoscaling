@@ -187,6 +187,28 @@ class DecisionServerTest {
     }
 
     @Test
+    void refusesNominalCapacityAndHonorsAttestedWorkerBounds() throws Exception {
+        var policy = new A4sPolicy();
+        var nominal = decode(EXAMPLE_JSON.replace("MEASURED_CACHE_BYTES", "NOMINAL_BLOCK_BYTES"));
+        assertEquals(ScalingPlan.Action.INSUFFICIENT_METRICS, policy.evaluate(nominal).action);
+        var workers =
+                EXAMPLE_JSON
+                        .replace(
+                                "\"workers\": []",
+                                "\"workers\": [{\"workerId\":\"worker-1\",\"allocatableBytes\":3000000000,\"allocatableCpuCores\":6}]")
+                        .replace(
+                                "\"upstreamOperators\": []",
+                                "\"upstreamOperators\": [], \"telemetry\": {\"allocatedMemoryPerTaskBytes\":500000000}");
+        assertEquals(ScalingPlan.Action.RESCALE, policy.evaluate(decode(workers)).action);
+        assertEquals(
+                ScalingPlan.Action.INFEASIBLE_CONFIGURATION,
+                policy.evaluate(decode(workers.replace("3000000000", "2999999999"))).action);
+        var historical = decode(Files.readString(Path.of("../examples/q8-archived-curve.json")));
+        assertEquals(
+                ScalingPlan.Action.INFEASIBLE_CONFIGURATION, policy.evaluate(historical).action);
+    }
+
+    @Test
     void timeoutAndTerminationFailWithoutProducingAPlan() throws Exception {
         var request = Wire.decode(EXAMPLE, EvaluationRequest.class);
         var client = new DecisionClient();

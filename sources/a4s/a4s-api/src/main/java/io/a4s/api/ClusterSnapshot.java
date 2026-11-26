@@ -84,6 +84,10 @@ public final class ClusterSnapshot {
                     seen.containsAll(operator.upstreamOperators) && seen.add(operator.operatorId),
                     "Invalid operator topology");
         }
+        seen.clear();
+        for (Worker worker : workers) {
+            Checks.require(seen.add(worker.workerId), "Duplicate worker");
+        }
         Checks.nonnegative(lastReconfigurationMillis, "lastReconfigurationMillis");
         Objects.requireNonNull(capabilities, "capabilities");
         this.jobId = jobId;

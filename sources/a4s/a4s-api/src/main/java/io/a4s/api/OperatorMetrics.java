@@ -40,7 +40,16 @@ public final class OperatorMetrics {
 
     public final Double targetRecordsPerSecond;
     public final List<String> upstreamOperators;
-    /** Operator-wide actual native cache capacity in bytes. */
+
+    public enum CapacityAxis {
+        MEASURED_CACHE_BYTES,
+        NOMINAL_BLOCK_BYTES,
+        LEGACY_AGGREGATE_BYTES
+    }
+
+    public final CapacityAxis capacityAxis;
+
+    /** Operator-wide capacity coordinates in bytes on the supplied axis. */
     public final List<CachePoint> missRateCurve;
     /** Operator-wide aggregate or a single task projected across partitions. */
     public final StackDistanceHistogram histogram;
@@ -59,6 +68,7 @@ public final class OperatorMetrics {
         "cacheSensitive",
         "targetRecordsPerSecond",
         "upstreamOperators",
+        "capacityAxis",
         "missRateCurve",
         "histogram",
         "telemetry"
@@ -75,6 +85,7 @@ public final class OperatorMetrics {
             boolean cacheSensitive,
             Double targetRecordsPerSecond,
             List<String> upstreamOperators,
+            CapacityAxis capacityAxis,
             List<CachePoint> missRateCurve,
             StackDistanceHistogram histogram,
             OperatorTelemetry telemetry) {
@@ -98,6 +109,9 @@ public final class OperatorMetrics {
         Checks.nonnegative(targetRecordsPerSecond, "targetRecordsPerSecond");
         upstreamOperators = List.copyOf(upstreamOperators);
         missRateCurve = List.copyOf(missRateCurve);
+        Checks.require(
+                missRateCurve.isEmpty() || capacityAxis != null,
+                "Supply the capacity axis for an MRC");
         long previousCapacity = -1;
         double previousMissRate = 1;
         for (CachePoint point : missRateCurve) {
@@ -121,6 +135,7 @@ public final class OperatorMetrics {
         this.cacheSensitive = cacheSensitive;
         this.targetRecordsPerSecond = targetRecordsPerSecond;
         this.upstreamOperators = upstreamOperators;
+        this.capacityAxis = capacityAxis;
         this.missRateCurve = missRateCurve;
         this.histogram = histogram;
         this.telemetry = telemetry;

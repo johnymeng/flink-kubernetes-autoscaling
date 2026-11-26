@@ -25,15 +25,15 @@ import java.util.OptionalLong;
 /** Lazily evaluates the minimum measured operator-wide cache required at each parallelism. */
 public final class MemoryParallelismCurve {
     private final List<CachePoint> points;
-    private final FixedLatencyModel model;
-    private final double target;
+    private final PerformanceModel model;
+    private final OperatorMetrics metrics;
 
-    public MemoryParallelismCurve(OperatorMetrics metrics, FixedLatencyModel model) {
+    public MemoryParallelismCurve(OperatorMetrics metrics, PerformanceModel model) {
         this.points =
                 metrics.histogram == null
                         ? metrics.missRateCurve
                         : MissRateCurves.fromHistogram(metrics.histogram);
-        this.target = metrics.targetRecordsPerSecond;
+        this.metrics = metrics;
         this.model = model;
     }
 
@@ -42,16 +42,6 @@ public final class MemoryParallelismCurve {
     }
 
     public OptionalLong minimumCacheBytes(int parallelism) {
-        double maximumMissRate = model.maximumMissRate(parallelism, target);
-        return maximumMissRate < 0
-                ? OptionalLong.empty()
-                : MissRateCurves.supportedCapacity(points, maximumMissRate);
-    }
-
-    double predict(int parallelism, long capacityBytes) {
-        // A minimum allocation is on the curve. Rounding a per-task allocation up
-        // can exceed the last measured point, so predict at the proven capacity.
-        return model.predictAtRate(
-                parallelism, MissRateCurves.interpolate(points, capacityBytes).orElseThrow());
+        return model.minimumCacheBytes(metrics, parallelism, points);
     }
 }

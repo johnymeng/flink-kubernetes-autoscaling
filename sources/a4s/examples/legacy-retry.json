@@ -25,6 +25,7 @@
         "cacheSensitive": true,
         "targetRecordsPerSecond": 70,
         "upstreamOperators": [],
+        "capacityAxis": "LEGACY_AGGREGATE_BYTES",
         "missRateCurve": [
           {
             "capacityBytes": 104857600,

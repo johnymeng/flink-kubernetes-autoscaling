@@ -17,10 +17,13 @@
 
 package io.a4s.core;
 
+import io.a4s.api.CachePoint;
 import io.a4s.api.OperatorConfiguration;
 import io.a4s.api.OperatorMetrics;
 import io.a4s.api.PolicyConfiguration;
+import java.util.List;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 
 /** A4S's existing per-record cost equation with externally supplied latency coefficients. */
 public final class FixedLatencyModel implements PerformanceModel {
@@ -36,7 +39,16 @@ public final class FixedLatencyModel implements PerformanceModel {
         return Math.min(1, ((parallelism / recordsPerSecond) - hitSeconds) / missPenaltySeconds);
     }
 
-    double predictAtRate(int parallelism, double missRate) {
+    @Override
+    public OptionalLong minimumCacheBytes(
+            OperatorMetrics current, int parallelism, List<CachePoint> measuredCurve) {
+        double maximumMissRate = maximumMissRate(parallelism, current.targetRecordsPerSecond);
+        return maximumMissRate < 0
+                ? OptionalLong.empty()
+                : MissRateCurves.supportedCapacity(measuredCurve, maximumMissRate);
+    }
+
+    private double predictAtRate(int parallelism, double missRate) {
         return parallelism / (hitSeconds + missRate * missPenaltySeconds);
     }
 
@@ -49,6 +61,10 @@ public final class FixedLatencyModel implements PerformanceModel {
     }
 
     OptionalDouble predictAtCapacity(OperatorMetrics current, int parallelism, long bytes) {
+        if (!current.missRateCurve.isEmpty()
+                && current.capacityAxis != OperatorMetrics.CapacityAxis.MEASURED_CACHE_BYTES) {
+            return OptionalDouble.empty();
+        }
         var curve =
                 current.histogram == null
                         ? current.missRateCurve

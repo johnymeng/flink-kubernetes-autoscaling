@@ -17,11 +17,18 @@
 
 package io.a4s.core;
 
+import io.a4s.api.CachePoint;
 import io.a4s.api.OperatorConfiguration;
 import io.a4s.api.OperatorMetrics;
+import java.util.List;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 
 /** A prediction is unavailable outside the model's measured input support. */
 public interface PerformanceModel {
     OptionalDouble predict(OperatorMetrics current, OperatorConfiguration candidate);
+
+    /** Find a measured cache coordinate that meets the operator's target, if supported. */
+    OptionalLong minimumCacheBytes(
+            OperatorMetrics current, int parallelism, List<CachePoint> measuredCurve);
 }

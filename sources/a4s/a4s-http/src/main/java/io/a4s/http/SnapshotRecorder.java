@@ -21,6 +21,7 @@ import io.a4s.api.EvaluationRequest;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 
@@ -37,8 +38,14 @@ public final class SnapshotRecorder {
         line.flip();
         try (var channel =
                         FileChannel.open(
-                                file, StandardOpenOption.CREATE, StandardOpenOption.WRITE);
-                var lock = channel.lock()) {
+                                file,
+                                StandardOpenOption.CREATE,
+                                StandardOpenOption.WRITE,
+                                LinkOption.NOFOLLOW_LINKS);
+                var lock = channel.tryLock()) {
+            if (lock == null) {
+                throw new IOException("Another process is recording A4S snapshots");
+            }
             long start = channel.size();
             if (start > MAX_FILE_BYTES - line.remaining()) {
                 throw new IOException("A4S snapshot file has reached its size limit");

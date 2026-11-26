@@ -26,6 +26,7 @@
         "cacheSensitive": true,
         "targetRecordsPerSecond": 60000,
         "upstreamOperators": [],
+        "capacityAxis": "MEASURED_CACHE_BYTES",
         "missRateCurve": [
           {"capacityBytes": 268435456, "missRate": 0.7},
           {"capacityBytes": 805306368, "missRate": 0.55},
