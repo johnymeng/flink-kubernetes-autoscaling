@@ -57,7 +57,7 @@ kubectl -n "${A4S_NAMESPACE}" rollout status deploy/a4s-runner
 
 The Deployment has a ClusterIP Service and mounts no service account token. Restrict access to trusted control-plane clients using the deployment's existing network policy or TLS proxy. The runner accepts HTTP behind a trusted service boundary. Its client also supports HTTPS.
 
-Build the Flink A4S operator with `images/flink-kubernetes-operator-a4s/build.sh`. The build installs the independent A4S reactor before compiling the operator. For a local Maven operator build, run `mvn -B -f sources/a4s/pom.xml install` and use the existing matching Flink SNAPSHOT build. Start with the existing Flink deployment and the following job configuration.
+Build the Flink A4S operator with `images/flink-kubernetes-operator-a4s/build.sh`. The build installs the independent A4S reactor before compiling the operator. For a local Maven operator build, run `mvn -B -f sources/a4s/pom.xml install` and use the matching Flink SNAPSHOT packages. Run the operator package goal from its own Maven root. The CRD compatibility checks read pinned Apache release schemas over HTTPS and require a working JVM trust store. Start with the existing Flink deployment and the following job configuration.
 
 ```yaml
 job.autoscaler.enabled: true
