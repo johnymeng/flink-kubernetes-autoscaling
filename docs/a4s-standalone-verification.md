@@ -38,6 +38,21 @@ The standalone runner passed an isolated Kubernetes Service smoke on c182. The p
 
 The staged Q8 comparison pinned the same runtime at `3015abd8e505569ac914c55e9e795b89d5053d6c` and the same JNI and workload artifacts for every mode. The original arm `live-33543ca8` stopped at the startup guard because its evidence receipt omitted the native binary checksum and its configuration filter missed the slot-limit key. Those harness inputs were corrected. The retry `live-b0feb46b` was stopped during setup at the user's request, before the input release. Both scopes were removed and the shared worker lock was released. Embedded and remote Q8 arms, the follow-up Q9 or Q20 workload, and the deterministic live Kafka output check are pending. The staged runtime and refactored operator predate the optional attempt-scoped backlog transport. Use the same updated runtime artifact across the original, embedded, and remote arms, and rebuild the refactored operator before the next matched comparison. Matched live throughput and latency remain unverified.
 
+### Prepare the Q20 follow-up
+
+The [Q20 renderer](../scripts/a4s/prepare-q20-comparison.py) uses the existing [checkpoint experiment template](../experiments/1729-checkpoint-aware-rescaling/instruction.md). It creates three repetitions, rotating original, embedded, and remote through each position. It pins the workload image and both worker selectors, assigns separate namespaces and checkpoint paths, and enables runner deployment only for the remote arm. The original and extracted operators use their shared 600 MiB A4S limit and native checkpoint recovery. The renderer selects periodic checkpoints with a one-minute default and disables the separate template's checkpoint-gated producer pause. Python 3.9 or later and PyYAML are required.
+
+```bash
+scripts/a4s/prepare-q20-comparison.py "$OUTPUT_DIR" --prefix "$SERIES_ID" \
+  --workload-image "$Q20_IMAGE" --original-operator-image "$ORIGINAL_OPERATOR_IMAGE" \
+  --operator-image "$REFACTORED_OPERATOR_IMAGE" --runner-image "$A4S_IMAGE" \
+  --bootstrap-servers "$ISOLATED_KAFKA" --jobmanager-node "$JM_NODE" --taskmanager-node "$TM_NODE"
+```
+
+Each image argument takes a digest-pinned reference. Before live runs, verify the built artifacts against their receipts and verify both node selectors against the isolated lab scope. Use `run-order.json` and the existing Q20 producer setup with the same input generator build, seed, starting offsets, rate schedule, and observation window for each arm. Leave the input topics intact during each arm's rescaling. Collect equally long observations for both rescale and hold outcomes.
+
+The offline preflight rendered and checked all nine job configurations. The local Helm render confirmed each operator's watched namespace, digest and recording settings. It used historical image receipts as fixture inputs. Fresh deployable artifacts and live measurements are pending while the grid is paused.
+
 ## Remaining work
 
 The fixed model still depends on Flink's existing demand evaluation and on aggregate MRC observations in the first adapter. It takes the pending-reconciliation and live resource inputs from the operator. An atomic Flink execution-generation precondition for Justin writes would close the remaining check-to-use interval. The current greedy optimizer checks job budgets and verifies a packing when worker capacities are supplied. It returns no physical placement plan.
