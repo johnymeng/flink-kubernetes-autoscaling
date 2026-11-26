@@ -106,6 +106,16 @@ Add `--verify` to require every replayed recommendation to match the recorded re
 
 `--policy a4s` uses the captured mode. `CACHE` and `LEGACY_SLOT_RESERVATION` select an alternate mode for comparison with the same recorded constraints and capabilities, which may reject the new mode. To compare model parameters, edit a copy of the captured request file and retain both inputs and outputs. A prediction from replay is a model estimate. Stateful recovery, live throughput, and performance under an alternative configuration require a deployment or validated simulator.
 
+## Local checkpoint rescale smoke
+
+Build the runner JAR and the Flink operator. Set `FLINK_CLASSPATH` to a colon-separated runtime classpath with the matching patched Flink 1.18 runtime, streaming API, clients, RocksDB backend, and their dependencies. Include the matching RocksDB JNI JAR and make its native libraries available to the JVM. The script uses Java 11 or later and GNU `timeout`.
+
+```bash
+scripts/a4s/smoke-local-flink-rescale.sh "$FLINK_CLASSPATH" /tmp/a4s-smoke
+```
+
+The script starts a local Flink MiniCluster and a separate runner JVM on loopback. It checkpoints a deterministic source and keyed RocksDB state after the first 100 records. The Flink executor sends fixed demand and miss-rate inputs to the runner and validates the result against live Flink details. The test driver submits the stored overrides through Justin, waits for the stateful vertex to reach parallelism 2 with the same applied slot profile, then releases the remaining records. It checks every ID and keyed count through record 200 and verifies the recorded recommendation by replay. Logs and JSONL evidence go into a fresh directory under the requested output path.
+
 ## Native instrumentation and future adapters
 
 The C++11 [SHARDS estimator](../sources/libs/frocksdb/util/shards/) builds independently with CMake. FRocksDB still supplies its original seeded hash, scoped cache keys, charge and admission semantics. The RocksDB wrapper retains the JNI snapshot layout and cumulative counters. Flink's existing histogram aggregation and `scaledMrc` endpoint still publish aggregate observations. The network service receives no individual cache access.
