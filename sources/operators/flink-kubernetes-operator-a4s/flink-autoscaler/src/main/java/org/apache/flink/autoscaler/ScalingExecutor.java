@@ -55,6 +55,8 @@ import io.a4s.api.ScalingPlan;
 import javax.annotation.Nullable;
 
 import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -665,75 +667,92 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             Map<JobVertexID, ScalingSummary> scalingSummaries,
             JobAutoScalerContext<?> ctx) {
 
-        if (jobTopology == null || jobTopology.getSlotSharingGroupMapping().isEmpty()) {
+        var cpuQuota = tunedConfig.getOptional(AutoScalerOptions.CPU_QUOTA);
+        var memoryQuota = tunedConfig.getOptional(AutoScalerOptions.MEMORY_QUOTA);
+        if (jobTopology == null || cpuQuota.isEmpty() && memoryQuota.isEmpty()) {
             return false;
         }
 
-        var cpuQuota = tunedConfig.getOptional(AutoScalerOptions.CPU_QUOTA);
-        var memoryQuota = tunedConfig.getOptional(AutoScalerOptions.MEMORY_QUOTA);
-        var tmMemory = MemoryTuning.getTotalMemory(tunedConfig, ctx);
-        var tmCpu = ctx.getTaskManagerCpu().orElse(0.);
+        var currentConfig = ctx.getConfiguration();
+        long currentTaskManagers =
+                requiredTaskManagers(
+                        jobTopology,
+                        Map.of(),
+                        currentConfig.get(TaskManagerOptions.NUM_TASK_SLOTS));
+        long targetTaskManagers =
+                requiredTaskManagers(
+                        jobTopology,
+                        scalingSummaries,
+                        tunedConfig.get(TaskManagerOptions.NUM_TASK_SLOTS));
+        boolean addsTaskManagers = targetTaskManagers > currentTaskManagers;
 
-        if (cpuQuota.isPresent() || memoryQuota.isPresent()) {
-            var currentSlotSharingGroupMaxParallelisms = new HashMap<SlotSharingGroupId, Integer>();
-            var newSlotSharingGroupMaxParallelisms = new HashMap<SlotSharingGroupId, Integer>();
-            for (var e : jobTopology.getSlotSharingGroupMapping().entrySet()) {
-                int currentMaxParallelism =
-                        e.getValue().stream()
-                                .filter(scalingSummaries::containsKey)
-                                .mapToInt(v -> scalingSummaries.get(v).getCurrentParallelism())
-                                .max()
-                                .orElse(0);
-                currentSlotSharingGroupMaxParallelisms.put(e.getKey(), currentMaxParallelism);
-                int newMaxParallelism =
-                        e.getValue().stream()
-                                .filter(scalingSummaries::containsKey)
-                                .mapToInt(v -> scalingSummaries.get(v).getNewParallelism())
-                                .max()
-                                .orElse(0);
-                newSlotSharingGroupMaxParallelisms.put(e.getKey(), newMaxParallelism);
+        if (addsTaskManagers && cpuQuota.isPresent() && cpuQuota.get() != Double.POSITIVE_INFINITY) {
+            double workerCores = ctx.getTaskManagerCpu().orElse(0.);
+            double limit = cpuQuota.get();
+            if (!Double.isFinite(workerCores) || workerCores <= 0 || !Double.isFinite(limit)) {
+                LOG.info("Could not verify the CPU quota for the proposed TaskManagers");
+                return true;
             }
-
-            var numSlotsPerTm = tunedConfig.get(TaskManagerOptions.NUM_TASK_SLOTS);
-            var currentTotalSlots =
-                    currentSlotSharingGroupMaxParallelisms.values().stream()
-                            .mapToInt(Integer::intValue)
-                            .sum();
-            var currentNumTms = currentTotalSlots / numSlotsPerTm;
-            var newTotalSlots =
-                    newSlotSharingGroupMaxParallelisms.values().stream()
-                            .mapToInt(Integer::intValue)
-                            .sum();
-            var newNumTms = newTotalSlots / numSlotsPerTm;
-
-            if (newNumTms <= currentNumTms) {
-                LOG.debug(
-                        "Skipping quota check due to new resource allocation is less or equals than the current");
-                return false;
-            }
-
-            if (cpuQuota.isPresent()) {
-                LOG.debug("CPU resource quota is {}, checking limits", cpuQuota.get());
-                double totalCPU = tmCpu * newNumTms;
-                if (totalCPU > cpuQuota.get()) {
-                    LOG.info("CPU resource quota reached with value: {}", totalCPU);
-                    return true;
-                }
-            }
-
-            if (memoryQuota.isPresent()) {
-                LOG.debug("Memory resource quota is {}, checking limits", memoryQuota.get());
-                long totalMemory = tmMemory.getBytes() * newNumTms;
-                if (totalMemory > memoryQuota.get().getBytes()) {
-                    LOG.info(
-                            "Memory resource quota reached with value: {}",
-                            new MemorySize(totalMemory));
-                    return true;
-                }
+            var targetCores =
+                    BigDecimal.valueOf(workerCores)
+                            .multiply(BigDecimal.valueOf(targetTaskManagers));
+            if (targetCores.compareTo(BigDecimal.valueOf(limit)) > 0) {
+                LOG.info("CPU resource quota reached with requested cores {}", targetCores);
+                return true;
             }
         }
 
+        if (memoryQuota.isPresent()) {
+            long targetWorkerBytes = MemoryTuning.getTotalMemory(tunedConfig, ctx).getBytes();
+            if (addsTaskManagers && targetWorkerBytes == 0) {
+                LOG.info("Could not verify the memory quota for the proposed TaskManagers");
+                return true;
+            }
+            long currentWorkerBytes = MemoryTuning.getTotalMemory(currentConfig, ctx).getBytes();
+            var currentBytes =
+                    BigInteger.valueOf(currentWorkerBytes)
+                            .multiply(BigInteger.valueOf(currentTaskManagers));
+            var targetBytes =
+                    BigInteger.valueOf(targetWorkerBytes)
+                            .multiply(BigInteger.valueOf(targetTaskManagers));
+            // Allow an allocation that does not increase use of this quota.
+            if (targetBytes.compareTo(currentBytes) > 0
+                    && targetBytes.compareTo(BigInteger.valueOf(memoryQuota.get().getBytes()))
+                            > 0) {
+                LOG.info("Memory resource quota reached with requested bytes {}", targetBytes);
+                return true;
+            }
+        }
         return false;
+    }
+
+    private static long requiredTaskManagers(
+            JobTopology topology,
+            Map<JobVertexID, ScalingSummary> summaries,
+            int slotsPerTaskManager) {
+        if (slotsPerTaskManager <= 0) {
+            throw new IllegalArgumentException("TaskManager slot count must be positive");
+        }
+        var sharedSlots = new HashMap<SlotSharingGroupId, Integer>();
+        long unsharedSlots = 0;
+        for (var entry : topology.getVertexInfos().entrySet()) {
+            var vertex = entry.getValue();
+            if (vertex.isFinished()) {
+                continue;
+            }
+            var summary = summaries.get(entry.getKey());
+            int parallelism =
+                    summary == null ? vertex.getParallelism() : summary.getNewParallelism();
+            var group = vertex.getSlotSharingGroupId();
+            if (group == null) {
+                unsharedSlots += parallelism;
+            } else {
+                sharedSlots.merge(group, parallelism, Math::max);
+            }
+        }
+        long totalSlots =
+                unsharedSlots + sharedSlots.values().stream().mapToLong(Integer::longValue).sum();
+        return (totalSlots + slotsPerTaskManager - 1) / slotsPerTaskManager;
     }
 
     private static Map<String, String> getVertexParallelismOverrides(

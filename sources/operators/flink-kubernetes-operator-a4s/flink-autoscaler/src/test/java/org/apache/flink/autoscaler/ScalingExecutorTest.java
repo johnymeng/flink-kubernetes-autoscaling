@@ -1446,6 +1446,65 @@ public class ScalingExecutorTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"cpu", "memory"})
+    void quotaIncludesUnchangedGroupsAndRoundsUpPartiallyOccupiedTaskManagers(String budget) {
+        var ctx = TestingAutoscalerUtils.createResourceAwareContext(2.0, "2g");
+        var conf = ctx.getConfiguration();
+        conf.set(TaskManagerOptions.NUM_TASK_SLOTS, 4);
+        if (budget.equals("cpu")) {
+            conf.set(AutoScalerOptions.CPU_QUOTA, 2.0);
+        } else {
+            conf.set(AutoScalerOptions.MEMORY_QUOTA, MemorySize.parse("2g"));
+        }
+
+        var changing = new JobVertexID();
+        var unchanged = new JobVertexID();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(
+                                changing, new SlotSharingGroupId(), Map.of(), 2, 8, false, null),
+                        new VertexInfo(
+                                unchanged, new SlotSharingGroupId(), Map.of(), 2, 8, false, null));
+        // The unchanged group occupies two slots. Growing from four total slots to five
+        // adds a TaskManager even though the changing vertex fits in one by itself.
+        assertTrue(
+                ScalingExecutor.scalingWouldExceedResourceQuota(
+                        conf, topology, Map.of(changing, new ScalingSummary(2, 3, Map.of())), ctx));
+
+        var shared = new SlotSharingGroupId();
+        var sharedTopology =
+                new JobTopology(
+                        new VertexInfo(changing, shared, Map.of(), 2, 8, false, null),
+                        new VertexInfo(unchanged, shared, Map.of(), 4, 8, false, null));
+        assertFalse(
+                ScalingExecutor.scalingWouldExceedResourceQuota(
+                        conf,
+                        sharedTopology,
+                        Map.of(changing, new ScalingSummary(2, 3, Map.of())),
+                        ctx));
+    }
+
+    @Test
+    void quotaIncludesTaskManagerMemoryGrowthAtFixedParallelism() {
+        var ctx = TestingAutoscalerUtils.createResourceAwareContext(2.0, "2g");
+        var conf = ctx.getConfiguration();
+        conf.set(TaskManagerOptions.NUM_TASK_SLOTS, 4);
+        conf.set(AutoScalerOptions.MEMORY_QUOTA, MemorySize.parse("2g"));
+        var vertex = new JobVertexID();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(
+                                vertex, new SlotSharingGroupId(), Map.of(), 4, 8, false, null));
+
+        var largerWorker = new Configuration(conf);
+        largerWorker.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.parse("3g"));
+        assertTrue(
+                ScalingExecutor.scalingWouldExceedResourceQuota(
+                        largerWorker, topology, Map.of(), ctx));
+        assertFalse(ScalingExecutor.scalingWouldExceedResourceQuota(conf, topology, Map.of(), ctx));
+    }
+
+    @ParameterizedTest
     @MethodSource("testDataForQuota")
     public void testQuota(
             SlotSharingGroupId slotSharingGroupId1,
