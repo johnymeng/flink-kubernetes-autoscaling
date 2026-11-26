@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
@@ -39,13 +40,21 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
+import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneClientHAServices;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
+import org.apache.flink.runtime.rest.messages.JobVertexDetailsHeaders;
+import org.apache.flink.runtime.rest.messages.JobVertexDetailsInfo;
 import org.apache.flink.runtime.rest.messages.MessageHeaders;
 import org.apache.flink.runtime.rest.messages.MessageParameters;
 import org.apache.flink.runtime.rest.messages.RequestBody;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
+import org.apache.flink.runtime.rest.messages.JobPlanInfo;
+import org.apache.flink.runtime.rest.messages.job.JobDetailsInfo;
+import org.apache.flink.runtime.rest.messages.job.SubtaskExecutionAttemptDetailsInfo;
+import org.apache.flink.runtime.rest.messages.job.metrics.IOMetricsInfo;
 
 import com.sun.net.httpserver.HttpServer;
 import io.a4s.api.EvaluationRequest;
@@ -73,6 +82,7 @@ import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -577,6 +587,142 @@ public class ScalingExecutorTest {
                                 .setManagedMemoryMB(116)
                                 .build()
                                 .toString());
+    }
+
+    @Test
+    void generationTracksEveryRunningSubtaskAndItsMeasurementWindow() throws Exception {
+        var id = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(id, Map.of(), 2, MAX_PARALLELISM));
+        var evaluated = new EvaluatedMetrics(Map.of(), Map.of(), Map.of());
+        evaluated.setJobRunningSince(Instant.ofEpochMilli(200));
+        evaluated.setWindowStart(Instant.ofEpochMilli(1_000));
+
+        var jobId = context.getJobID();
+        var vertex =
+                new JobDetailsInfo.JobVertexDetailsInfo(
+                        id,
+                        null,
+                        "operator",
+                        MAX_PARALLELISM,
+                        2,
+                        ExecutionState.RUNNING,
+                        300,
+                        -1,
+                        900,
+                        Map.of(ExecutionState.RUNNING, 2),
+                        EMPTY_IO_METRICS);
+        var job =
+                new JobDetailsInfo(
+                        jobId,
+                        "job",
+                        false,
+                        JobStatus.RUNNING,
+                        100,
+                        -1,
+                        1_100,
+                        MAX_PARALLELISM,
+                        1_200,
+                        Map.of(JobStatus.RUNNING, 200L),
+                        List.of(vertex),
+                        Map.of(ExecutionState.RUNNING, 1),
+                        new JobPlanInfo.RawJson("{}"));
+        var first = subtask(0, 0, 300);
+        var second = subtask(1, 0, 400);
+        var subtasks = new AtomicReference<>(List.of(first, second));
+        var ctx =
+                new JobAutoScalerContext<>(
+                        context.getJobKey(),
+                        jobId,
+                        JobStatus.RUNNING,
+                        conf,
+                        context.getMetricGroup(),
+                        () ->
+                                new RestClusterClient<String>(
+                                        new Configuration(),
+                                        "test-cluster",
+                                        (config, executor) ->
+                                                new StandaloneClientHAServices("localhost")) {
+                                    @Override
+                                    public CompletableFuture<JobDetailsInfo> getJobDetails(
+                                            JobID requested) {
+                                        assertEquals(jobId, requested);
+                                        return CompletableFuture.completedFuture(job);
+                                    }
+
+                                    @Override
+                                    public <
+                                                    M extends MessageHeaders<R, P, U>,
+                                                    U extends MessageParameters,
+                                                    R extends RequestBody,
+                                                    P extends ResponseBody>
+                                            CompletableFuture<P> sendRequest(
+                                                    M headers, U parameters, R request) {
+                                        assertThat(headers)
+                                                .isSameAs(JobVertexDetailsHeaders.getInstance());
+                                        assertThat(
+                                                        MessageParameters.resolveUrl(
+                                                                headers.getTargetRestEndpointURL(),
+                                                                parameters))
+                                                .isEqualTo("/jobs/" + jobId + "/vertices/" + id);
+                                        assertThat(request)
+                                                .isSameAs(EmptyRequestBody.getInstance());
+                                        return CompletableFuture.completedFuture(
+                                                headers.getResponseClass()
+                                                        .cast(
+                                                                new JobVertexDetailsInfo(
+                                                                        id,
+                                                                        "operator",
+                                                                        2,
+                                                                        MAX_PARALLELISM,
+                                                                        1_200,
+                                                                        subtasks.get())));
+                                    }
+                                });
+        String before = scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology);
+        assertThat(before).isNotNull();
+
+        subtasks.set(List.of(second, first));
+        assertEquals(before, scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology));
+
+        // Only the second subtask restarts. The vertex start time and task counts stay the same.
+        var restarted = subtask(1, 1, 1_100);
+        subtasks.set(List.of(first, restarted));
+        assertThat(scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology)).isNull();
+        evaluated.setWindowStart(Instant.ofEpochMilli(1_200));
+        assertThat(scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology))
+                .isNotNull()
+                .isNotEqualTo(before);
+
+        subtasks.set(List.of(first));
+        assertThat(scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology)).isNull();
+    }
+
+    private static final IOMetricsInfo EMPTY_IO_METRICS =
+            new IOMetricsInfo(0, true, 0, true, 0, true, 0, true, 0, 0, 0);
+
+    private static SubtaskExecutionAttemptDetailsInfo subtask(int index, int attempt, long start) {
+        return new SubtaskExecutionAttemptDetailsInfo(
+                index,
+                ExecutionState.RUNNING,
+                attempt,
+                "host",
+                start,
+                -1,
+                1_200 - start,
+                EMPTY_IO_METRICS,
+                "tm",
+                Map.of(
+                        ExecutionState.CREATED,
+                        0L,
+                        ExecutionState.SCHEDULED,
+                        0L,
+                        ExecutionState.INITIALIZING,
+                        0L,
+                        ExecutionState.DEPLOYING,
+                        0L,
+                        ExecutionState.RUNNING,
+                        1_200 - start),
+                null);
     }
 
     @ParameterizedTest

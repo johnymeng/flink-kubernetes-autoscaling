@@ -44,6 +44,8 @@ import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
+import org.apache.flink.runtime.rest.messages.JobVertexDetailsHeaders;
+import org.apache.flink.runtime.rest.messages.JobVertexDetailsInfo;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,11 +62,11 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -294,34 +296,99 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     @VisibleForTesting
     String readRuntimeGeneration(Context context, EvaluatedMetrics evaluated, JobTopology topology)
             throws Exception {
-        if (evaluated.getJobRunningSince() == null) {
+        if (evaluated.getJobRunningSince() == null || evaluated.getWindowStart() == null) {
             return null;
         }
+        Duration timeout = context.getConfiguration().get(FLINK_CLIENT_TIMEOUT);
+        long deadline = System.nanoTime() + timeout.toNanos();
         try (var client = context.getRestClusterClient()) {
-            var job = client.getJobDetails(context.getJobID()).get(
-                    context.getConfiguration().get(FLINK_CLIENT_TIMEOUT).toMillis(), TimeUnit.MILLISECONDS);
-            if (!context.getJobID().equals(job.getJobId()) || job.getJobStatus() != JobStatus.RUNNING
-                    || !Objects.equals(job.getTimestamps().get(JobStatus.RUNNING),
+            var job =
+                    client.getJobDetails(context.getJobID())
+                            .get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            if (!context.getJobID().equals(job.getJobId())
+                    || job.getJobStatus() != JobStatus.RUNNING
+                    || !Objects.equals(
+                            job.getTimestamps().get(JobStatus.RUNNING),
                             evaluated.getJobRunningSince().toEpochMilli())
                     || job.getJobVertexInfos().size() != topology.getVertexInfos().size()) {
                 return null;
             }
             var identity = new TreeMap<String, String>();
+            var pending = new HashMap<JobVertexID, CompletableFuture<JobVertexDetailsInfo>>();
+            var headers = JobVertexDetailsHeaders.getInstance();
             for (var vertex : job.getJobVertexInfos()) {
-                var live = topology.get(vertex.getJobVertexID());
-                if (live == null || live.getParallelism() != vertex.getParallelism()
-                        || live.isFinished() != (vertex.getExecutionState() == ExecutionState.FINISHED)
+                var id = vertex.getJobVertexID();
+                var live = topology.get(id);
+                if (live == null
+                        || live.getParallelism() != vertex.getParallelism()
+                        || live.isFinished()
+                                != (vertex.getExecutionState() == ExecutionState.FINISHED)
                         || (!live.isFinished()
                                 && vertex.getTasksPerState().getOrDefault(ExecutionState.RUNNING, 0)
                                         != live.getParallelism())) {
                     return null;
                 }
-                identity.put(vertex.getJobVertexID().toHexString(),
-                        vertex.getParallelism() + "/" + vertex.getExecutionState()
-                                + "/" + vertex.getStartTime());
+                identity.put(
+                        id.toHexString(),
+                        vertex.getParallelism()
+                                + "/"
+                                + vertex.getExecutionState()
+                                + "/"
+                                + vertex.getStartTime());
+                if (!live.isFinished()) {
+                    var parameters = headers.getUnresolvedMessageParameters();
+                    parameters.jobPathParameter.resolve(context.getJobID());
+                    parameters.jobVertexIdPathParameter.resolve(id);
+                    pending.put(
+                            id,
+                            client.sendRequest(
+                                    headers, parameters, EmptyRequestBody.getInstance()));
+                }
             }
-            String key = job.getJobId() + "/" + job.getStartTime() + "/"
-                    + evaluated.getJobRunningSince() + "/" + identity;
+            CompletableFuture.allOf(pending.values().toArray(new CompletableFuture<?>[0]))
+                    .get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
+            long windowStart = evaluated.getWindowStart().toEpochMilli();
+            for (var entry : pending.entrySet()) {
+                var id = entry.getKey();
+                int parallelism = topology.get(id).getParallelism();
+                var subtasks = entry.getValue().join().getSubtasks();
+                var attempts = new TreeMap<Integer, String>();
+                for (var task : subtasks) {
+                    int index = task.getSubtaskIndex();
+                    if (index < 0
+                            || index >= parallelism
+                            || task.getStatus() != ExecutionState.RUNNING
+                            || task.getAttempt() < 0
+                            || task.getStartTime() <= 0
+                            || task.getStartTime() > windowStart
+                            || task.getTaskmanagerId().isBlank()
+                            || "(unassigned)".equals(task.getTaskmanagerId())
+                            || !task.getOtherConcurrentAttempts().isEmpty()
+                            || attempts.putIfAbsent(
+                                            index,
+                                            task.getAttempt()
+                                                    + "/"
+                                                    + task.getStartTime()
+                                                    + "/"
+                                                    + task.getTaskmanagerId())
+                                    != null) {
+                        return null;
+                    }
+                }
+                if (attempts.size() != parallelism) {
+                    return null;
+                }
+                identity.computeIfPresent(
+                        id.toHexString(), (key, vertex) -> vertex + "/" + attempts);
+            }
+            String key =
+                    job.getJobId()
+                            + "/"
+                            + job.getStartTime()
+                            + "/"
+                            + evaluated.getJobRunningSince()
+                            + "/"
+                            + identity;
             return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
         }
     }
