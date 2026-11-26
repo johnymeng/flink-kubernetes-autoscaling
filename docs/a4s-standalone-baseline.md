@@ -1,6 +1,6 @@
 # Standalone A4S dependency audit
 
-The extraction base is `a285fcf4453d38feff9c80b53bf57c8207d30930` from the sibling GitHub checkout's recorded `origin/main`. It contains PR #3 for missing curves, #4 for A4S realization correctness, #5 for native slot reuse, #6 for histogram lifecycle, and #7, #8, #10, and #11 for SHARDS. The older SSH checkout's main is `b9f932636b1280c1c286ef6b8780bcbbcb45059c`. Direct GitHub access could not resolve from this workspace.
+The extraction base is `a285fcf4453d38feff9c80b53bf57c8207d30930` from the sibling GitHub checkout's recorded `origin/main`. It contains PR #3 for missing curves, #4 for A4S realization correctness, #5 for native slot reuse, #6 for histogram lifecycle, and #7, #8, #10, and #11 for SHARDS. The older SSH checkout's main is `b9f932636b1280c1c286ef6b8780bcbbcb45059c`. A read-only remote check confirmed `a285fcf4` as GitHub main.
 
 The local online-penalty line at `87f26eae8abbe0b68cd4a9bbc754dd420e475519` diverged from `b9f93263` and has additional unpublished working-tree changes. A dry merge with the selected main reports conflicts in MRC handling, the metric/Justin transports, RocksDB profiling, the scaling executor and native realization. The selected base preserves reviewed SHARDS and memory-only realization. Porting the online branch requires its own integration and behavioral verification. The sibling native slot preallocation branch at `de1e06551d976e8f98290213f444137dabf0d829` adds separate experimental changes.
 

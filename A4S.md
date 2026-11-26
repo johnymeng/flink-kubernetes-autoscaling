@@ -2,7 +2,10 @@
 
 This is the high-level documentation of the A4S logic flow across the Flink Kubernetes Operator, Flink Runtime, and RocksDB. It includes key files where the majority of the implementation and application logic lives. For how to deploy the stack, see [README.md](README.md).
 
-## Kubernetes Operator 1.13
+For the standalone service, see [Standalone A4S](docs/a4s-standalone.md) for
+the versioned API, build, deployment, embedded and remote modes, and replay.
+
+## Flink Kubernetes Operator
 
 The operator adds A4S-aware autoscaling logic on top of the existing autoscaler and Justin integration paths. It fetches per-vertex miss-rate curves from Flink runtime, evaluates memory/parallelism trade-offs, and publishes decisions through existing override and state-store channels instead of introducing a new realization path.
 
@@ -12,10 +15,10 @@ The operator adds A4S-aware autoscaling logic on top of the existing autoscaler 
 | ------------------------------ | ----------------------------------------------------------------------------------------------- |
 | `AutoScalerOptions.java`       | Defines A4S and Justin configuration options that can be controlled at runtime via yaml options |
 | `RestApiMetricsCollector.java` | Calls runtime A4S metrics endpoints and ingests vertex-level MRC data.                          |
-| `ScalingMetricEvaluator.java`  | Converts MRC inputs into memory/parallelism evaluation curves.                                  |
-| `A4S.java`                     | Implements the key logic for the A4S scaling algorithm                                          |
+| `ScalingMetricEvaluator.java`  | Computes the Flink throughput target and hands off the aggregated MRC.                                  |
+| `Flink118A4sAdapter.java`      | Builds a normalized request and routes it to embedded or remote A4S                                          |
 | `ScalingExecutor.java`         | Maps A4S decisions into Justin-compatible overrides and persists them.                          |
-| `MemoryParallelismCurve.java`  | Represents the evaluated memory/parallelism frontier used by A4S.                               |
+| `a4s-core`                    | Builds the frontier and selects a memory/parallelism configuration.                               |
 
 ## Flink Runtime 1.18
 
