@@ -415,6 +415,26 @@ public class AutoScalerOptions {
                                     + "When enabled, the autoscaler will use memory-parallelism curves "
                                     + "to find optimal (memory, parallelism) configurations for stateful operators.");
 
+    public static final ConfigOption<String> A4S_RUNNER_URL =
+            autoScalerConfig("a4s.runner.url").stringType().noDefaultValue()
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.runner.url"))
+                    .withDescription("HTTP(S) origin of the A4S decision service. Omit for embedded A4S.");
+
+    public static final ConfigOption<Duration> A4S_RUNNER_TIMEOUT =
+            autoScalerConfig("a4s.runner.timeout").durationType().defaultValue(Duration.ofSeconds(3))
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.runner.timeout"))
+                    .withDescription("Maximum time to wait for the remote A4S recommendation.");
+
+    public static final ConfigOption<Duration> A4S_SNAPSHOT_MAX_AGE =
+            autoScalerConfig("a4s.snapshot.max-age").durationType().defaultValue(Duration.ofSeconds(60))
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.snapshot.max-age"))
+                    .withDescription("Maximum age of the metrics when applying an A4S recommendation.");
+
+    public static final ConfigOption<String> A4S_SNAPSHOT_RECORD_FILE =
+            autoScalerConfig("a4s.snapshot.record-file").stringType().noDefaultValue()
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.snapshot.record-file"))
+                    .withDescription("Optional JSONL basename in the operator's A4S_SNAPSHOT_DIR for recording requests.");
+
     public static final ConfigOption<Integer> A4S_MAX_ATTEMPTS =
             autoScalerConfig("a4s.max-attempts")
                     .intType()

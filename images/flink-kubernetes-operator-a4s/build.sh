@@ -6,6 +6,7 @@ source "${SCRIPT_DIR}/../../scripts/env.sh"
 
 echo "Building Flink Kubernetes Operator image ${OPERATOR_A4S_IMAGE}..."
 docker build --platform linux/amd64 \
+  --build-context "a4s-src=${REPO_ROOT}/sources/a4s" \
   --build-context "flink-src=${FLINK_RUNTIME_A4S_SOURCE}" \
   -t "${OPERATOR_A4S_IMAGE}" \
   -f "${REPO_ROOT}/sources/operators/flink-kubernetes-operator-a4s/Dockerfile" \

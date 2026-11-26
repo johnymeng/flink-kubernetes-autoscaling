@@ -26,6 +26,9 @@ WORKDIR /app
 
 COPY . .
 COPY --from=flink-src / /flink-src
+COPY --from=a4s-src / /a4s-src
+
+RUN mvn -B -ntp -f /a4s-src/pom.xml install -DskipTests
 
 # Build the matching Flink SNAPSHOT artifacts, including parent POMs and test
 # JARs. Keep them in this build stage instead of relying on a shared cache.

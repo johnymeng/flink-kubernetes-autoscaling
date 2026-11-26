@@ -96,13 +96,9 @@ public class ScalingMetricEvaluatorTest {
         assertEquals(
                 EvaluatedScalingMetric.avg(100),
                 evaluated.getVertexMetrics().get(source).get(ScalingMetric.TARGET_DATA_RATE));
-        assertEquals(Set.of(downstream), evaluated.getMemoryParallelismCurves().keySet());
-        assertEquals(
-                1.0,
-                evaluated.getMemoryParallelismCurves()
-                        .get(downstream)
-                        .getMemoryMbForParallelism(1)
-                        .orElseThrow());
+        assertEquals(Set.of(downstream), evaluated.getMissRateCurves().keySet());
+        assertEquals(1024 * 1024,
+                evaluated.getMissRateCurves().get(downstream).getPoints().get(0).getCacheSizeBytes());
     }
 
     @Test

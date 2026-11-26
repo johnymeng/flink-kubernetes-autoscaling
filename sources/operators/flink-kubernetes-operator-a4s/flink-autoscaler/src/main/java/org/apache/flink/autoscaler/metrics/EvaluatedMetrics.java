@@ -17,7 +17,6 @@
 
 package org.apache.flink.autoscaler.metrics;
 
-import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
@@ -25,6 +24,7 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+import java.time.Instant;
 import java.util.Map;
 
 /** Collected scaling metrics. */
@@ -34,19 +34,21 @@ import java.util.Map;
 public class EvaluatedMetrics {
     private Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics;
     private Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics;
-    private Map<JobVertexID, MemoryParallelismCurve> memoryParallelismCurves;
-    private Map<JobVertexID, MissRateCurve> missRateCurves;
+    private Map<JobVertexID, MissRateCurve> missRateCurves = Map.of();
+    private Instant windowStart;
+    private Instant windowEnd;
+    private Instant jobRunningSince;
 
     public EvaluatedMetrics(
-        Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics, 
-        Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics) {
-        this(vertexMetrics, globalMetrics, null, null);
+            Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
+            Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics) {
+        this(vertexMetrics, globalMetrics, Map.of());
     }
 
     public EvaluatedMetrics(
             Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
             Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics,
-            Map<JobVertexID, MemoryParallelismCurve> memoryParallelismCurves) {
-        this(vertexMetrics, globalMetrics, memoryParallelismCurves, null);
+            Map<JobVertexID, MissRateCurve> missRateCurves) {
+        this(vertexMetrics, globalMetrics, missRateCurves, null, null, null);
     }
 }

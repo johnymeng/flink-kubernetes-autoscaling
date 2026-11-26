@@ -31,7 +31,6 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import org.apache.flink.a4s.core.MissRateCurve;
-import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -61,19 +60,15 @@ public class ScalingMetricEvaluator {
             Configuration conf, CollectedMetricHistory collectedMetrics, Duration restartTime) {
         LOG.debug("Restart time used in metrics evaluation: {}", restartTime);
         var scalingOutput = new HashMap<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>>();
-        var memoryParallelismCurves = new HashMap<JobVertexID, MemoryParallelismCurve>();
         var metricsHistory = collectedMetrics.getMetricHistory();
         var topology = collectedMetrics.getJobTopology();
         CollectedMetrics latestCollectedMetrics = metricsHistory.get(metricsHistory.lastKey());
         Map<JobVertexID, MissRateCurve> collectedMissRateCurves =
                 latestCollectedMetrics.getMissRateCurves() == null
                         ? Map.of()
-                        : latestCollectedMetrics.getMissRateCurves();
-        double hitLatencySec = conf.getDouble(AutoScalerOptions.A4S_HIT_LATENCY_SEC);
-        double missLatencySec = conf.getDouble(AutoScalerOptions.A4S_MISS_LATENCY_SEC);
-        int vertexMinParallelism = conf.get(AutoScalerOptions.VERTEX_MIN_PARALLELISM);
-        int vertexMaxParallelism = conf.get(AutoScalerOptions.VERTEX_MAX_PARALLELISM);
-
+                        : latestCollectedMetrics.getMissRateCurves().entrySet().stream()
+                                .filter(entry -> entry.getValue() != null && entry.getValue().isUsable())
+                                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
         boolean processingBacklog = isProcessingBacklog(topology, metricsHistory, conf);
 
         for (var vertex : topology.getVerticesInTopologicalOrder()) {
@@ -88,31 +83,11 @@ public class ScalingMetricEvaluator {
                             processingBacklog,
                             restartTime));
 
-            // This relies on target data rate first being calculated       
-            LOG.debug("A4S: Evaluating metrics for vertex {}", vertex);
-            MissRateCurve missRateCurve = collectedMissRateCurves.get(vertex);
-            if (missRateCurve == null) {
-                continue;
-            }
-            MemoryParallelismCurve mpc = MemoryParallelismCurve.fromMissRateCurve(
-                scalingOutput.get(vertex).get(TARGET_DATA_RATE).getAverage(),
-                missLatencySec, 
-                hitLatencySec, 
-                vertexMinParallelism,
-                vertexMaxParallelism,
-                missRateCurve);
-            if (mpc != null) {
-                memoryParallelismCurves.put(vertex, mpc);
-            }
         }
 
-        var globalMetrics = evaluateGlobalMetrics(metricsHistory);
-
         return new EvaluatedMetrics(
-                scalingOutput, 
-                globalMetrics, 
-                memoryParallelismCurves, 
-                collectedMissRateCurves);
+                scalingOutput, evaluateGlobalMetrics(metricsHistory), collectedMissRateCurves,
+                metricsHistory.firstKey(), metricsHistory.lastKey(), collectedMetrics.getJobRunningTs());
     }
 
     @VisibleForTesting

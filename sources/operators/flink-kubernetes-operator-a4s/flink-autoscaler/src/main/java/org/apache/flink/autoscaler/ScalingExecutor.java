@@ -19,7 +19,8 @@ package org.apache.flink.autoscaler;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.autoscaler.a4s.A4S;
+import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.AutoScalerEventHandler;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -39,6 +40,7 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
+import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
@@ -46,16 +48,23 @@ import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.a4s.api.ScalingPlan;
+
 import javax.annotation.Nullable;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
+import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -86,6 +95,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
     private final ResourceCheck resourceCheck;
 
     private final ScalingConfigurations scalingConfigurations;
+    private final Flink118A4sAdapter a4s = new Flink118A4sAdapter();
 
     private static final HashMap<JobID, Integer> periods = new HashMap<>();
 
@@ -136,66 +146,67 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         boolean memoryChanged = false;
         boolean justinEnabled = conf.get(JUSTIN_ENABLED);
         boolean a4sEnabled = justinEnabled && conf.get(A4S_ENABLED);
+        String generation = null;
+        Map<JobVertexID, JustinVertexResourceRequirements> a4sRequirements = null;
+        ScalingPlan plan = null;
+        long evaluationStart = System.nanoTime();
         if (a4sEnabled) {
-            var decisions =
-                    new A4S(jobTopology, evaluatedMetrics, scalingSummaries).makeDecision(conf);
-            if (!decisions.isEmpty() || !scalingSummaries.isEmpty()) {
-                var currentRequirements = readResourceRequirements(context);
-                var excluded = conf.get(VERTEX_EXCLUDE_IDS);
-                for (var entry : evaluatedMetrics.getVertexMetrics().entrySet()) {
-                    var id = entry.getKey();
-                    var metrics = entry.getValue();
-                    var current = currentRequirements.get(id);
-                    var currentProfile =
-                            current == null ? null : current.getAppliedResourceProfile();
-                    if (currentProfile == null
-                            || currentProfile.equals(ResourceProfile.UNKNOWN)
-                            || currentProfile.equals(ResourceProfile.ANY)
-                            || !currentProfile.equals(
-                                    ResourceProfileParser.parse(currentProfile.toString()))) {
-                        LOG.warn(
-                                "A4S: Deferring rescale because the applied resource profile for vertex {} cannot be preserved",
-                                id);
-                        return false;
-                    }
-                    var profile = currentProfile;
-                    var decision = decisions.get(id);
-                    if (decision != null && !excluded.contains(id.toHexString())) {
-                        int currentParallelism = (int) metrics.get(PARALLELISM).getCurrent();
-                        int targetParallelism = decision.getParallelism();
-                        if (currentParallelism == targetParallelism) {
-                            scalingSummaries.remove(id);
-                        } else {
-                            metrics.put(
-                                    EXPECTED_PROCESSING_RATE,
-                                    EvaluatedScalingMetric.of(
-                                            evaluatedMetrics
-                                                    .getMemoryParallelismCurves()
-                                                    .get(id)
-                                                    .getTargetThroughput()));
-                            scalingSummaries.put(
-                                    id,
-                                    new ScalingSummary(
-                                            currentParallelism, targetParallelism, metrics));
-                        }
-                        double memoryMb =
-                                conf.get(A4S_MANAGED_MEMORY_OVERRIDE_ENABLED)
-                                        ? conf.get(A4S_MANAGED_MEMORY_OVERRIDE_MB)
-                                        : decision.getMemoryMB() + conf.get(A4S_MEMORY_BASE_MB);
-                        if (!Double.isFinite(memoryMb) || memoryMb <= 0) {
-                            throw new IllegalArgumentException(
-                                    "Invalid A4S managed memory: " + memoryMb);
-                        }
-                        profile =
-                                ResourceProfile.newBuilder(currentProfile)
-                                        .setManagedMemory(
-                                                MemorySize.ofMebiBytes((long) Math.ceil(memoryMb)))
-                                        .build();
-                    }
-                    // Vertices without a usable A4S decision retain their deployed resources.
-                    a4sProfiles.put(id, profile);
-                    memoryChanged |= !profile.equals(currentProfile);
+            if (evaluatedMetrics.getWindowEnd() == null
+                    || (scalingSummaries.isEmpty() && evaluatedMetrics.getMissRateCurves().isEmpty())) {
+                return false;
+            }
+            generation = readRuntimeGeneration(context, evaluatedMetrics, jobTopology);
+            a4sRequirements = readResourceRequirements(context);
+            var profiles = appliedProfiles(a4sRequirements, jobTopology);
+            if (generation == null || profiles == null
+                    || !previousOverridesApplied(context, jobTopology, profiles)) {
+                LOG.info("A4S deferred pending a stable generation and confirmed applied profiles");
+                return false;
+            }
+            try {
+                var request = a4s.request(context.getJobID().toString(), generation, now, jobTopology,
+                        evaluatedMetrics, scalingSummaries, profiles, conf);
+                try {
+                    a4s.record(conf, request);
+                } catch (IOException e) {
+                    LOG.warn("A4S snapshot recording failed", e);
                 }
+                plan = a4s.evaluate(conf, request);
+                if (plan.action != ScalingPlan.Action.RESCALE) {
+                    LOG.info("A4S held job {} with outcome {} ({})",
+                            request.snapshot.jobId, plan.action, plan.rationale);
+                    return false;
+                }
+                if (!a4s.accepts(request, plan, now.plusNanos(System.nanoTime() - evaluationStart))) {
+                    LOG.warn("A4S recommendation failed snapshot or resource validation");
+                    return false;
+                }
+                LOG.info("A4S evaluated job {} snapshot {} generation {} decision {}",
+                        plan.jobId, plan.snapshotId, plan.executionGeneration, plan.decisionId);
+                for (var operator : request.snapshot.operators) {
+                    var id = JobVertexID.fromHexString(operator.operatorId);
+                    var metrics = evaluatedMetrics.getVertexMetrics().get(id);
+                    var current = profiles.get(id);
+                    var target = plan.operators.get(operator.operatorId).target;
+                    if (target.parallelism == operator.current.parallelism) {
+                        scalingSummaries.remove(id);
+                    } else if (operator.cacheSensitive) {
+                        metrics.put(EXPECTED_PROCESSING_RATE,
+                                EvaluatedScalingMetric.of(operator.targetRecordsPerSecond));
+                        scalingSummaries.put(id, new ScalingSummary(
+                                operator.current.parallelism, target.parallelism, metrics));
+                    }
+                    var profile = current;
+                    if (target.managedMemoryPerTaskBytes != current.getManagedMemory().getBytes()) {
+                        profile = ResourceProfile.newBuilder(current)
+                                .setManagedMemory(new MemorySize(target.managedMemoryPerTaskBytes)).build();
+                    }
+                    a4sProfiles.put(id, profile);
+                    memoryChanged |= !profile.equals(current);
+                }
+            } catch (IOException | IllegalArgumentException | ArithmeticException e) {
+                LOG.warn("A4S evaluation failed. Holding the current configuration.", e);
+                return false;
             }
         }
 
@@ -256,6 +267,14 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                             context.getJobID(), scalingConfigurations, conf);
         }
 
+        if (plan != null && (!Objects.equals(generation,
+                        readRuntimeGeneration(context, evaluatedMetrics, jobTopology))
+                || !sameRequirements(a4sRequirements, readResourceRequirements(context))
+                || now.plusNanos(System.nanoTime() - evaluationStart).toEpochMilli() > plan.expiresAtMillis)) {
+            LOG.info("A4S recommendation expired or the runtime changed during evaluation");
+            return false;
+        }
+
         addToScalingHistoryAndStore(
                 autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
         scalingTracking.addScalingRecord(now, new ScalingRecord());
@@ -270,6 +289,88 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         delayedScaleDown.clearAll();
 
         return true;
+    }
+
+    @VisibleForTesting
+    String readRuntimeGeneration(Context context, EvaluatedMetrics evaluated, JobTopology topology)
+            throws Exception {
+        if (evaluated.getJobRunningSince() == null) {
+            return null;
+        }
+        try (var client = context.getRestClusterClient()) {
+            var job = client.getJobDetails(context.getJobID()).get(
+                    context.getConfiguration().get(FLINK_CLIENT_TIMEOUT).toMillis(), TimeUnit.MILLISECONDS);
+            if (!context.getJobID().equals(job.getJobId()) || job.getJobStatus() != JobStatus.RUNNING
+                    || !Objects.equals(job.getTimestamps().get(JobStatus.RUNNING),
+                            evaluated.getJobRunningSince().toEpochMilli())
+                    || job.getJobVertexInfos().size() != topology.getVertexInfos().size()) {
+                return null;
+            }
+            var identity = new TreeMap<String, String>();
+            for (var vertex : job.getJobVertexInfos()) {
+                var live = topology.get(vertex.getJobVertexID());
+                if (live == null || live.getParallelism() != vertex.getParallelism()
+                        || live.isFinished() != (vertex.getExecutionState() == ExecutionState.FINISHED)
+                        || (!live.isFinished()
+                                && vertex.getTasksPerState().getOrDefault(ExecutionState.RUNNING, 0)
+                                        != live.getParallelism())) {
+                    return null;
+                }
+                identity.put(vertex.getJobVertexID().toHexString(),
+                        vertex.getParallelism() + "/" + vertex.getExecutionState()
+                                + "/" + vertex.getStartTime());
+            }
+            String key = job.getJobId() + "/" + job.getStartTime() + "/"
+                    + evaluated.getJobRunningSince() + "/" + identity;
+            return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+        }
+    }
+
+    private static Map<JobVertexID, ResourceProfile> appliedProfiles(
+            Map<JobVertexID, JustinVertexResourceRequirements> requirements, JobTopology topology) {
+        if (!requirements.keySet().equals(topology.getVertexInfos().keySet())) {
+            return null;
+        }
+        var profiles = new HashMap<JobVertexID, ResourceProfile>();
+        for (var entry : requirements.entrySet()) {
+            var id = entry.getKey();
+            var profile = entry.getValue().getAppliedResourceProfile();
+            if (profile == null || profile.equals(ResourceProfile.UNKNOWN)
+                    || profile.equals(ResourceProfile.ANY)
+                    || !profile.equals(ResourceProfileParser.parse(profile.toString()))) {
+                return null;
+            }
+            profiles.put(id, profile);
+        }
+        return profiles;
+    }
+
+    private boolean previousOverridesApplied(
+            Context context, JobTopology topology, Map<JobVertexID, ResourceProfile> profiles)
+            throws Exception {
+        for (var entry : autoScalerStateStore.getParallelismOverrides(context).entrySet()) {
+            var vertex = topology.get(JobVertexID.fromHexString(entry.getKey()));
+            if (vertex == null || vertex.getParallelism() != Integer.parseInt(entry.getValue())) {
+                return false;
+            }
+        }
+        for (var entry : autoScalerStateStore.getResourceProfileOverrides(context).entrySet()) {
+            var profile = profiles.get(JobVertexID.fromHexString(entry.getKey()));
+            if (!Objects.equals(profile, ResourceProfileParser.parse(entry.getValue()))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean sameRequirements(
+            Map<JobVertexID, JustinVertexResourceRequirements> before,
+            Map<JobVertexID, JustinVertexResourceRequirements> after) {
+        if (!before.equals(after)) {
+            return false;
+        }
+        return before.entrySet().stream().allMatch(entry -> Objects.equals(
+                entry.getValue().getAppliedResourceProfile(), after.get(entry.getKey()).getAppliedResourceProfile()));
     }
 
     @VisibleForTesting

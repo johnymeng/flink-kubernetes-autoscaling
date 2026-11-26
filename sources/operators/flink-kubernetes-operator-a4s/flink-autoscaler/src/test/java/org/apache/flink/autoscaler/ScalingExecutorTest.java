@@ -18,7 +18,7 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
+import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -200,7 +200,16 @@ public class ScalingExecutorTest {
                                 stateful, statefulMetrics),
                         globalMetrics,
                         Map.of());
+        metrics.setWindowStart(Instant.now().minusSeconds(10));
+        metrics.setWindowEnd(Instant.now());
 
+        scalingExecutor = new ScalingExecutor<>(eventCollector, stateStore) {
+            @Override
+            String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
+                    EvaluatedMetrics evaluated, JobTopology topology) {
+                return "generation";
+            }
+        };
         var scalingHistory = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
         boolean scaled =
                 scalingExecutor.scaleResource(
@@ -305,10 +314,10 @@ public class ScalingExecutorTest {
                         dummyGlobalMetrics,
                         Map.of(
                                 stateful,
-                                MemoryParallelismCurve.builder()
-                                        .targetThroughput(70)
-                                        .addPoint(1, 18)
-                                        .build()));
+                                new MissRateCurve(java.util.List.of(
+                                        new MissRateCurve.Point(18L * 1024 * 1024, 0.1)))));
+        metrics.setWindowStart(Instant.now().minusSeconds(10));
+        metrics.setWindowEnd(Instant.now());
         var original =
                 ResourceProfile.newBuilder()
                         .setCpuCores(.25)
@@ -322,6 +331,12 @@ public class ScalingExecutorTest {
         live.put(stateful, new JustinVertexResourceRequirements(parallelism, original, original));
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated, JobTopology topology) {
+                        return "generation";
+                    }
+
                     @Override
                     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
                             JobAutoScalerContext<JobID> ctx) {
@@ -418,6 +433,7 @@ public class ScalingExecutorTest {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
+        conf.set(AutoScalerOptions.A4S_MISS_LATENCY_SEC, 0.025);
         var vertex = new JobVertexID();
         var topology =
                 new JobTopology(new VertexInfo(vertex, Map.of(), 1, MAX_PARALLELISM, false, null));
@@ -427,15 +443,21 @@ public class ScalingExecutorTest {
                         dummyGlobalMetrics,
                         Map.of(
                                 vertex,
-                                MemoryParallelismCurve.builder()
-                                        .targetThroughput(70)
-                                        .addPoint(1, 700)
-                                        .addPoint(2, 100)
-                                        .build()));
+                                new MissRateCurve(java.util.List.of(
+                                        new MissRateCurve.Point(100L * 1024 * 1024, 0.6),
+                                        new MissRateCurve.Point(700L * 1024 * 1024, 0.1)))));
+        metrics.setWindowStart(Instant.now().minusSeconds(10));
+        metrics.setWindowEnd(Instant.now());
         var original = ResourceProfile.newBuilder().setManagedMemoryMB(128).build();
         var validated = new HashMap<JobVertexID, ScalingSummary>();
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated, JobTopology topology) {
+                        return "generation";
+                    }
+
                     @Override
                     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
                             JobAutoScalerContext<JobID> ctx) {
@@ -472,6 +494,57 @@ public class ScalingExecutorTest {
         assertEquals(2, validated.get(vertex).getNewParallelism());
         assertEquals(2, history.get(vertex).get(now).getNewParallelism());
         assertEquals(Map.of(vertex, 2), getScaledParallelism(stateStore, context));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,false", "false,true", "false,false"})
+    void discardsA4sRecommendationAfterGenerationOrAppliedProfileChanges(
+            boolean restart, boolean profileChange) throws Exception {
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
+        var vertex = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, MAX_PARALLELISM));
+        var metrics = new EvaluatedMetrics(Map.of(vertex, evaluated(1, 70, 100)),
+                dummyGlobalMetrics, Map.of(vertex,
+                        new MissRateCurve(java.util.List.of(
+                                new MissRateCurve.Point(18L * 1024 * 1024, 0.1)))));
+        var now = Instant.now();
+        metrics.setWindowStart(now.minusSeconds(10));
+        metrics.setWindowEnd(now);
+        var current = ResourceProfile.newBuilder().setManagedMemoryMB(128).build();
+        var changed = ResourceProfile.newBuilder().setManagedMemoryMB(256).build();
+        var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 1);
+
+        scalingExecutor = new ScalingExecutor<>(eventCollector, stateStore) {
+            private int generationsRead;
+            private int profilesRead;
+
+            @Override
+            String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
+                    EvaluatedMetrics evaluated, JobTopology topology) {
+                return ++generationsRead > 1 && restart ? "restarted" : "generation";
+            }
+
+            @Override
+            Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
+                    JobAutoScalerContext<JobID> ctx) {
+                var applied = ++profilesRead > 1 && profileChange ? changed : current;
+                return Map.of(vertex, new JustinVertexResourceRequirements(parallelism, current, applied));
+            }
+        };
+        if (!restart && !profileChange) {
+            // An earlier scaling decision is still waiting for its requested profile.
+            stateStore.storeResourceProfileOverrides(context,
+                    Map.of(vertex.toHexString(), changed.toString()));
+        }
+        var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
+        assertFalse(scalingExecutor.scaleResource(context, metrics, history, scalingTracking,
+                now, topology, new DelayedScaleDown()));
+        assertThat(history).isEmpty();
+        assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+        assertThat(stateStore.getResourceProfileOverrides(context)).isEqualTo(
+                restart || profileChange ? Map.of() : Map.of(vertex.toHexString(), changed.toString()));
     }
 
     @Test
