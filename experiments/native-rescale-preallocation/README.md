@@ -32,6 +32,12 @@ The observer verifies the effective feature setting and initial profiles before 
 
 ## Score both arms consistently
 
+```bash
+python3 experiments/native-rescale-preallocation/score.py   "$RUN_EVIDENCE" "$JOBMANAGER_LOG" > "$RUN_EVIDENCE/timings.json"
+```
+
+The scorer matches the manual request against the JobManager event timestamps and measures record progress only on comparable task attempts. It marks unmatched requests and unavailable phase observations in the output.
+
 - Preparation duration spans preparation start to commit. An immediate ready path has no timed preparation interval.
 - Decision-to-running spans the decision to the last target task reaching running. Record the acknowledgement separately.
 - Execution interruption spans restart start to the first increase in a stateful input or output counter on a replacement attempt. Report sample bounds. Estimate observed downtime using the counter progress gap immediately surrounding the restart.
