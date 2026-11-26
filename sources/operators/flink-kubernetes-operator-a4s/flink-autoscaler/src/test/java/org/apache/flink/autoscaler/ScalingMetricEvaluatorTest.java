@@ -151,7 +151,8 @@ public class ScalingMetricEvaluatorTest {
                                 Map.of(),
                                 Map.of(source, profile),
                                 conf,
-                                true);
+                                true,
+                                Map.of());
         assertEquals(
                 expectedRate, request.snapshot.operators.get(0).telemetry.outputRecordsPerSecond);
     }
@@ -190,7 +191,8 @@ public class ScalingMetricEvaluatorTest {
                                 Map.of(),
                                 Map.of(source, profile),
                                 conf,
-                                true);
+                                true,
+                                Map.of());
         assertEquals(expected, request.snapshot.operators.get(0).telemetry.sourceBacklogRecords);
         assertEquals(
                 0.0, evaluated.getVertexMetrics().get(source).get(ScalingMetric.LAG).getCurrent());

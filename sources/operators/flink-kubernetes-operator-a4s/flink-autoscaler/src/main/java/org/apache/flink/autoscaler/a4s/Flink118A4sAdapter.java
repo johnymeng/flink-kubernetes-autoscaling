@@ -76,7 +76,8 @@ public final class Flink118A4sAdapter {
             Map<JobVertexID, ScalingSummary> requested,
             Map<JobVertexID, ResourceProfile> profiles,
             Configuration conf,
-            boolean statefulRescaleAvailable) {
+            boolean statefulRescaleAvailable,
+            Map<JobVertexID, Map<String, String>> taskPlacements) {
         var operators = new ArrayList<OperatorMetrics>();
         for (var id : topology.getVerticesInTopologicalOrder()) {
             var metrics = evaluated.getVertexMetrics().get(id);
@@ -157,7 +158,8 @@ public final class Flink118A4sAdapter {
                                     metrics,
                                     profile,
                                     current,
-                                    evaluated.getObservedSourceBacklogs().get(id))));
+                                    evaluated.getObservedSourceBacklogs().get(id),
+                                    taskPlacements.getOrDefault(id, Map.of()))));
         }
         double baseMiB = conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
         if (!Double.isFinite(baseMiB) || baseMiB < 0 || baseMiB > 600) {
@@ -271,7 +273,8 @@ public final class Flink118A4sAdapter {
             Map<ScalingMetric, EvaluatedScalingMetric> metrics,
             ResourceProfile profile,
             int parallelism,
-            Long observedSourceBacklog) {
+            Long observedSourceBacklog,
+            Map<String, String> taskPlacement) {
         Double busy = finite(metrics.get(ScalingMetric.LOAD));
         long bytesPerSlot = profile.getTotalMemory().getBytes();
         Long totalSlotBytes =
@@ -293,7 +296,7 @@ public final class Flink118A4sAdapter {
                 null,
                 null,
                 observedSourceBacklog,
-                Map.of());
+                taskPlacement);
     }
 
     private static Double finite(EvaluatedScalingMetric metric) {

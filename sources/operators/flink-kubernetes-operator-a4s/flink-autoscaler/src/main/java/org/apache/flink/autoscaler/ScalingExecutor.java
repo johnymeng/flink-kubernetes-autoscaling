@@ -50,6 +50,7 @@ import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobVertexDetailsHeaders;
 import org.apache.flink.runtime.rest.messages.JobVertexDetailsInfo;
 
+import lombok.Value;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -159,7 +160,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         boolean memoryChanged = false;
         boolean statefulRescaleAvailable = !conditionalJustin;
         String executionToken = null;
-        String generation = null;
+        RuntimeObservation runtime = null;
         Map<JobVertexID, JustinVertexResourceRequirements> a4sRequirements = null;
         ScalingPlan plan = null;
         long evaluationStart = System.nanoTime();
@@ -168,7 +169,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                     || (scalingSummaries.isEmpty() && evaluatedMetrics.getMissRateCurves().isEmpty())) {
                 return false;
             }
-            generation = readRuntimeGeneration(context, evaluatedMetrics, jobTopology);
+            runtime = readRuntimeObservation(context, evaluatedMetrics, jobTopology);
             if (conditionalJustin) {
                 var requirements = readConditionalRequirements(context);
                 statefulRescaleAvailable = requirements.hasStatefulRescaleSupport();
@@ -190,7 +191,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 a4sRequirements = readResourceRequirements(context);
             }
             var profiles = appliedProfiles(a4sRequirements, jobTopology);
-            if (generation == null
+            if (runtime == null
                     || profiles == null
                     || (!conditionalJustin
                             && !previousOverridesApplied(context, jobTopology, profiles))) {
@@ -201,14 +202,15 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 var request =
                         a4s.request(
                                 context.getJobID().toString(),
-                                generation,
+                                runtime.getGeneration(),
                                 now,
                                 jobTopology,
                                 evaluatedMetrics,
                                 scalingSummaries,
                                 profiles,
                                 conf,
-                                statefulRescaleAvailable);
+                                statefulRescaleAvailable,
+                                runtime.getTaskPlacements());
                 try {
                     plan = a4s.evaluate(conf, request);
                 } finally {
@@ -322,7 +324,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                         context,
                         evaluatedMetrics,
                         jobTopology,
-                        generation,
+                        runtime,
                         a4sRequirements,
                         executionToken,
                         now,
@@ -375,9 +377,16 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         return true;
     }
 
+    /** The execution identity and the TaskManager placement observed in the same REST reads. */
+    @Value
+    static class RuntimeObservation {
+        String generation;
+        Map<JobVertexID, Map<String, String>> taskPlacements;
+    }
+
     @VisibleForTesting
-    String readRuntimeGeneration(Context context, EvaluatedMetrics evaluated, JobTopology topology)
-            throws Exception {
+    RuntimeObservation readRuntimeObservation(
+            Context context, EvaluatedMetrics evaluated, JobTopology topology) throws Exception {
         if (evaluated.getJobRunningSince() == null || evaluated.getWindowStart() == null) {
             return null;
         }
@@ -430,11 +439,13 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             CompletableFuture.allOf(pending.values().toArray(new CompletableFuture<?>[0]))
                     .get(deadline - System.nanoTime(), TimeUnit.NANOSECONDS);
             long windowStart = evaluated.getWindowStart().toEpochMilli();
+            var placements = new HashMap<JobVertexID, Map<String, String>>();
             for (var entry : pending.entrySet()) {
                 var id = entry.getKey();
                 int parallelism = topology.get(id).getParallelism();
                 var subtasks = entry.getValue().join().getSubtasks();
                 var attempts = new TreeMap<Integer, String>();
+                var taskPlacement = new HashMap<String, String>();
                 for (var task : subtasks) {
                     int index = task.getSubtaskIndex();
                     if (index < 0
@@ -456,12 +467,14 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                                     != null) {
                         return null;
                     }
+                    taskPlacement.put(Integer.toString(index), task.getTaskmanagerId());
                 }
                 if (attempts.size() != parallelism) {
                     return null;
                 }
                 identity.computeIfPresent(
                         id.toHexString(), (key, vertex) -> vertex + "/" + attempts);
+                placements.put(id, Map.copyOf(taskPlacement));
             }
             String key =
                     job.getJobId()
@@ -471,7 +484,9 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                             + evaluated.getJobRunningSince()
                             + "/"
                             + identity;
-            return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+            return new RuntimeObservation(
+                    UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString(),
+                    Map.copyOf(placements));
         }
     }
 
@@ -526,14 +541,14 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             Context context,
             EvaluatedMetrics evaluated,
             JobTopology topology,
-            String generation,
+            RuntimeObservation runtime,
             Map<JobVertexID, JustinVertexResourceRequirements> requirements,
             @Nullable String executionToken,
             Instant evaluationTime,
             long evaluationStart,
             long expiresAtMillis)
             throws Exception {
-        if (!Objects.equals(generation, readRuntimeGeneration(context, evaluated, topology))) {
+        if (!Objects.equals(runtime, readRuntimeObservation(context, evaluated, topology))) {
             return false;
         }
         Map<JobVertexID, JustinVertexResourceRequirements> current;

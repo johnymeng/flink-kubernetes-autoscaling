@@ -20,6 +20,7 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.ScalingExecutor.RuntimeObservation;
 import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
@@ -224,13 +225,16 @@ public class ScalingExecutorTest {
         metrics.setWindowStart(Instant.now().minusSeconds(10));
         metrics.setWindowEnd(Instant.now());
 
-        scalingExecutor = new ScalingExecutor<>(eventCollector, stateStore) {
-            @Override
-            String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
-                    EvaluatedMetrics evaluated, JobTopology topology) {
-                return "generation";
-            }
-        };
+        scalingExecutor =
+                new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    RuntimeObservation readRuntimeObservation(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
+                        return new RuntimeObservation("generation", Map.of());
+                    }
+                };
         var scalingHistory = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
         boolean scaled =
                 scalingExecutor.scaleResource(
@@ -357,11 +361,11 @@ public class ScalingExecutorTest {
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
                     @Override
-                    String readRuntimeGeneration(
+                    RuntimeObservation readRuntimeObservation(
                             JobAutoScalerContext<JobID> ctx,
                             EvaluatedMetrics evaluated,
                             JobTopology topology) {
-                        return "generation";
+                        return new RuntimeObservation("generation", Map.of());
                     }
 
                     @Override
@@ -539,11 +543,12 @@ public class ScalingExecutorTest {
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
                     @Override
-                    String readRuntimeGeneration(
+                    RuntimeObservation readRuntimeObservation(
                             JobAutoScalerContext<JobID> ctx,
                             EvaluatedMetrics evaluated,
                             JobTopology topology) {
-                        return "generation";
+                        return new RuntimeObservation(
+                                "generation", Map.of(vertex, Map.of("0", "tm-0")));
                     }
 
                     @Override
@@ -644,6 +649,9 @@ public class ScalingExecutorTest {
                 assertEquals(context.getJobID().toString(), request.snapshot.jobId);
                 assertEquals("generation", request.snapshot.executionGeneration);
                 assertEquals(vertex.toHexString(), request.snapshot.operators.get(0).operatorId);
+                assertEquals(
+                        Map.of("0", "tm-0"),
+                        request.snapshot.operators.get(0).telemetry.taskPlacement);
             }
             if (mode.equals("timeout")) {
                 assertFalse(
@@ -720,8 +728,8 @@ public class ScalingExecutorTest {
                         List.of(vertex),
                         Map.of(ExecutionState.RUNNING, 1),
                         new JobPlanInfo.RawJson("{}"));
-        var first = subtask(0, 0, 300);
-        var second = subtask(1, 0, 400);
+        var first = subtask(0, 0, 300, "tm-0");
+        var second = subtask(1, 0, 400, "tm-1");
         var subtasks = new AtomicReference<>(List.of(first, second));
         var ctx =
                 new JobAutoScalerContext<>(
@@ -772,29 +780,37 @@ public class ScalingExecutorTest {
                                                                         subtasks.get())));
                                     }
                                 });
-        String before = scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology);
+        var before = scalingExecutor.readRuntimeObservation(ctx, evaluated, topology);
         assertThat(before).isNotNull();
+        assertThat(before.getTaskPlacements())
+                .isEqualTo(Map.of(id, Map.of("0", "tm-0", "1", "tm-1")));
 
         subtasks.set(List.of(second, first));
-        assertEquals(before, scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology));
+        assertEquals(before, scalingExecutor.readRuntimeObservation(ctx, evaluated, topology));
+
+        subtasks.set(List.of(first, subtask(1, 0, 400, "tm-replacement")));
+        var relocated = scalingExecutor.readRuntimeObservation(ctx, evaluated, topology);
+        assertThat(relocated.getGeneration()).isNotEqualTo(before.getGeneration());
+        assertThat(relocated.getTaskPlacements().get(id)).containsEntry("1", "tm-replacement");
 
         // Only the second subtask restarts. The vertex start time and task counts stay the same.
-        var restarted = subtask(1, 1, 1_100);
+        var restarted = subtask(1, 1, 1_100, "tm-1");
         subtasks.set(List.of(first, restarted));
-        assertThat(scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology)).isNull();
+        assertThat(scalingExecutor.readRuntimeObservation(ctx, evaluated, topology)).isNull();
         evaluated.setWindowStart(Instant.ofEpochMilli(1_200));
-        assertThat(scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology))
+        assertThat(scalingExecutor.readRuntimeObservation(ctx, evaluated, topology))
                 .isNotNull()
                 .isNotEqualTo(before);
 
         subtasks.set(List.of(first));
-        assertThat(scalingExecutor.readRuntimeGeneration(ctx, evaluated, topology)).isNull();
+        assertThat(scalingExecutor.readRuntimeObservation(ctx, evaluated, topology)).isNull();
     }
 
     private static final IOMetricsInfo EMPTY_IO_METRICS =
             new IOMetricsInfo(0, true, 0, true, 0, true, 0, true, 0, 0, 0);
 
-    private static SubtaskExecutionAttemptDetailsInfo subtask(int index, int attempt, long start) {
+    private static SubtaskExecutionAttemptDetailsInfo subtask(
+            int index, int attempt, long start, String taskManager) {
         return new SubtaskExecutionAttemptDetailsInfo(
                 index,
                 ExecutionState.RUNNING,
@@ -804,7 +820,7 @@ public class ScalingExecutorTest {
                 -1,
                 1_200 - start,
                 EMPTY_IO_METRICS,
-                "tm",
+                taskManager,
                 Map.of(
                         ExecutionState.CREATED,
                         0L,
@@ -839,23 +855,31 @@ public class ScalingExecutorTest {
         var changed = ResourceProfile.newBuilder().setManagedMemoryMB(256).build();
         var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 1);
 
-        scalingExecutor = new ScalingExecutor<>(eventCollector, stateStore) {
-            private int generationsRead;
-            private int profilesRead;
+        scalingExecutor =
+                new ScalingExecutor<>(eventCollector, stateStore) {
+                    private int generationsRead;
+                    private int profilesRead;
 
-            @Override
-            String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
-                    EvaluatedMetrics evaluated, JobTopology topology) {
-                return ++generationsRead > 1 && restart ? "restarted" : "generation";
-            }
+                    @Override
+                    RuntimeObservation readRuntimeObservation(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
+                        return new RuntimeObservation(
+                                ++generationsRead > 1 && restart ? "restarted" : "generation",
+                                Map.of());
+                    }
 
-            @Override
-            Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
-                    JobAutoScalerContext<JobID> ctx) {
-                var applied = ++profilesRead > 1 && profileChange ? changed : current;
-                return Map.of(vertex, new JustinVertexResourceRequirements(parallelism, current, applied));
-            }
-        };
+                    @Override
+                    Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
+                            JobAutoScalerContext<JobID> ctx) {
+                        var applied = ++profilesRead > 1 && profileChange ? changed : current;
+                        return Map.of(
+                                vertex,
+                                new JustinVertexResourceRequirements(
+                                        parallelism, current, applied));
+                    }
+                };
         if (!restart && !profileChange) {
             // An earlier scaling decision is still waiting for its requested profile.
             stateStore.storeResourceProfileOverrides(context,
@@ -1560,7 +1584,8 @@ public class ScalingExecutorTest {
                                 Map.of(join, new ScalingSummary(1, 18, joinMetrics)),
                                 Map.of(bids, profile, auctions, profile, join, profile),
                                 conf,
-                                true);
+                                true,
+                                Map.of());
 
         assertThat(request.constraints.cpuBudgetCores)
                 .isEqualTo(publishBudget ? configuredQuota : null);

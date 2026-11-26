@@ -272,7 +272,8 @@ public class MetricsCollectionAndEvaluationTest {
                         Map.of(),
                         profiles,
                         conf,
-                        true);
+                        true,
+                        Map.of());
         var decoded = Wire.decode(Wire.encode(request), EvaluationRequest.class);
 
         var expected = Map.of(source1.toHexString(), 0L, source2.toHexString(), Long.MAX_VALUE);
@@ -295,7 +296,8 @@ public class MetricsCollectionAndEvaluationTest {
                         Map.of(),
                         profiles,
                         conf,
-                        true);
+                        true,
+                        Map.of());
         for (var operator : request.snapshot.operators) {
             assertNull(operator.telemetry.sourceBacklogRecords);
         }
