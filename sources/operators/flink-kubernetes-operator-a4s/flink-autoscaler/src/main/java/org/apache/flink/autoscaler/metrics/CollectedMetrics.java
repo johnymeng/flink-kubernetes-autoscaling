@@ -18,7 +18,10 @@
 package org.apache.flink.autoscaler.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 
 import lombok.Data;
 import lombok.NoArgsConstructor;
@@ -33,6 +36,9 @@ public class CollectedMetrics {
     private Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics;
     private Map<ScalingMetric, Double> globalMetrics;
     private Map<JobVertexID, MissRateCurve> missRateCurves;
+
+    @JsonInclude(JsonInclude.Include.NON_EMPTY)
+    private Map<JobVertexID, TaskTimeTotals> taskTimeTotals = Map.of();
 
     public CollectedMetrics(
             Map<JobVertexID, Map<ScalingMetric, Double>> vertexMetrics,

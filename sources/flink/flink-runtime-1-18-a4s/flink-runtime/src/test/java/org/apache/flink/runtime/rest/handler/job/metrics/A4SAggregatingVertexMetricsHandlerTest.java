@@ -60,6 +60,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+import static org.apache.flink.runtime.executiongraph.ExecutionGraphTestUtils.createExecutionAttemptId;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.closeTo;
 import static org.hamcrest.Matchers.equalTo;
@@ -489,6 +490,80 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                                 jobId.toString(), jobVertexId.toString(), subtask, attempt, scope),
                         MetricNames.A4S_ROCKSDB_STATE_SIZE,
                         reading));
+    }
+
+    @Test
+    public void testTaskTimesRequireAllCountersAndTrackAttemptIdentity() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(2);
+        ArchivedExecutionVertex first = runningTask(0, 1);
+        ArchivedExecutionVertex second = runningTask(1, 2);
+        ArchivedExecution firstAttempt = first.getCurrentExecutionAttempt();
+        ArchivedExecution secondAttempt = second.getCurrentExecutionAttempt();
+        when(firstAttempt.getAttemptId()).thenReturn(createExecutionAttemptId());
+        when(secondAttempt.getAttemptId()).thenReturn(createExecutionAttemptId());
+        when(vertex.getTaskVertices()).thenReturn(new ArchivedExecutionVertex[] {first, second});
+        Map<String, String> paths = new HashMap<>();
+        paths.put(JobIDPathParameter.KEY, jobId.toString());
+        paths.put(JobVertexIdPathParameter.KEY, jobVertexId.toString());
+        HandlerRequest<EmptyRequestBody> request =
+                HandlerRequest.resolveParametersAndCreate(
+                        EmptyRequestBody.getInstance(),
+                        handler.getMessageHeaders().getUnresolvedMessageParameters(),
+                        paths,
+                        Collections.singletonMap(
+                                "get",
+                                Collections.singletonList(
+                                        A4SAggregatedMetricsResponseBody.FIELD_NAME_TASK_TIMES)),
+                        Collections.emptyList());
+
+        putTaskTime(0, 1, "80:800:0");
+        putTaskTime(1, 1, "50:50:50");
+        assertNull(handler.handleRequest(request, restfulGateway).get().getObservedTaskTimes());
+
+        putTaskTime(1, 2, "20:700:20");
+        A4SAggregatedMetricsResponseBody.TaskTimeTotals times =
+                handler.handleRequest(request, restfulGateway).get().getObservedTaskTimes();
+        assertEquals(100.0, times.busyMillis, 0.0);
+        assertEquals(1500L, times.idleMillis);
+        assertEquals(20L, times.backpressuredMillis);
+
+        when(vertex.getTaskVertices()).thenReturn(new ArchivedExecutionVertex[] {second, first});
+        assertEquals(
+                times.rosterId,
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedTaskTimes()
+                        .rosterId);
+        when(secondAttempt.getAttemptId()).thenReturn(createExecutionAttemptId());
+        assertFalse(
+                times.rosterId.equals(
+                        handler.handleRequest(request, restfulGateway)
+                                .get()
+                                .getObservedTaskTimes()
+                                .rosterId));
+
+        putTaskTime(1, 2, "NaN:700:20");
+        assertNull(handler.handleRequest(request, restfulGateway).get().getObservedTaskTimes());
+        assertNull(
+                handler.handleRequest(
+                                createRequest(jobId.toString(), jobVertexId.toString()),
+                                restfulGateway)
+                        .get()
+                        .getObservedTaskTimes());
+    }
+
+    private void putTaskTime(int subtask, int attempt, String value) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), subtask, attempt, ""),
+                        MetricNames.A4S_TASK_TIME_TOTALS,
+                        value));
     }
 
     @Test

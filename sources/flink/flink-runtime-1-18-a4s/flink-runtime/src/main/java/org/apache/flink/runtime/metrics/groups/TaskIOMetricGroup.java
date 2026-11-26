@@ -80,7 +80,7 @@ public class TaskIOMetricGroup extends ProxyMetricGroup<TaskMetricGroup> {
 
     private volatile boolean busyTimeEnabled;
 
-    private long taskStartTime;
+    private volatile long taskStartTime;
     private long taskInitializeTime;
 
     private final Map<IntermediateResultPartitionID, ResultPartitionBytesCounter>
@@ -139,6 +139,7 @@ public class TaskIOMetricGroup extends ProxyMetricGroup<TaskMetricGroup> {
                         this::getAccumulatedBackPressuredTimeMs);
         this.accumulatedIdleTime =
                 gauge(MetricNames.ACC_TASK_IDLE_TIME, idleTimePerSecond::getAccumulatedCount);
+        gauge(MetricNames.A4S_TASK_TIME_TOTALS, this::snapshotTaskTimes);
 
         this.numMailsProcessed = new SimpleCounter();
         this.mailboxThroughput =
@@ -287,6 +288,36 @@ public class TaskIOMetricGroup extends ProxyMetricGroup<TaskMetricGroup> {
                             - idleTimePerSecond.getAccumulatedCount()
                             - getAccumulatedBackPressuredTimeMs(),
                     0);
+        }
+    }
+
+    @VisibleForTesting
+    String snapshotTaskTimes() {
+        final long started = taskStartTime;
+        if (!busyTimeEnabled || started == INVALID_TIMESTAMP) {
+            return "";
+        }
+        // The timers update independently. Take one clock reading while they are stable.
+        synchronized (idleTimePerSecond) {
+            synchronized (softBackPressuredTimePerSecond) {
+                synchronized (hardBackPressuredTimePerSecond) {
+                    final long now = clock.absoluteTimeMillis();
+                    final long elapsed = now - started;
+                    final long idle = idleTimePerSecond.getAccumulatedCountAt(now);
+                    final long soft = softBackPressuredTimePerSecond.getAccumulatedCountAt(now);
+                    final long hard = hardBackPressuredTimePerSecond.getAccumulatedCountAt(now);
+                    if (idle < 0
+                            || soft < 0
+                            || hard < 0
+                            || idle > elapsed
+                            || soft > elapsed - idle
+                            || hard > elapsed - idle - soft) {
+                        return "";
+                    }
+                    final long backpressured = soft + hard;
+                    return (elapsed - idle - backpressured) + ":" + idle + ":" + backpressured;
+                }
+            }
         }
     }
 

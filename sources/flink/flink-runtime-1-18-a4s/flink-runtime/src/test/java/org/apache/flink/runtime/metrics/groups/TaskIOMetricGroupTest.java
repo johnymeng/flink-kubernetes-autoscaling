@@ -170,6 +170,31 @@ class TaskIOMetricGroupTest {
     }
 
     @Test
+    void snapshotIncludesOngoingIdleAndBackpressureBeforeRefresh() {
+        TaskMetricGroup task = UnregisteredMetricGroups.createUnregisteredTaskMetricGroup();
+        ManualClock clock = new ManualClock(System.currentTimeMillis());
+        TaskIOMetricGroup taskIO = new TaskIOMetricGroup(task, clock);
+        taskIO.setEnableBusyTime(true);
+        assertThat(taskIO.snapshotTaskTimes()).isEmpty();
+        taskIO.markTaskStart();
+
+        clock.advanceTime(Duration.ofMillis(100));
+        taskIO.getIdleTimeMsPerSecond().markStart();
+        clock.advanceTime(Duration.ofMillis(200));
+        assertThat(taskIO.snapshotTaskTimes()).isEqualTo("100:200:0");
+        taskIO.getIdleTimeMsPerSecond().update();
+        assertThat(taskIO.snapshotTaskTimes()).isEqualTo("100:200:0");
+        taskIO.getIdleTimeMsPerSecond().markEnd();
+
+        taskIO.getHardBackPressuredTimePerSecond().markStart();
+        clock.advanceTime(Duration.ofMillis(50));
+        assertThat(taskIO.snapshotTaskTimes()).isEqualTo("100:200:50");
+        taskIO.getHardBackPressuredTimePerSecond().markEnd();
+        taskIO.setEnableBusyTime(false);
+        assertThat(taskIO.snapshotTaskTimes()).isEmpty();
+    }
+
+    @Test
     void testResultPartitionBytesMetrics() {
         TaskMetricGroup task = UnregisteredMetricGroups.createUnregisteredTaskMetricGroup();
         TaskIOMetricGroup taskIO = task.getIOMetricGroup();

@@ -80,6 +80,12 @@ The local Flink fixture checkpointed two RocksDB column families. Their native l
 
 Eleven runtime tests and 108 focused autoscaler tests passed. Coverage includes chained databases, duplicate gauges, retired attempts, a valid zero, decreasing estimates, overflow and exact integers above double precision. A native monitor lifecycle test verified that the gauge starts unavailable, reports zero for an empty database after sampling and clears on close.
 
+### Verified task-time windows
+
+A local Flink MiniCluster supplied a complete window to the production metrics collector and evaluator. The stateful vertex’s collected counters advanced by 2 ms busy and 484 ms idle, with zero backpressured milliseconds. The request to the independent runner reported busy and idle fractions of 0.004115 and 0.995885. The source lacked a complete breakdown in this fixture. The measured-window recommendation and two checkpoint fixture recommendations replayed exactly. The checkpoint rescale preserved all 200 expected outputs.
+
+Sixteen runtime tests passed, including a clock-controlled check for ongoing idle and backpressure before the periodic refresh. The 119 focused autoscaler tests cover missing samples, roster changes, counter resets, and zero elapsed time. A separate operator test verified that the roster and counters survive ConfigMap recovery.
+
 ## Local packaging check
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.

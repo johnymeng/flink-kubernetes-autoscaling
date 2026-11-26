@@ -24,6 +24,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.Value;
 
 import java.time.Instant;
 import java.util.Map;
@@ -44,6 +45,15 @@ public class EvaluatedMetrics {
     private Map<JobVertexID, Long> observedBlockCacheUsage = Map.of();
     private Map<JobVertexID, CacheCounters> observedBlockCacheCounters = Map.of();
     private Map<JobVertexID, Long> observedStateSizes = Map.of();
+    private Map<JobVertexID, TaskTimeFractions> taskTimeFractions = Map.of();
+
+    /** Fractions of the classified task time over the metrics window. */
+    @Value
+    public static class TaskTimeFractions {
+        double busy;
+        double idle;
+        double backpressured;
+    }
 
     public EvaluatedMetrics(
             Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
@@ -72,6 +82,7 @@ public class EvaluatedMetrics {
                 windowStart,
                 windowEnd,
                 jobRunningSince,
+                Map.of(),
                 Map.of(),
                 Map.of(),
                 Map.of(),

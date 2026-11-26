@@ -24,6 +24,7 @@ import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AbstractAutoScalerStateStoreTest;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.kubernetes.operator.autoscaler.KubernetesJobAutoScalerContext;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
@@ -112,6 +113,26 @@ public class KubernetesAutoScalerStateStoreTest
         recovered.removeA4sScalingIntent(ctx);
         recovered.flush(ctx);
         assertThat(createPhysicalAutoScalerStateStore().getA4sScalingIntent(ctx)).isEmpty();
+    }
+
+    @Test
+    void taskTimeTotalsSurviveConfigMapRecovery() throws Exception {
+        var vertex = new JobVertexID();
+        var sample = new CollectedMetrics(Map.of(), Map.of());
+        sample.setTaskTimeTotals(Map.of(vertex, new TaskTimeTotals("roster-1", 800.5, 1200, 200)));
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        history.put(Instant.EPOCH, new CollectedMetrics(Map.of(), Map.of()));
+        history.put(Instant.EPOCH.plusSeconds(1), sample);
+        stateStore.storeCollectedMetrics(ctx, history);
+        stateStore.flush(ctx);
+
+        var recovered = createPhysicalAutoScalerStateStore().getCollectedMetrics(ctx);
+        assertThat(recovered.get(recovered.firstKey()).getTaskTimeTotals()).isEmpty();
+        var times = recovered.get(recovered.lastKey()).getTaskTimeTotals().get(vertex);
+        assertThat(times.rosterId).isEqualTo("roster-1");
+        assertThat(times.busyMillis).isEqualTo(800.5);
+        assertThat(times.idleMillis).isEqualTo(1200);
+        assertThat(times.backpressuredMillis).isEqualTo(200);
     }
 
     @Test

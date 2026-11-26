@@ -40,6 +40,7 @@ import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
 import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedVertexMetricsHeaders;
 import org.apache.flink.runtime.rest.messages.job.metrics.AggregatedSubtaskMetricsParameters;
 import org.apache.flink.runtime.rest.messages.job.metrics.MetricsFilterParameter;
@@ -51,6 +52,7 @@ import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseSt
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -115,6 +117,9 @@ public class A4SAggregatingVertexMetricsHandler
         boolean includeStateSize =
                 request.getQueryParameter(MetricsFilterParameter.class)
                         .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_SIZE);
+        boolean includeTaskTimes =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_TASK_TIMES);
 
         return CompletableFuture.supplyAsync(
                         () -> {
@@ -125,6 +130,7 @@ public class A4SAggregatingVertexMetricsHandler
                                                         || includeCacheUsage
                                                         || includeCacheCounters
                                                         || includeStateSize
+                                                        || includeTaskTimes
                                                 ? gateway.requestJob(jobId, timeout)
                                                 : null;
                                 CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
@@ -135,7 +141,7 @@ public class A4SAggregatingVertexMetricsHandler
                                 return curve.thenCombine(
                                         graph.exceptionally(failure -> null),
                                         (response, liveGraph) -> {
-                                            List<Map<String, String>> attempts =
+                                            CurrentAttemptMetrics observed =
                                                     liveGraph == null
                                                             ? null
                                                             : currentAttemptMetrics(
@@ -143,7 +149,10 @@ public class A4SAggregatingVertexMetricsHandler
                                                                     jobId,
                                                                     vertexID,
                                                                     liveGraph.getJobVertex(
-                                                                            vertexID));
+                                                                            vertexID),
+                                                                    includeTaskTimes);
+                                            List<Map<String, String>> attempts =
+                                                    observed == null ? null : observed.samples;
                                             return new A4SAggregatedMetricsResponseBody(
                                                     response.getMrcStatus(),
                                                     response.getCurve().orElse(null),
@@ -170,6 +179,9 @@ public class A4SAggregatingVertexMetricsHandler
                                                                     attempts,
                                                                     MetricNames
                                                                             .A4S_ROCKSDB_STATE_SIZE)
+                                                            : null,
+                                                    includeTaskTimes
+                                                            ? aggregateTaskTimes(observed)
                                                             : null);
                                         });
                             } catch (Exception e) {
@@ -248,17 +260,19 @@ public class A4SAggregatingVertexMetricsHandler
     }
 
     @Nullable
-    private static List<Map<String, String>> currentAttemptMetrics(
+    private static CurrentAttemptMetrics currentAttemptMetrics(
             MetricStore store,
             JobID jobId,
             JobVertexID vertexId,
-            @Nullable AccessExecutionJobVertex vertex) {
+            @Nullable AccessExecutionJobVertex vertex,
+            boolean identifyRoster) {
         if (vertex == null
                 || vertex.getParallelism() <= 0
                 || vertex.getTaskVertices().length != vertex.getParallelism()) {
             return null;
         }
         List<Map<String, String>> attempts = new ArrayList<>();
+        TreeMap<Integer, String> identities = identifyRoster ? new TreeMap<>() : null;
         HashSet<Integer> indices = new HashSet<>();
         for (AccessExecutionVertex task : vertex.getTaskVertices()) {
             int index = task.getParallelSubtaskIndex();
@@ -279,8 +293,72 @@ public class A4SAggregatingVertexMetricsHandler
                 return null;
             }
             attempts.add(attempt.metrics);
+            if (identities != null) {
+                if (task.getCurrentExecutionAttempt().getAttemptId() == null) {
+                    identities = null;
+                } else {
+                    identities.put(
+                            index, task.getCurrentExecutionAttempt().getAttemptId().toString());
+                }
+            }
         }
-        return attempts;
+        String rosterId =
+                identities == null
+                        ? null
+                        : UUID.nameUUIDFromBytes(
+                                        identities.toString().getBytes(StandardCharsets.UTF_8))
+                                .toString();
+        return new CurrentAttemptMetrics(attempts, rosterId);
+    }
+
+    private static final class CurrentAttemptMetrics {
+        final List<Map<String, String>> samples;
+        @Nullable final String rosterId;
+
+        private CurrentAttemptMetrics(
+                List<Map<String, String>> samples, @Nullable String rosterId) {
+            this.samples = samples;
+            this.rosterId = rosterId;
+        }
+    }
+
+    @Nullable
+    private static TaskTimeTotals aggregateTaskTimes(@Nullable CurrentAttemptMetrics observed) {
+        if (observed == null || observed.rosterId == null) {
+            return null;
+        }
+        double busy = 0;
+        long idle = 0;
+        long backpressured = 0;
+        try {
+            for (Map<String, String> metrics : observed.samples) {
+                String reading = metrics.get(MetricNames.A4S_TASK_TIME_TOTALS);
+                if (reading == null) {
+                    return null;
+                }
+                String[] parts = reading.split(":", -1);
+                if (parts.length != 3) {
+                    return null;
+                }
+                double taskBusy = Double.parseDouble(parts[0]);
+                long taskIdle = Long.parseLong(parts[1]);
+                long taskBackpressured = Long.parseLong(parts[2]);
+                if (!Double.isFinite(taskBusy)
+                        || taskBusy < 0
+                        || taskIdle < 0
+                        || taskBackpressured < 0) {
+                    return null;
+                }
+                busy += taskBusy;
+                idle = Math.addExact(idle, taskIdle);
+                backpressured = Math.addExact(backpressured, taskBackpressured);
+            }
+        } catch (NumberFormatException | ArithmeticException e) {
+            return null;
+        }
+        return Double.isFinite(busy)
+                ? new TaskTimeTotals(observed.rosterId, busy, idle, backpressured)
+                : null;
     }
 
     @Nullable

@@ -50,6 +50,7 @@ import org.apache.flink.autoscaler.JobVertexScaler.KeyGroupOrPartitionsAdjustMod
 import org.apache.flink.autoscaler.ScalingSummary;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.TaskTimeFractions;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
@@ -164,6 +165,7 @@ public final class Flink118A4sAdapter {
                                     evaluated.getObservedBlockCacheUsage().get(id),
                                     evaluated.getObservedBlockCacheCounters().get(id),
                                     evaluated.getObservedStateSizes().get(id),
+                                    evaluated.getTaskTimeFractions().get(id),
                                     taskPlacements.getOrDefault(id, Map.of()))));
         }
         double baseMiB = conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
@@ -283,8 +285,13 @@ public final class Flink118A4sAdapter {
             Long observedBlockCacheUsage,
             CacheCounters observedBlockCacheCounters,
             Long observedStateSize,
+            TaskTimeFractions taskTimes,
             Map<String, String> taskPlacement) {
-        Double busy = finite(metrics.get(ScalingMetric.LOAD));
+        Double legacyBusy = finite(metrics.get(ScalingMetric.LOAD));
+        Double busy =
+                taskTimes == null
+                        ? (legacyBusy != null && legacyBusy <= 1 ? legacyBusy : null)
+                        : Double.valueOf(taskTimes.getBusy());
         long bytesPerSlot = profile.getTotalMemory().getBytes();
         Long totalSlotBytes =
                 bytesPerSlot <= Long.MAX_VALUE / parallelism ? bytesPerSlot * parallelism : null;
@@ -292,9 +299,9 @@ public final class Flink118A4sAdapter {
                 finite(metrics.get(ScalingMetric.INPUT_RATE)),
                 finite(metrics.get(ScalingMetric.OUTPUT_RATE)),
                 finite(metrics.get(ScalingMetric.TRUE_PROCESSING_RATE)),
-                busy != null && busy <= 1 ? busy : null,
-                null,
-                null,
+                busy,
+                taskTimes == null ? null : taskTimes.getIdle(),
+                taskTimes == null ? null : taskTimes.getBackpressured(),
                 null,
                 totalSlotBytes,
                 bytesPerSlot,

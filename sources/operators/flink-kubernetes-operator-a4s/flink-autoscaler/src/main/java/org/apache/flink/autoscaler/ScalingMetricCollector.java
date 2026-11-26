@@ -33,6 +33,7 @@ import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
@@ -155,6 +156,16 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                         collectedMissRateCurves,
                         topology,
                         conf);
+
+        Map<JobVertexID, TaskTimeTotals> taskTimeTotals = new HashMap<>();
+        a4sObservations.forEach(
+                (vertex, response) -> {
+                    TaskTimeTotals taskTimes = response.getObservedTaskTimes();
+                    if (taskTimes != null && !topology.get(vertex).isFinished()) {
+                        taskTimeTotals.put(vertex, taskTimes);
+                    }
+                });
+        scalingMetrics.setTaskTimeTotals(Map.copyOf(taskTimeTotals));
 
         // Add scaling metrics to history if they were computed successfully
         metricHistory.put(now, scalingMetrics);

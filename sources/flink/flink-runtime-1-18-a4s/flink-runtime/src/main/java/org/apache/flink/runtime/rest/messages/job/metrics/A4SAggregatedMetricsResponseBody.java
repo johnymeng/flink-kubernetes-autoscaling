@@ -42,11 +42,14 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
 
     public static final String FIELD_NAME_STATE_SIZE = "observedStateSizeBytes";
 
+    public static final String FIELD_NAME_TASK_TIMES = "observedTaskTimes";
+
     @Nullable private final Long observedSourceBacklogRecords;
     @Nullable private final Long observedBlockCacheCapacityBytes;
     @Nullable private final Long observedBlockCacheUsageBytes;
     @Nullable private final CacheCounters observedBlockCacheCounters;
     @Nullable private final Long observedStateSizeBytes;
+    @Nullable private final TaskTimeTotals observedTaskTimes;
 
     public A4SAggregatedMetricsResponseBody(@Nullable MissRateCurve scaledMrc) {
         this(null, scaledMrc);
@@ -109,6 +112,25 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
                 null);
     }
 
+    public A4SAggregatedMetricsResponseBody(
+            @Nullable Status status,
+            @Nullable MissRateCurve scaledMrc,
+            @Nullable Long observedSourceBacklogRecords,
+            @Nullable Long observedBlockCacheCapacityBytes,
+            @Nullable Long observedBlockCacheUsageBytes,
+            @Nullable CacheCounters observedBlockCacheCounters,
+            @Nullable Long observedStateSizeBytes) {
+        this(
+                status,
+                scaledMrc,
+                observedSourceBacklogRecords,
+                observedBlockCacheCapacityBytes,
+                observedBlockCacheUsageBytes,
+                observedBlockCacheCounters,
+                observedStateSizeBytes,
+                null);
+    }
+
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
             @JsonProperty(FIELD_NAME_STATUS) @Nullable Status status,
@@ -118,13 +140,15 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
             @JsonProperty(FIELD_NAME_CACHE_USAGE) @Nullable Long observedBlockCacheUsageBytes,
             @JsonProperty(FIELD_NAME_CACHE_COUNTERS) @Nullable
                     CacheCounters observedBlockCacheCounters,
-            @JsonProperty(FIELD_NAME_STATE_SIZE) @Nullable Long observedStateSizeBytes) {
+            @JsonProperty(FIELD_NAME_STATE_SIZE) @Nullable Long observedStateSizeBytes,
+            @JsonProperty(FIELD_NAME_TASK_TIMES) @Nullable TaskTimeTotals observedTaskTimes) {
         super(status, scaledMrc);
         this.observedSourceBacklogRecords = observedSourceBacklogRecords;
         this.observedBlockCacheCapacityBytes = observedBlockCacheCapacityBytes;
         this.observedBlockCacheUsageBytes = observedBlockCacheUsageBytes;
         this.observedBlockCacheCounters = observedBlockCacheCounters;
         this.observedStateSizeBytes = observedStateSizeBytes;
+        this.observedTaskTimes = observedTaskTimes;
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -160,6 +184,34 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
     @Nullable
     public Long getObservedStateSizeBytes() {
         return observedStateSizeBytes;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty(FIELD_NAME_TASK_TIMES)
+    @Nullable
+    public TaskTimeTotals getObservedTaskTimes() {
+        return observedTaskTimes;
+    }
+
+    /** Cumulative time counters for a complete running task roster. */
+    public static final class TaskTimeTotals {
+        public final String rosterId;
+        public final double busyMillis;
+        public final long idleMillis;
+        public final long backpressuredMillis;
+
+        @JsonCreator
+        public TaskTimeTotals(
+                @JsonProperty(value = "rosterId", required = true) String rosterId,
+                @JsonProperty(value = "busyMillis", required = true) double busyMillis,
+                @JsonProperty(value = "idleMillis", required = true) long idleMillis,
+                @JsonProperty(value = "backpressuredMillis", required = true)
+                        long backpressuredMillis) {
+            this.rosterId = rosterId;
+            this.busyMillis = busyMillis;
+            this.idleMillis = idleMillis;
+            this.backpressuredMillis = backpressuredMillis;
+        }
     }
 
     /** Cumulative database ticker counts in the current attempt roster. */

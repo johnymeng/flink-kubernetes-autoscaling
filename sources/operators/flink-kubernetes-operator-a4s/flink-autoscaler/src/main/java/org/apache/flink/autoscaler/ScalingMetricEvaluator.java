@@ -22,11 +22,13 @@ import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.TaskTimeFractions;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.MetricAggregator;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.utils.AutoScalerUtils;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
@@ -71,7 +73,12 @@ public class ScalingMetricEvaluator {
                                 .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
         boolean processingBacklog = isProcessingBacklog(topology, metricsHistory, conf);
 
+        var taskTimeFractions = new HashMap<JobVertexID, TaskTimeFractions>();
         for (var vertex : topology.getVerticesInTopologicalOrder()) {
+            var fractions = computeTaskTimeFractions(vertex, metricsHistory);
+            if (fractions != null) {
+                taskTimeFractions.put(vertex, fractions);
+            }
             scalingOutput.put(
                     vertex,
                     evaluateMetrics(
@@ -96,7 +103,8 @@ public class ScalingMetricEvaluator {
                 collectedMetrics.getObservedBlockCacheCapacities(),
                 collectedMetrics.getObservedBlockCacheUsage(),
                 collectedMetrics.getObservedBlockCacheCounters(),
-                collectedMetrics.getObservedStateSizes());
+                collectedMetrics.getObservedStateSizes(),
+                Map.copyOf(taskTimeFractions));
     }
 
     @VisibleForTesting
@@ -195,6 +203,49 @@ public class ScalingMetricEvaluator {
 
         computeProcessingRateThresholds(evaluatedMetrics, conf, processingBacklog, restartTime);
         return evaluatedMetrics;
+    }
+
+    @Nullable
+    private static TaskTimeFractions computeTaskTimeFractions(
+            JobVertexID vertex, SortedMap<Instant, CollectedMetrics> metricsHistory) {
+        TaskTimeTotals first = null;
+        TaskTimeTotals previous = null;
+        for (CollectedMetrics sample : metricsHistory.values()) {
+            TaskTimeTotals current =
+                    sample.getTaskTimeTotals() == null
+                            ? null
+                            : sample.getTaskTimeTotals().get(vertex);
+            if (current == null
+                    || current.rosterId == null
+                    || current.rosterId.isBlank()
+                    || !Double.isFinite(current.busyMillis)
+                    || current.busyMillis < 0
+                    || current.idleMillis < 0
+                    || current.backpressuredMillis < 0) {
+                return null;
+            }
+            if (previous != null
+                    && (!current.rosterId.equals(previous.rosterId)
+                            || current.busyMillis < previous.busyMillis
+                            || current.idleMillis < previous.idleMillis
+                            || current.backpressuredMillis < previous.backpressuredMillis)) {
+                return null;
+            }
+            if (first == null) {
+                first = current;
+            }
+            previous = current;
+        }
+        if (first == null) {
+            return null;
+        }
+        double busy = previous.busyMillis - first.busyMillis;
+        long idle = previous.idleMillis - first.idleMillis;
+        long backpressured = previous.backpressuredMillis - first.backpressuredMillis;
+        double total = busy + idle + backpressured;
+        return Double.isFinite(total) && total > 0
+                ? new TaskTimeFractions(busy / total, idle / total, backpressured / total)
+                : null;
     }
 
     private static double getCompleteOutputRate(

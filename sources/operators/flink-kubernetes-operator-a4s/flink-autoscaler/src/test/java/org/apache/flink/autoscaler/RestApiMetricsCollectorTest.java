@@ -62,6 +62,7 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -399,6 +400,7 @@ class RestApiMetricsCollectorTest {
                                         assertEquals(
                                                 isSource,
                                                 url.contains("?get=observedSourceBacklogRecords"));
+                                        assertTrue(url.contains("observedTaskTimes"));
                                         return CompletableFuture.completedFuture(
                                                 headers.getResponseClass()
                                                         .cast(

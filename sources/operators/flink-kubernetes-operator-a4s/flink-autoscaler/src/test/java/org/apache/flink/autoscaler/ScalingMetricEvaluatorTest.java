@@ -28,6 +28,7 @@ import org.apache.flink.autoscaler.metrics.MetricAggregator;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -35,6 +36,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -53,6 +55,7 @@ import static org.apache.flink.autoscaler.config.AutoScalerOptions.TARGET_UTILIZ
 import static org.apache.flink.autoscaler.topology.ShipStrategy.REBALANCE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Scaling evaluator test. */
@@ -155,6 +158,80 @@ public class ScalingMetricEvaluatorTest {
                                 Map.of());
         assertEquals(
                 expectedRate, request.snapshot.operators.get(0).telemetry.outputRecordsPerSecond);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"valid", "missing", "restart", "reset", "no-elapsed", "invalid"})
+    void transportsOnlyCompleteSameRosterTaskTimeWindows(String mode) {
+        var vertex = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 8));
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var start = new TaskTimeTotals("roster-a", 100, 500, 300);
+        var middle = new TaskTimeTotals("roster-a", 200, 600, 350);
+        var end = new TaskTimeTotals("roster-a", 700, 700, 500);
+        switch (mode) {
+            case "missing":
+                middle = null;
+                break;
+            case "restart":
+                middle = new TaskTimeTotals("roster-b", 200, 600, 350);
+                break;
+            case "reset":
+                middle = new TaskTimeTotals("roster-a", 99, 600, 350);
+                break;
+            case "no-elapsed":
+                middle = start;
+                end = start;
+                break;
+            case "invalid":
+                middle = new TaskTimeTotals("roster-a", Double.NaN, 600, 350);
+                break;
+            default:
+                assertEquals("valid", mode);
+        }
+        TaskTimeTotals[] counters = {start, middle, end};
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        for (int i = 0; i < counters.length; i++) {
+            var metrics = new HashMap<ScalingMetric, Double>();
+            metrics.put(ScalingMetric.LAG, 0.0);
+            metrics.put(ScalingMetric.NUM_RECORDS_IN, i * 100.0);
+            var sample = new CollectedMetrics(Map.of(vertex, metrics), Map.of());
+            if (counters[i] != null) {
+                sample.setTaskTimeTotals(Map.of(vertex, counters[i]));
+            }
+            history.put(Instant.ofEpochSecond(i * 5), sample);
+        }
+
+        var evaluated =
+                evaluator.evaluate(
+                        conf,
+                        new CollectedMetricHistory(topology, history, history.firstKey()),
+                        Duration.ZERO);
+        var profile = ResourceProfile.newBuilder().setManagedMemoryMB(116).build();
+        var request =
+                new Flink118A4sAdapter()
+                        .request(
+                                "job",
+                                "generation-1",
+                                history.lastKey(),
+                                topology,
+                                evaluated,
+                                Map.of(),
+                                Map.of(vertex, profile),
+                                conf,
+                                true,
+                                Map.of());
+        var telemetry = request.snapshot.operators.get(0).telemetry;
+        if (mode.equals("valid")) {
+            assertEquals(0.6, telemetry.busyFraction);
+            assertEquals(0.2, telemetry.idleFraction);
+            assertEquals(0.2, telemetry.backpressuredFraction);
+        } else {
+            assertNull(telemetry.idleFraction);
+            assertNull(telemetry.backpressuredFraction);
+        }
     }
 
     @ParameterizedTest

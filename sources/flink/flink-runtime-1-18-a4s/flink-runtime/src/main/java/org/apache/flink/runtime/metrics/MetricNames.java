@@ -75,6 +75,7 @@ public class MetricNames {
     public static final String TASK_BACK_PRESSURED_TIME = "backPressuredTimeMs" + SUFFIX_RATE;
     public static final String ACC_TASK_IDLE_TIME = "accumulateIdleTimeMs";
     public static final String ACC_TASK_BUSY_TIME = "accumulateBusyTimeMs";
+    public static final String A4S_TASK_TIME_TOTALS = "a4s-task-time-totals";
     public static final String ACC_TASK_BACK_PRESSURED_TIME = "accumulateBackPressuredTimeMs";
     public static final String TASK_SOFT_BACK_PRESSURED_TIME =
             "softBackPressuredTimeMs" + SUFFIX_RATE;
