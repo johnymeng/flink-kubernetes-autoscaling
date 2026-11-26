@@ -426,6 +426,72 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
     }
 
     @Test
+    public void testLiveStateSizeCountsDistinctDatabasesFromCurrentAttempts() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(2);
+        ArchivedExecutionVertex[] tasks = {runningTask(0, 1), runningTask(1, 2)};
+        when(vertex.getTaskVertices()).thenReturn(tasks);
+        Map<String, String> paths = new HashMap<>();
+        paths.put(JobIDPathParameter.KEY, jobId.toString());
+        paths.put(JobVertexIdPathParameter.KEY, jobVertexId.toString());
+        HandlerRequest<EmptyRequestBody> request =
+                HandlerRequest.resolveParametersAndCreate(
+                        EmptyRequestBody.getInstance(),
+                        handler.getMessageHeaders().getUnresolvedMessageParameters(),
+                        paths,
+                        Collections.singletonMap(
+                                "get",
+                                Collections.singletonList(
+                                        A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_SIZE)),
+                        Collections.emptyList());
+
+        String first = "34d73888-3125-4cdf-9295-5ac3794d77e1";
+        String second = "e6a1ef14-d1e9-4014-bc02-2bd6fa55ab04";
+        String third = "b191c482-0832-4f2f-b4f9-aac3542b07ae";
+        putStateSize(0, 1, "db", first + ":1:" + Long.MAX_VALUE);
+        putStateSize(0, 1, "alias", first + ":2:9007199254740993");
+        putStateSize(0, 1, "chained", second + ":1:4");
+        putStateSize(1, 1, "retired", third + ":100:8");
+        assertNull(
+                handler.handleRequest(request, restfulGateway).get().getObservedStateSizeBytes());
+
+        putStateSize(1, 2, "current", third + ":2:0");
+        assertEquals(
+                Long.valueOf(9007199254740997L),
+                handler.handleRequest(request, restfulGateway).get().getObservedStateSizeBytes());
+        assertNull(
+                handler.handleRequest(
+                                createRequest(jobId.toString(), jobVertexId.toString()),
+                                restfulGateway)
+                        .get()
+                        .getObservedStateSizeBytes());
+
+        putStateSize(1, 2, "current", first + ":3:0");
+        assertNull(
+                handler.handleRequest(request, restfulGateway).get().getObservedStateSizeBytes());
+        putStateSize(1, 2, "current", third + ":3:" + Long.MAX_VALUE);
+        assertNull(
+                handler.handleRequest(request, restfulGateway).get().getObservedStateSizeBytes());
+        putStateSize(1, 2, "current", third + ":3:1");
+        putStateSize(0, 1, "db", first + ":2:1");
+        assertNull(
+                handler.handleRequest(request, restfulGateway).get().getObservedStateSizeBytes());
+    }
+
+    private void putStateSize(int subtask, int attempt, String scope, String reading) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), subtask, attempt, scope),
+                        MetricNames.A4S_ROCKSDB_STATE_SIZE,
+                        reading));
+    }
+
+    @Test
     public void testSourceBacklogRequiresEveryCurrentAttempt() throws Exception {
         ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
         ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);

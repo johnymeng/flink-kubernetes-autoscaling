@@ -72,6 +72,10 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     @GuardedBy("lock")
     private long cacheCounterSequence;
 
+    @Nullable
+    @GuardedBy("lock")
+    private LiveStateSizeView liveStateSizeView;
+
     @Nullable private final LRUCache lruCache;
     private final boolean shardsEnabled;
 
@@ -100,6 +104,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             }
         }
         registerStatistics();
+        registerDatabaseObservations();
         registerStackDistanceHistogram();
     }
 
@@ -117,13 +122,28 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                         String.format("rocksdb.%s", tickerType.name().toLowerCase()),
                         new RocksDBNativeStatisticsMetricView(tickerType));
             }
-            if (options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_HIT)
-                    && options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_MISS)) {
-                final String databaseId = UUID.randomUUID().toString();
-                metricGroup.gauge(
-                        MetricNames.A4S_BLOCK_CACHE_COUNTERS,
-                        () -> sampleCacheCounters(databaseId));
-            }
+        }
+    }
+
+    private void registerDatabaseObservations() {
+        final boolean reportCacheCounters =
+                statistics != null
+                        && options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_HIT)
+                        && options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_MISS);
+        final boolean reportLiveState =
+                options.getProperties()
+                        .contains(RocksDBProperty.EstimateLiveDataSize.getRocksDBProperty());
+        if (!reportCacheCounters && !reportLiveState) {
+            return;
+        }
+        final String databaseId = UUID.randomUUID().toString();
+        if (reportCacheCounters) {
+            metricGroup.gauge(
+                    MetricNames.A4S_BLOCK_CACHE_COUNTERS, () -> sampleCacheCounters(databaseId));
+        }
+        if (reportLiveState) {
+            liveStateSizeView = new LiveStateSizeView(databaseId);
+            metricGroup.gauge(MetricNames.A4S_ROCKSDB_STATE_SIZE, liveStateSizeView);
         }
     }
 
@@ -205,6 +225,9 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         synchronized (lock) {
             rocksDB = null;
             statistics = null;
+            if (liveStateSizeView != null) {
+                liveStateSizeView.observation = "";
+            }
         }
     }
 
@@ -294,6 +317,43 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         @Override
         public void update() {
             setStatistics(this);
+        }
+    }
+
+    /** A periodically refreshed estimate across the database's column families. */
+    private final class LiveStateSizeView implements Gauge<String>, View {
+        private final String databaseId;
+        private volatile String observation = "";
+
+        @GuardedBy("lock")
+        private long sequence;
+
+        private LiveStateSizeView(String databaseId) {
+            this.databaseId = databaseId;
+        }
+
+        @Override
+        public String getValue() {
+            return observation;
+        }
+
+        @Override
+        public void update() {
+            synchronized (lock) {
+                if (rocksDB == null || sequence == Long.MAX_VALUE) {
+                    observation = "";
+                    return;
+                }
+                try {
+                    long bytes =
+                            rocksDB.getAggregatedLongProperty(
+                                    RocksDBProperty.EstimateLiveDataSize.getRocksDBProperty());
+                    observation = bytes < 0 ? "" : databaseId + ":" + (++sequence) + ":" + bytes;
+                } catch (RocksDBException e) {
+                    observation = "";
+                    LOG.debug("Unable to observe RocksDB live state size", e);
+                }
+            }
         }
     }
 

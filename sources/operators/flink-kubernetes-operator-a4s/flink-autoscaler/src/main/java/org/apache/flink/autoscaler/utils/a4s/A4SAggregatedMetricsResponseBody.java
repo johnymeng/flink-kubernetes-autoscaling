@@ -39,10 +39,13 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
 
     public static final String FIELD_NAME_CACHE_COUNTERS = "observedBlockCacheCounters";
 
+    public static final String FIELD_NAME_STATE_SIZE = "observedStateSizeBytes";
+
     @Nullable private final Long observedSourceBacklogRecords;
     @Nullable private final Long observedBlockCacheCapacityBytes;
     @Nullable private final Long observedBlockCacheUsageBytes;
     @Nullable private final CacheCounters observedBlockCacheCounters;
+    @Nullable private final Long observedStateSizeBytes;
 
     public A4SAggregatedMetricsResponseBody(@Nullable MissRateCurve scaledMrc) {
         this(null, scaledMrc);
@@ -88,6 +91,23 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
                 null);
     }
 
+    public A4SAggregatedMetricsResponseBody(
+            @Nullable Status status,
+            @Nullable MissRateCurve scaledMrc,
+            @Nullable Long observedSourceBacklogRecords,
+            @Nullable Long observedBlockCacheCapacityBytes,
+            @Nullable Long observedBlockCacheUsageBytes,
+            @Nullable CacheCounters observedBlockCacheCounters) {
+        this(
+                status,
+                scaledMrc,
+                observedSourceBacklogRecords,
+                observedBlockCacheCapacityBytes,
+                observedBlockCacheUsageBytes,
+                observedBlockCacheCounters,
+                null);
+    }
+
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
             @JsonProperty(FIELD_NAME_STATUS) @Nullable Status status,
@@ -96,12 +116,14 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
             @JsonProperty(FIELD_NAME_CACHE_CAPACITY) @Nullable Long observedBlockCacheCapacityBytes,
             @JsonProperty(FIELD_NAME_CACHE_USAGE) @Nullable Long observedBlockCacheUsageBytes,
             @JsonProperty(FIELD_NAME_CACHE_COUNTERS) @Nullable
-                    CacheCounters observedBlockCacheCounters) {
+                    CacheCounters observedBlockCacheCounters,
+            @JsonProperty(FIELD_NAME_STATE_SIZE) @Nullable Long observedStateSizeBytes) {
         super(status, scaledMrc);
         this.observedSourceBacklogRecords = observedSourceBacklogRecords;
         this.observedBlockCacheCapacityBytes = observedBlockCacheCapacityBytes;
         this.observedBlockCacheUsageBytes = observedBlockCacheUsageBytes;
         this.observedBlockCacheCounters = observedBlockCacheCounters;
+        this.observedStateSizeBytes = observedStateSizeBytes;
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -130,6 +152,13 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
     @Nullable
     public CacheCounters getObservedBlockCacheCounters() {
         return observedBlockCacheCounters;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty(FIELD_NAME_STATE_SIZE)
+    @Nullable
+    public Long getObservedStateSizeBytes() {
+        return observedStateSizeBytes;
     }
 
     /** Cumulative database ticker counts in the current attempt roster. */

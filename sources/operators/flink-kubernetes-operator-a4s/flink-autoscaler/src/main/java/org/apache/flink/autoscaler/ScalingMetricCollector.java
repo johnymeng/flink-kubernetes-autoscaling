@@ -170,6 +170,7 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         Map<JobVertexID, Long> observedBlockCacheCapacities = new HashMap<>();
         Map<JobVertexID, Long> observedBlockCacheUsage = new HashMap<>();
         Map<JobVertexID, CacheCounters> observedBlockCacheCounters = new HashMap<>();
+        Map<JobVertexID, Long> observedStateSizes = new HashMap<>();
         a4sObservations.forEach(
                 (vertex, response) -> {
                     Long capacity = response.getObservedBlockCacheCapacityBytes();
@@ -189,6 +190,10 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                             && !topology.get(vertex).isFinished()) {
                         observedBlockCacheCounters.put(vertex, counters);
                     }
+                    Long stateSize = response.getObservedStateSizeBytes();
+                    if (stateSize != null && stateSize >= 0 && !topology.get(vertex).isFinished()) {
+                        observedStateSizes.put(vertex, stateSize);
+                    }
                     Long pending = response.getObservedSourceBacklogRecords();
                     if (pending != null
                             && pending >= 0
@@ -201,6 +206,7 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         collectedMetrics.setObservedBlockCacheCapacities(Map.copyOf(observedBlockCacheCapacities));
         collectedMetrics.setObservedBlockCacheUsage(Map.copyOf(observedBlockCacheUsage));
         collectedMetrics.setObservedBlockCacheCounters(Map.copyOf(observedBlockCacheCounters));
+        collectedMetrics.setObservedStateSizes(Map.copyOf(observedStateSizes));
         if (now.isBefore(windowFullTime)) {
             LOG.info("Metric window not full until {}", readable(windowFullTime));
         } else {

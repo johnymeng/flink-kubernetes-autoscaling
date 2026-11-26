@@ -163,6 +163,7 @@ public final class Flink118A4sAdapter {
                                     evaluated.getObservedBlockCacheCapacities().get(id),
                                     evaluated.getObservedBlockCacheUsage().get(id),
                                     evaluated.getObservedBlockCacheCounters().get(id),
+                                    evaluated.getObservedStateSizes().get(id),
                                     taskPlacements.getOrDefault(id, Map.of()))));
         }
         double baseMiB = conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
@@ -281,6 +282,7 @@ public final class Flink118A4sAdapter {
             Long observedBlockCacheCapacity,
             Long observedBlockCacheUsage,
             CacheCounters observedBlockCacheCounters,
+            Long observedStateSize,
             Map<String, String> taskPlacement) {
         Double busy = finite(metrics.get(ScalingMetric.LOAD));
         long bytesPerSlot = profile.getTotalMemory().getBytes();
@@ -297,7 +299,7 @@ public final class Flink118A4sAdapter {
                 totalSlotBytes,
                 bytesPerSlot,
                 observedBlockCacheUsage,
-                null,
+                observedStateSize,
                 observedBlockCacheCounters == null ? null : observedBlockCacheCounters.hits,
                 observedBlockCacheCounters == null ? null : observedBlockCacheCounters.misses,
                 null,

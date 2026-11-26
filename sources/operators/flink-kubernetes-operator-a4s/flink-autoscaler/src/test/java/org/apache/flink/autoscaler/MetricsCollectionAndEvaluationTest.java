@@ -240,7 +240,7 @@ public class MetricsCollectionAndEvaluationTest {
     }
 
     @Test
-    public void publishesOnlyLatestVerifiedBacklogAndCacheObservations() throws Exception {
+    public void publishesOnlyLatestVerifiedBacklogAndBackendObservations() throws Exception {
         var observations =
                 new HashMap<>(
                         Map.of(
@@ -255,7 +255,8 @@ public class MetricsCollectionAndEvaluationTest {
                                                 27L,
                                                 9007199254740993L,
                                                 9007199254740993L,
-                                                new CacheCounters(9007199254740993L, 0L)),
+                                                new CacheCounters(9007199254740993L, 0L),
+                                                9007199254740995L),
                                 sink,
                                         new A4SAggregatedMetricsResponseBody(
                                                 null, null, null, null, 0L)));
@@ -309,6 +310,11 @@ public class MetricsCollectionAndEvaluationTest {
             assertEquals(
                     operator.operatorId.equals(map.toHexString()) ? Long.valueOf(0L) : null,
                     operator.telemetry.cacheMisses);
+            assertEquals(
+                    operator.operatorId.equals(map.toHexString())
+                            ? Long.valueOf(9007199254740995L)
+                            : null,
+                    operator.telemetry.stateSizeBytes);
             assertNull(operator.current.cachePerTaskBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
@@ -337,6 +343,7 @@ public class MetricsCollectionAndEvaluationTest {
             assertNull(operator.telemetry.cacheUsedBytes);
             assertNull(operator.telemetry.cacheHits);
             assertNull(operator.telemetry.cacheMisses);
+            assertNull(operator.telemetry.stateSizeBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
     }

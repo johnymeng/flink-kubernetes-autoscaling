@@ -112,6 +112,9 @@ public class A4SAggregatingVertexMetricsHandler
         boolean includeCacheCounters =
                 request.getQueryParameter(MetricsFilterParameter.class)
                         .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COUNTERS);
+        boolean includeStateSize =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_SIZE);
 
         return CompletableFuture.supplyAsync(
                         () -> {
@@ -121,6 +124,7 @@ public class A4SAggregatingVertexMetricsHandler
                                                         || includeCacheCapacity
                                                         || includeCacheUsage
                                                         || includeCacheCounters
+                                                        || includeStateSize
                                                 ? gateway.requestJob(jobId, timeout)
                                                 : null;
                                 CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
@@ -147,19 +151,25 @@ public class A4SAggregatingVertexMetricsHandler
                                                             ? aggregateBacklog(attempts)
                                                             : null,
                                                     includeCacheCapacity
-                                                            ? aggregateSlotCacheBytes(
+                                                            ? aggregateScopedBytes(
                                                                     attempts,
                                                                     MetricNames
                                                                             .A4S_SLOT_BLOCK_CACHE)
                                                             : null,
                                                     includeCacheUsage
-                                                            ? aggregateSlotCacheBytes(
+                                                            ? aggregateScopedBytes(
                                                                     attempts,
                                                                     MetricNames
                                                                             .A4S_SLOT_BLOCK_CACHE_USAGE)
                                                             : null,
                                                     includeCacheCounters
                                                             ? aggregateCacheCounters(attempts)
+                                                            : null,
+                                                    includeStateSize
+                                                            ? aggregateScopedBytes(
+                                                                    attempts,
+                                                                    MetricNames
+                                                                            .A4S_ROCKSDB_STATE_SIZE)
                                                             : null);
                                         });
                             } catch (Exception e) {
@@ -290,17 +300,17 @@ public class A4SAggregatingVertexMetricsHandler
     }
 
     @Nullable
-    private static Long aggregateSlotCacheBytes(
+    private static Long aggregateScopedBytes(
             @Nullable List<Map<String, String>> attempts, String metricName) {
         if (attempts == null) {
             return null;
         }
-        boolean usage = MetricNames.A4S_SLOT_BLOCK_CACHE_USAGE.equals(metricName);
+        boolean capacity = MetricNames.A4S_SLOT_BLOCK_CACHE.equals(metricName);
+        boolean perDatabase = MetricNames.A4S_ROCKSDB_STATE_SIZE.equals(metricName);
         long total = 0;
-        HashSet<UUID> caches = new HashSet<>();
+        HashSet<UUID> owners = new HashSet<>();
         for (Map<String, String> attempt : attempts) {
-            UUID cache = null;
-            TreeMap<Long, Long> samples = new TreeMap<>();
+            Map<UUID, TreeMap<Long, Long>> readings = new HashMap<>();
             for (Map.Entry<String, String> entry : attempt.entrySet()) {
                 if (!metricName.equals(entry.getKey())
                         && !entry.getKey().endsWith("." + metricName)) {
@@ -311,36 +321,38 @@ public class A4SAggregatingVertexMetricsHandler
                     return null;
                 }
                 String[] parts = value.split(":", -1);
-                if (parts.length != (usage ? 3 : 2) || parts[0].length() != 36) {
+                if (parts.length != (capacity ? 2 : 3) || parts[0].length() != 36) {
                     return null;
                 }
                 try {
                     UUID id = UUID.fromString(parts[0]);
-                    long sequence = usage ? Long.parseLong(parts[1]) : 0;
+                    long sequence = capacity ? 0 : Long.parseLong(parts[1]);
                     long bytes = Long.parseLong(parts[parts.length - 1]);
-                    if ((cache != null && !cache.equals(id))
-                            || (usage ? sequence <= 0 || bytes < 0 : bytes <= 0)) {
+                    if (capacity ? bytes <= 0 : sequence <= 0 || bytes < 0) {
                         return null;
                     }
-                    Long previous = samples.putIfAbsent(sequence, bytes);
+                    Long previous =
+                            readings.computeIfAbsent(id, ignored -> new TreeMap<>())
+                                    .putIfAbsent(sequence, bytes);
                     if (previous != null && previous != bytes) {
                         return null;
                     }
-                    cache = id;
                 } catch (IllegalArgumentException e) {
                     return null;
                 }
             }
-            // Backend aliases can share a cache within an attempt. Sharing across
-            // subtasks prevents attribution to distinct per-task allocations.
-            if (cache == null || !caches.add(cache)) {
+            // A task can contain several databases, but its slot-cache attribution
+            // must identify exactly one physical cache.
+            if (readings.isEmpty() || (!perDatabase && readings.size() != 1)) {
                 return null;
             }
-            long bytes = samples.lastEntry().getValue();
-            if (bytes > Long.MAX_VALUE - total) {
-                return null;
+            for (Map.Entry<UUID, TreeMap<Long, Long>> reading : readings.entrySet()) {
+                long bytes = reading.getValue().lastEntry().getValue();
+                if (!owners.add(reading.getKey()) || bytes > Long.MAX_VALUE - total) {
+                    return null;
+                }
+                total += bytes;
             }
-            total += bytes;
         }
         return total;
     }

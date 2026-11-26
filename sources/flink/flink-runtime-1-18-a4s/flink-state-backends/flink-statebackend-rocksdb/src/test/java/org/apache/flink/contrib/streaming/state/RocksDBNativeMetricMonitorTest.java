@@ -21,7 +21,10 @@ package org.apache.flink.contrib.streaming.state;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MetricOptions;
+import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.Metric;
+import org.apache.flink.metrics.View;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.metrics.MetricRegistry;
 import org.apache.flink.runtime.metrics.groups.AbstractMetricGroup;
 import org.apache.flink.runtime.metrics.groups.GenericMetricGroup;
@@ -258,7 +261,31 @@ class RocksDBNativeMetricMonitorTest {
         assertThat(closedView.getValue()).isEmpty();
     }
 
+    @Test
+    void testLiveStateEstimateStartsUnavailableAndClearsOnClose() {
+        SimpleMetricRegistry registry = new SimpleMetricRegistry();
+        GenericMetricGroup group =
+                new GenericMetricGroup(
+                        registry,
+                        UnregisteredMetricGroups.createUnregisteredTaskMetricGroup(),
+                        OPERATOR_NAME);
+        RocksDBNativeMetricOptions options = new RocksDBNativeMetricOptions();
+        options.enableEstimateLiveDataSize();
+        try (RocksDBNativeMetricMonitor monitor =
+                new RocksDBNativeMetricMonitor(
+                        options, group, rocksDBExtension.getRocksDB(), null, null)) {
+            assertThat(registry.liveStateSize.getValue()).isEqualTo("");
+            ((View) registry.liveStateSize).update();
+            assertThat((String) registry.liveStateSize.getValue()).endsWith(":1:0");
+        }
+        assertThat(registry.liveStateSize.getValue()).isEqualTo("");
+        ((View) registry.liveStateSize).update();
+        assertThat(registry.liveStateSize.getValue()).isEqualTo("");
+    }
+
     static class SimpleMetricRegistry implements MetricRegistry {
+        Gauge<?> liveStateSize;
+
         List<RocksDBNativeMetricMonitor.RocksDBNativePropertyMetricView> propertyMetrics =
                 new ArrayList<>();
 
@@ -277,7 +304,10 @@ class RocksDBNativeMetricMonitorTest {
 
         @Override
         public void register(Metric metric, String metricName, AbstractMetricGroup group) {
-            if (metric instanceof RocksDBNativeMetricMonitor.RocksDBNativePropertyMetricView) {
+            if (MetricNames.A4S_ROCKSDB_STATE_SIZE.equals(metricName)) {
+                liveStateSize = (Gauge<?>) metric;
+            } else if (metric
+                    instanceof RocksDBNativeMetricMonitor.RocksDBNativePropertyMetricView) {
                 propertyMetrics.add(
                         (RocksDBNativeMetricMonitor.RocksDBNativePropertyMetricView) metric);
             } else if (metric

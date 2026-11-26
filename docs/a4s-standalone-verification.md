@@ -74,6 +74,12 @@ The local Flink fixture checkpointed the keyed state to SST files, then processe
 
 Ten runtime tests and 108 focused autoscaler tests passed. Coverage includes multiple chained databases, stale attempts, repeated aliases, zeros, counter regression, overflow and exact transport above double precision.
 
+### Measured live SST state size
+
+The local Flink fixture checkpointed two RocksDB column families. Their native live-data estimates were 1,008 and 1,009 bytes. The operator collector and evaluator reported a single database estimate of 2,017 bytes. Both requests to the standalone runner carried that value for the stateful vertex. Both decisions replayed exactly, and the checkpoint rescale preserved all 200 expected outputs.
+
+Eleven runtime tests and 108 focused autoscaler tests passed. Coverage includes chained databases, duplicate gauges, retired attempts, a valid zero, decreasing estimates, overflow and exact integers above double precision. A native monitor lifecycle test verified that the gauge starts unavailable, reports zero for an empty database after sampling and clears on close.
+
 ## Local packaging check
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.
