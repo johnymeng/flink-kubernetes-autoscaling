@@ -348,6 +348,35 @@ The last remote period had a 43.8% cache miss fraction, compared with 35.9% in t
 
 All 23 measured remote evaluations returned HTTP 200. Server handling was 6.7 ms p50, 15.2 ms p95 and 16.4 ms p99. Re-encoded requests were 50,213–91,214 bytes. The runner used 4–21 millicores in remote periods and peaked at 58.2 MiB working set. The recorded 69 decisions replayed exactly on the pinned runner. Flink completed 46 checkpoints with zero restores and retained its original task attempts and applied profiles. Scoped cleanup removed the owned namespace and released the worker lock. The Figure 10 chart uses all 121 release-aligned five-second samples.
 
+### Repeat the timestamped Q8 comparison in reverse order
+
+Run `live-d2911435` reused the workload JAR, all image and native-library pins, one c167 allocation, and the same input and observation schedule as `live-b85805f4`. The scorer checks the full Flink deployment spec, including both pod templates, after accounting for the generated run identity and input release time. It confirmed matching startup profiles and opposite modes at every observation position. Each deployment kept five occupied slots, a 160 MiB join block cache and one running task roster.
+
+| Deployment | Observation order | Embedded join input records/s | Remote join input records/s | Remote change | Remote change by adjacent pair |
+| --- | --- | ---: | ---: | ---: | --- |
+| `live-b85805f4` | E R R E E R | 20,207 | 19,340 | −4.3% | −2.8%, −1.2%, −9.0% |
+| `live-d2911435` | R E E R R E | 18,356 | 19,818 | +8.0% | +4.2%, −0.9%, +24.1% |
+
+The geometric mean of the two remote-to-embedded rate ratios for each adjacent pair gave changes of +0.6%, −1.1% and +6.2%. The sixth period had the lowest join input and highest cache miss fraction in both deployments. With embedded mode in the sixth period of the repeat, the miss fraction rose from 30.3% to 46.4% and join input fell to 6,842 records/s over 520–530 seconds. The closing sample reported about 167 MiB of pending compaction, and the runner received zero evaluations during that interval. The late slowdown occurred in both modes under increasing source backlog. The run order, two deployments and storage variability limit the throughput conclusion.
+
+| Repeat period | Mode | Aligned latency samples | p50 / p95 / p99 lower bin edge (ms) |
+| ---: | --- | ---: | --- |
+| 1 | Remote | 50 | 1,150 / 1,150 / 1,150 |
+| 2 | Embedded | 4,950 | 3,160 / 3,360 / 3,390 |
+| 3 | Embedded | 2,650 | 3,850 / 4,140 / 4,270 |
+| 4 | Remote | 2,500 | 4,710 / 4,930 / 4,930 |
+| 5 | Remote | 4,900 | 5,410 / 5,540 / 6,260 |
+| 6 | Embedded | 4,800 | 760 / 7,070 / 7,070 |
+
+Each deployment yielded 19,850 aligned latency samples with zero clock errors or overflows. The p99 increased at every successive position in both deployments and ranged from 1.15 to 8.18 seconds across them. The first position had just 50 samples in each deployment. The strongest common pattern is worsening tail latency as backlog grows, with mixed remote effects at the same observation positions. The steady-state latency criterion remains open.
+
+The repeat completed 46 checkpoints with zero restores. It recorded 25 in-window HTTP 200 evaluations with 5.9 ms p50 and 22.1 ms p99 server handling. The runner used 2.7–7.8 millicores in remote periods and peaked at 52.7 MiB working set. All 69 decisions replayed exactly. Scoped cleanup removed the owned namespace and pods and released the shared worker lock. The comparison chart preserves the 121 release-aligned samples in each deployment.
+
+```bash
+python3 scripts/a4s/score-q8-crossover.py "$Q8_RUN_BUNDLE" \
+  --counterbalanced-bundle "$Q8_REVERSED_RUN_BUNDLE"
+```
+
 ### Prepare the Q20 follow-up
 
 The [Q20 renderer](../scripts/a4s/prepare-q20-comparison.py) uses the existing [checkpoint experiment template](../experiments/1729-checkpoint-aware-rescaling/instruction.md). It creates three repetitions, rotating original, embedded, and remote through each position. It pins the workload image, replaces the template's `tier` selectors with the requested hostnames, and places the operator and remote runner on the selected JobManager host. Both Flink roles can use one idle worker when capacity permits. Each arm gets a separate namespace and checkpoint path. The renderer keeps the shared 600 MiB A4S limit, periodic checkpoints with a one-minute default, and last-state upgrades. It disables deployment-wide memory tuning so that additional pod memory edits do not force redeployment during a Justin scale, and disables the template's separate checkpoint-gated producer pause. Python 3.9 or later and PyYAML are required.
@@ -479,6 +508,6 @@ The local Kafka and RocksDB checkpoint fixture polled once per second with a two
 | Verified | The independent Maven build, packaged runner, Kubernetes Service smoke, and standalone CI exercise the same v1 evaluation path without Flink. Embedded and HTTP evaluation agree on matched inputs. The live Q8 and Q20 captures reproduce through offline replay. |
 | Verified | Local Flink recovered RocksDB state at a different parallelism and preserved the Kafka transactional output oracle. Live Q20 restored checkpoints during memory-only updates. Runner failure, stale recommendations, and incomplete or uncommitted overrides were tested separately. |
 | Implemented, partially verified | The rebuilt Q8 release carried the configured exclusive-slot CPU quota, per-source backlog, and join telemetry in every evaluation. The live Kafka workload uses a blackhole sink, so the deterministic committed-output oracle has only been exercised locally. |
-| Observed performance differences | The adaptive remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. Their allocations diverged. Two earlier fixed-allocation Q8 deployments measured remote join input 6.2% and 0.7% lower. The rebuilt release measured 1.3% higher in one Q8 deployment and 4.3% lower with the timestamped Q8 probe. Its final pair was 9.0% lower during a period of higher pending compaction and cache misses. Saturated Q20 measured 1.2% lower and paced Q20 measured 0.3% higher. The paced run reported zero backlog in all in-window requests and its pooled p99 was sensitive to the selected windows. The 5% steady-state throughput and latency criteria remain open. The archived embedded and remote Q20 measurements first reached the initiating throughput targets about 42 seconds after checkpoint restore in both deployments. |
+| Observed performance differences | The adaptive remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. Their allocations diverged. Two earlier fixed-allocation Q8 deployments measured remote join input 6.2% and 0.7% lower. The rebuilt release measured 1.3% higher in one Q8 deployment. With the timestamped probe and identical pins, reversing the evaluation order changed the measured remote effect from 4.3% lower to 8.0% higher. Both deployments had their slowest measured throughput and highest p99 in the final period. Saturated Q20 measured 1.2% lower and paced Q20 measured 0.3% higher. The paced run reported zero backlog in all in-window requests and its pooled p99 was sensitive to the selected windows. The 5% steady-state throughput and latency criteria remain open. The archived embedded and remote Q20 measurements first reached the initiating throughput targets about 42 seconds after checkpoint restore in both deployments. |
 | Platform dependencies | The Flink adapter supplies demand from the existing Flink evaluator and consumes the JobManager's aggregate `scaledMrc`. The operator persists one conditional Justin target at a time and confirms the running allocation before recording it in deployment status. Runtime and operator verification use local fixtures. |
 | Unsupported in v1 | Physical placement, a calibrated migration cost model, and a verified Flink 2.x or ForSt integration remain outside the current implementation. The optimizer checks a packing when the snapshot supplies worker capacities. Online cost calibration and learned models have extension points and would need their own data and qualification. See the [future adapter guide](a4s-standalone.md#native-instrumentation-and-future-adapters). |
