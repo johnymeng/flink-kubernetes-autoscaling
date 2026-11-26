@@ -56,6 +56,6 @@ public final class MemoryParallelismCurve {
                 || capacity > points.get(points.size() - 1).capacityBytes) {
             return OptionalDouble.empty();
         }
-        return model.predict(metrics, candidate);
+        return model.predict(metrics, candidate, points);
     }
 }

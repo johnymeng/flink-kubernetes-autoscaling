@@ -19,10 +19,16 @@ package io.a4s.core;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.a4s.api.CachePoint;
+import io.a4s.api.OperatorConfiguration;
+import io.a4s.api.OperatorMetrics;
+import io.a4s.api.PolicyConfiguration;
 import io.a4s.api.StackDistanceHistogram;
 import io.a4s.api.StackDistanceHistogram.Counters;
 import io.a4s.api.StackDistanceHistogram.Estimator;
 import java.util.List;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import org.junit.jupiter.api.Test;
 
 class MissRateCurvesTest {
@@ -67,6 +73,48 @@ class MissRateCurvesTest {
                 MissRateCurves.fromHistogram(
                                 histogram(Counters.INTERVAL, "run", 10, List.of(0L, 0L), 0))
                         .isEmpty());
+    }
+
+    @Test
+    void reusesTheHistogramCurveForMinimumCacheAndForecasts() {
+        var current = new OperatorConfiguration(1, 32L, null, 1.0);
+        var metrics =
+                new OperatorMetrics(
+                        "join", "join", true, current, 1, 4, List.of(), 1, true, 1_000.0,
+                        List.of(), null, List.of(),
+                        histogram(Counters.INTERVAL, "run", 10, List.of(2L, 4L), 2), null);
+        var fixed =
+                new FixedLatencyModel(
+                        new PolicyConfiguration(PolicyConfiguration.Mode.CACHE, 1,
+                                0.00001, 0.0001, 0, null));
+        var recording =
+                new PerformanceModel() {
+                    private List<CachePoint> prepared;
+
+                    @Override
+                    public OptionalLong minimumCacheBytes(
+                            OperatorMetrics operator, int parallelism, List<CachePoint> curve) {
+                        prepared = curve;
+                        return fixed.minimumCacheBytes(operator, parallelism, curve);
+                    }
+
+                    @Override
+                    public OptionalDouble predict(OperatorMetrics operator, OperatorConfiguration target) {
+                        throw new AssertionError("The frontier should reuse its prepared curve");
+                    }
+
+                    @Override
+                    public OptionalDouble predict(
+                            OperatorMetrics operator, OperatorConfiguration target, List<CachePoint> curve) {
+                        assertSame(prepared, curve);
+                        return fixed.predict(operator, target, curve);
+                    }
+                };
+        var frontier = new MemoryParallelismCurve(metrics, recording);
+        assertEquals(16, frontier.minimumCacheBytes(1).orElseThrow());
+        var target = new OperatorConfiguration(1, 24L, null, 1.0);
+        assertEquals(fixed.predict(metrics, target), frontier.predict(target));
+        assertTrue(frontier.predict(new OperatorConfiguration(1, 33L, null, 1.0)).isEmpty());
     }
 
     private static StackDistanceHistogram histogram(

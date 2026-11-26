@@ -54,26 +54,30 @@ public final class FixedLatencyModel implements PerformanceModel {
 
     @Override
     public OptionalDouble predict(OperatorMetrics current, OperatorConfiguration candidate) {
-        var cache = candidate.totalCacheBytes();
-        return cache == null
-                ? OptionalDouble.empty()
-                : predictAtCapacity(current, candidate.parallelism, cache);
-    }
-
-    OptionalDouble predictAtCapacity(OperatorMetrics current, int parallelism, long bytes) {
-        if (!current.missRateCurve.isEmpty()
-                && current.capacityAxis != OperatorMetrics.CapacityAxis.MEASURED_CACHE_BYTES) {
+        if (candidate.cachePerTaskBytes == null) {
             return OptionalDouble.empty();
         }
         var curve =
                 current.histogram == null
                         ? current.missRateCurve
                         : MissRateCurves.fromHistogram(current.histogram);
-        var missRate = MissRateCurves.interpolate(curve, bytes);
+        return predict(current, candidate, curve);
+    }
+
+    @Override
+    public OptionalDouble predict(
+            OperatorMetrics current, OperatorConfiguration candidate, List<CachePoint> measuredCurve) {
+        var cache = candidate.totalCacheBytes();
+        if (cache == null
+                || !current.missRateCurve.isEmpty()
+                        && current.capacityAxis != OperatorMetrics.CapacityAxis.MEASURED_CACHE_BYTES) {
+            return OptionalDouble.empty();
+        }
+        var missRate = MissRateCurves.interpolate(measuredCurve, cache);
         if (missRate.isEmpty()) {
             return OptionalDouble.empty();
         }
-        double throughput = predictAtRate(parallelism, missRate.getAsDouble());
+        double throughput = predictAtRate(candidate.parallelism, missRate.getAsDouble());
         return Double.isFinite(throughput) ? OptionalDouble.of(throughput) : OptionalDouble.empty();
     }
 }

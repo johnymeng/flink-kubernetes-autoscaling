@@ -28,6 +28,12 @@ import java.util.OptionalLong;
 public interface PerformanceModel {
     OptionalDouble predict(OperatorMetrics current, OperatorConfiguration candidate);
 
+    /** Forecast using the measured curve derived from the current metrics, when supported. */
+    default OptionalDouble predict(
+            OperatorMetrics current, OperatorConfiguration candidate, List<CachePoint> measuredCurve) {
+        return predict(current, candidate);
+    }
+
     /** Find a measured cache coordinate that meets the operator's target, if supported. */
     OptionalLong minimumCacheBytes(
             OperatorMetrics current, int parallelism, List<CachePoint> measuredCurve);

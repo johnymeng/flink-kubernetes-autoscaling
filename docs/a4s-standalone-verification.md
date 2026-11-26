@@ -169,6 +169,12 @@ java --class-path "$A4S_RUNNER_JAR" scripts/a4s/MeasureA4sClient.java \
   "$RUNNER_ORIGIN" "$RECORDED_EVALUATIONS" 3 > client-timing.csv
 ```
 
+### Histogram-backed evaluation
+
+For requests that carry a histogram, the core now builds the miss-rate curve once per operator and reuses it for candidate sizing and forecasting. The fixed-latency implementation shares that prepared curve. Models implementing the original forecast method continue to receive the original operator metrics and candidate allocation.
+
+In a local Java 17 fixture with an 8,192-bin histogram and a cache budget that exhausted 1,000 candidates, median embedded evaluation time over nine measured repetitions fell from 71.2 ms to 1.0 ms. The before and after builds produced byte-identical plans for both the exhausted search and a feasible histogram-backed recommendation. The full standalone reactor passed 17 Maven tests. The candidate runner also replayed 209 decisions from the archived Q8, paced Q20, and saturated Q20 runs exactly. The measured speedup covers the raw-histogram path. The Flink adapter normally supplies an already-computed `scaledMrc`.
+
 ## Live experiment
 
 The first matched comparison uses the existing isolated Q8 DataStream harness. It keeps the workload JAR, runtime image, initial profiles, input schedule, checkpointing, and physical worker fixed across original, embedded and remote modes. The original and extracted operators are built independently from the recorded source revisions against the same installed Flink snapshot artifacts. Scoped layer publication is used on c165 because the lab account cannot access the Docker daemon.
