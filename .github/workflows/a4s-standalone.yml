@@ -38,8 +38,8 @@ jobs:
         run: |
           docker build -t a4s-runner:ci sources/a4s
           container=$(docker run --rm -d -p 127.0.0.1::8080 a4s-runner:ci)
-          trap 'docker stop "$container" >/dev/null' EXIT
+          trap 'docker logs "$container"; docker stop "$container" >/dev/null' EXIT
           endpoint=$(docker port "$container" 8080/tcp)
-          curl --fail --retry 10 --retry-connrefused --retry-delay 1 "http://$endpoint/health"
+          curl --fail --retry 10 --retry-all-errors --retry-delay 1 --max-time 3 "http://$endpoint/health"
           curl --fail -H 'Content-Type: application/json' --data-binary @sources/a4s/examples/evaluate.json \
             "http://$endpoint/v1/evaluate" | jq -e '.action == "RESCALE"'
