@@ -35,8 +35,13 @@ import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -235,7 +240,7 @@ class DecisionServerTest {
     }
 
     @Test
-    void timeoutAndTerminationFailWithoutProducingAPlan() throws Exception {
+    void evaluationAndNetworkTimeoutFailWithoutProducingAPlan() throws Exception {
         var request = Wire.decode(EXAMPLE, EvaluationRequest.class);
         var client = new DecisionClient();
         URI endpoint;
@@ -262,6 +267,97 @@ class DecisionServerTest {
         assertThrows(
                 IOException.class,
                 () -> client.evaluate(endpoint, Duration.ofMillis(150), request));
+    }
+
+    @Test
+    void runnerProcessDeathDuringEvaluationLeavesRequestRetryable() throws Exception {
+        var request = Wire.decode(EXAMPLE, EvaluationRequest.class);
+        var client = new DecisionClient();
+        var runner =
+                new ProcessBuilder(
+                                Path.of(System.getProperty("java.home"), "bin", "java").toString(),
+                                "-cp",
+                                System.getProperty(
+                                        "surefire.test.class.path",
+                                        System.getProperty("java.class.path")),
+                                BlockingRunner.class.getName(),
+                                temp.toString())
+                        .redirectErrorStream(true)
+                        .redirectOutput(temp.resolve("runner.log").toFile())
+                        .start();
+        try {
+            var port = temp.resolve("port");
+            awaitMarker(runner, port);
+            var endpoint = URI.create("http://127.0.0.1:" + Files.readString(port));
+            var inFlight =
+                    CompletableFuture.supplyAsync(
+                            () -> {
+                                try {
+                                    return client.evaluate(
+                                            endpoint, Duration.ofSeconds(20), request);
+                                } catch (IOException | InterruptedException e) {
+                                    throw new CompletionException(e);
+                                }
+                            });
+
+            awaitMarker(runner, temp.resolve("evaluating"));
+            assertFalse(inFlight.isDone());
+            runner.destroyForcibly();
+            assertTrue(runner.waitFor(5, TimeUnit.SECONDS));
+
+            var discarded =
+                    assertThrows(ExecutionException.class, () -> inFlight.get(5, TimeUnit.SECONDS));
+            assertInstanceOf(IOException.class, discarded.getCause());
+        } finally {
+            if (runner.isAlive()) {
+                runner.destroyForcibly();
+                assertTrue(runner.waitFor(5, TimeUnit.SECONDS));
+            }
+        }
+
+        var policy = new A4sPolicy();
+        try (var replacement = new DecisionServer(new InetSocketAddress("127.0.0.1", 0), policy)) {
+            replacement.start();
+            var recovered = client.evaluate(endpoint(replacement), Duration.ofSeconds(2), request);
+            assertEquals(ScalingPlan.Action.RESCALE, recovered.action);
+            assertArrayEquals(Wire.encode(policy.evaluate(request)), Wire.encode(recovered));
+        }
+    }
+
+    private static void awaitMarker(Process runner, Path marker) throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (Files.notExists(marker) && runner.isAlive() && System.nanoTime() - deadline < 0) {
+            TimeUnit.MILLISECONDS.sleep(25);
+        }
+        assertTrue(Files.exists(marker), () -> "Runner did not reach " + marker.getFileName());
+    }
+
+    /** Runs in a child JVM so the test can interrupt the service while it evaluates a request. */
+    public static final class BlockingRunner {
+        public static void main(String[] args) throws Exception {
+            var dir = Path.of(args[0]);
+            var hold = new CountDownLatch(1);
+            try (var server =
+                    new DecisionServer(
+                            new InetSocketAddress("127.0.0.1", 0),
+                            request -> {
+                                try {
+                                    Files.createFile(dir.resolve("evaluating"));
+                                    hold.await();
+                                    return new A4sPolicy().evaluate(request);
+                                } catch (IOException | InterruptedException e) {
+                                    throw new IllegalStateException(e);
+                                }
+                            },
+                            30_000)) {
+                server.start();
+                var staging =
+                        Files.writeString(
+                                dir.resolve("port.pending"), Integer.toString(server.port()));
+                Files.move(staging, dir.resolve("port"), StandardCopyOption.ATOMIC_MOVE);
+                hold.await();
+            }
+        }
     }
 
     @Test

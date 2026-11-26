@@ -81,6 +81,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
@@ -446,7 +447,7 @@ public class ScalingExecutorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"embedded", "remote", "stale", "unavailable"})
+    @ValueSource(strings = {"embedded", "remote", "stale", "unavailable", "timeout"})
     void testA4SFinalParallelismIsValidatedAndStored(String mode) throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
@@ -503,6 +504,8 @@ public class ScalingExecutorTest {
                     }
                 };
         var received = new CompletableFuture<EvaluationRequest>();
+        var releaseResponse = new CountDownLatch(1);
+        var delayedResponse = new CompletableFuture<Void>();
         var server =
                 mode.equals("embedded")
                         ? null
@@ -519,6 +522,19 @@ public class ScalingExecutorTest {
                             received.complete(request);
                             if (mode.equals("unavailable")) {
                                 exchange.sendResponseHeaders(503, -1);
+                                return;
+                            }
+                            if (mode.equals("timeout")) {
+                                exchange.sendResponseHeaders(200, 0);
+                                exchange.getResponseBody().write('{');
+                                exchange.getResponseBody().flush();
+                                try {
+                                    releaseResponse.await(5, TimeUnit.SECONDS);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                } finally {
+                                    delayedResponse.complete(null);
+                                }
                                 return;
                             }
                             byte[] body = Wire.encode(new A4sPolicy().evaluate(request));
@@ -538,6 +554,9 @@ public class ScalingExecutorTest {
                         }
                     });
             server.start();
+            if (mode.equals("timeout")) {
+                conf.set(AutoScalerOptions.A4S_RUNNER_TIMEOUT, Duration.ofSeconds(1));
+            }
             conf.set(
                     AutoScalerOptions.A4S_RUNNER_URL,
                     "http://127.0.0.1:" + server.getAddress().getPort());
@@ -561,13 +580,19 @@ public class ScalingExecutorTest {
                 assertEquals("generation", request.snapshot.executionGeneration);
                 assertEquals(vertex.toHexString(), request.snapshot.operators.get(0).operatorId);
             }
+            if (mode.equals("timeout")) {
+                assertFalse(
+                        delayedResponse.isDone(),
+                        "The client must return while the response is pending");
+            }
         } finally {
+            releaseResponse.countDown();
             if (server != null) {
                 server.stop(0);
             }
         }
 
-        if (mode.equals("stale") || mode.equals("unavailable")) {
+        if (Set.of("stale", "unavailable", "timeout").contains(mode)) {
             assertFalse(scaled);
             assertThat(validated).isEmpty();
             assertThat(history).isEmpty();
