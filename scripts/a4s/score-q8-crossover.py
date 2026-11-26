@@ -257,19 +257,12 @@ def score(bundle, latency_script):
             "joinIntervals": join_timeline(arm / "operational-snapshots.jsonl", spec, observed_intervals, events)}
 
 
-def workload_configuration(bundle):
+def workload_configuration(bundle, run):
     deployment = read(bundle / "scout/deployment.json")["spec"]
-    job = deployment["job"]
-    args = job["args"].copy()
+    args = deployment["job"]["args"]
     args[args.index("--q8-release-epoch-ms") + 1] = "<release>"
-    configuration = dict(deployment["flinkConfiguration"])
-    configuration.pop("$internal.pipeline.job-id")
-    return {
-        "job": {**job, "args": args},
-        "configuration": configuration,
-        "jobManagerResources": deployment["jobManager"]["resource"],
-        "taskManagerResources": deployment["taskManager"]["resource"],
-    }
+    deployment["flinkConfiguration"].pop("$internal.pipeline.job-id")
+    return json.dumps(deployment, sort_keys=True).replace(f"q8-pr2-{run}", "q8-pr2-<run>")
 
 
 def compare_counterbalanced(first_bundle, second_bundle, latency_script):
@@ -290,7 +283,7 @@ def compare_counterbalanced(first_bundle, second_bundle, latency_script):
         raise ValueError("Expected the opposite mode at each position")
     if read(first_bundle / "release-receipt.json") != read(second_bundle / "release-receipt.json"):
         raise ValueError("The pinned Q8 releases differ")
-    if workload_configuration(first_bundle) != workload_configuration(second_bundle):
+    if workload_configuration(first_bundle, first["run"]) != workload_configuration(second_bundle, second["run"]):
         raise ValueError("The two initial workload configurations differ")
     if (read(first_bundle / "scout/admission/confirmed-applied-profiles.json")
             != read(second_bundle / "scout/admission/confirmed-applied-profiles.json")):

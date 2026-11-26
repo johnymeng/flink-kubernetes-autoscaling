@@ -1,5 +1,7 @@
 import copy
+import json
 import runpy
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -7,6 +9,30 @@ from pathlib import Path
 scorer = runpy.run_path(str(Path(__file__).with_name("score-q8-crossover.py")))
 pod_resources_by_period = scorer["pod_resources_by_period"]
 latency_tools = runpy.run_path(str(Path(__file__).with_name("q8-latency.py")))
+
+
+class MatchedWorkloadTest(unittest.TestCase):
+    def test_keeps_pod_settings_when_normalizing_run_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            (bundle / "scout").mkdir()
+            manifest = bundle / "scout/deployment.json"
+
+            def configuration(run, release, node):
+                spec = {
+                    "job": {"args": ["--q8-release-epoch-ms", release]},
+                    "flinkConfiguration": {"$internal.pipeline.job-id": run},
+                    "taskManager": {"podTemplate": {"spec": {
+                        "nodeSelector": {"kubernetes.io/hostname": node},
+                        "volumes": [{"name": "state", "hostPath": {"path": f"/state/q8-pr2-{run}/scout"}}],
+                    }}},
+                }
+                manifest.write_text(json.dumps({"spec": spec}))
+                return scorer["workload_configuration"](bundle, run)
+
+            first = configuration("live-01", "100", "c167")
+            self.assertEqual(first, configuration("live-02", "200", "c167"))
+            self.assertNotEqual(first, configuration("live-02", "200", "c182"))
 
 
 class TimedLatencyTest(unittest.TestCase):
