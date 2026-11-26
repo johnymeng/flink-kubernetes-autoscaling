@@ -35,5 +35,7 @@ public class CollectedMetricHistory {
     final Instant jobRunningTs;
     /** Latest verified source counters. These do not belong to the persisted rate history. */
     @Setter private Map<JobVertexID, Long> observedSourceBacklogs = Map.of();
+
+    @Setter private Map<JobVertexID, Long> observedBlockCacheCapacities = Map.of();
     @Setter private boolean fullyCollected;
 }

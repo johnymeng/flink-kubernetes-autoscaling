@@ -23,6 +23,8 @@ import org.rocksdb.WriteBufferManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.UUID;
+
 /**
  * The set of resources that can be shared by all RocksDB instances in a slot. Sharing these
  * resources helps RocksDB a predictable resource footprint.
@@ -31,6 +33,7 @@ final class RocksDBSharedResources implements AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(RocksDBSharedResources.class);
 
     private final Cache cache;
+    private final String cacheId = UUID.randomUUID().toString();
 
     private final WriteBufferManager writeBufferManager;
     private final long writeBufferManagerCapacity;
@@ -46,6 +49,10 @@ final class RocksDBSharedResources implements AutoCloseable {
         this.writeBufferManager = writeBufferManager;
         this.writeBufferManagerCapacity = writeBufferManagerCapacity;
         this.usingPartitionedIndexFilters = usingPartitionedIndexFilters;
+    }
+
+    public String getCacheId() {
+        return cacheId;
     }
 
     public Cache getCache() {

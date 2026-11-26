@@ -510,6 +510,13 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                                 resourceContainer.getMemoryWatcherOptions(nativeMetricOptions))
                         .setWriteBatchSize(getWriteBatchSize())
                         .setOverlapFractionThreshold(getOverlapFractionThreshold());
+        if (sharedResources != null
+                && nativeMetricOptions
+                        .getProperties()
+                        .contains(RocksDBProperty.BlockCacheCapacity.getRocksDBProperty())
+                && RocksDBSharedResourcesFactory.from(memoryConfiguration, env).isSlotScoped()) {
+            builder.setSlotCacheId(sharedResources.getResourceHandle().getCacheId());
+        }
         return builder.build();
     }
 

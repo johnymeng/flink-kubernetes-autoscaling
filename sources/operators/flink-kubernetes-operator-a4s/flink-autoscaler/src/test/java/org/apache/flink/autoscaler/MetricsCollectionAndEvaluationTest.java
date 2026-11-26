@@ -240,10 +240,16 @@ public class MetricsCollectionAndEvaluationTest {
 
     @Test
     public void publishesOnlyLatestVerifiedSourceBacklogsWithoutRounding() throws Exception {
-        var observations = new HashMap<>(Map.of(
-                source1, new A4SAggregatedMetricsResponseBody(null, null, 0L),
-                source2, new A4SAggregatedMetricsResponseBody(null, null, Long.MAX_VALUE),
-                map, new A4SAggregatedMetricsResponseBody(null, null, 27L)));
+        var observations =
+                new HashMap<>(
+                        Map.of(
+                                source1, new A4SAggregatedMetricsResponseBody(null, null, 0L),
+                                source2,
+                                        new A4SAggregatedMetricsResponseBody(
+                                                null, null, Long.MAX_VALUE),
+                                map,
+                                        new A4SAggregatedMetricsResponseBody(
+                                                null, null, 27L, 9007199254740993L)));
         metricsCollector = new TestingMetricsCollector<>(topology) {
             @Override
             protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
@@ -279,9 +285,16 @@ public class MetricsCollectionAndEvaluationTest {
         var expected = Map.of(source1.toHexString(), 0L, source2.toHexString(), Long.MAX_VALUE);
         for (var operator : decoded.snapshot.operators) {
             assertEquals(expected.get(operator.operatorId), operator.telemetry.sourceBacklogRecords);
+            assertEquals(
+                    operator.operatorId.equals(map.toHexString())
+                            ? Long.valueOf(9007199254740993L)
+                            : null,
+                    operator.telemetry.observedBlockCacheCapacityBytes);
+            assertNull(operator.current.cachePerTaskBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
 
+        observations.remove(map);
         observations.remove(source1);
         observations.put(source2, new A4SAggregatedMetricsResponseBody(null, null, -1L));
         metricsCollector.setClock(Clock.offset(clock, Duration.ofSeconds(3)));
@@ -300,6 +313,7 @@ public class MetricsCollectionAndEvaluationTest {
                         Map.of());
         for (var operator : request.snapshot.operators) {
             assertNull(operator.telemetry.sourceBacklogRecords);
+            assertNull(operator.telemetry.observedBlockCacheCapacityBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
     }

@@ -27,7 +27,9 @@ import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.AccessExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.AccessExecutionVertex;
+import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.rest.handler.AbstractRestHandler;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.RestHandlerException;
@@ -52,6 +54,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -97,22 +100,44 @@ public class A4SAggregatingVertexMetricsHandler
         boolean includeBacklog =
                 request.getQueryParameter(MetricsFilterParameter.class)
                         .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG);
+        boolean includeCacheCapacity =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_CAPACITY);
 
         return CompletableFuture.supplyAsync(
                         () -> {
                             try {
+                                CompletableFuture<ArchivedExecutionGraph> graph =
+                                        includeBacklog || includeCacheCapacity
+                                                ? gateway.requestJob(jobId, timeout)
+                                                : null;
                                 CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
-                                        processRequest(jobId, vertexID, gateway);
-                                if (!includeBacklog) {
+                                        processRequest(jobId, vertexID, gateway, graph);
+                                if (graph == null) {
                                     return curve;
                                 }
                                 return curve.thenCombine(
-                                        observeSourceBacklog(jobId, vertexID, gateway),
-                                        (response, backlog) ->
-                                                new A4SAggregatedMetricsResponseBody(
-                                                        response.getMrcStatus(),
-                                                        response.getCurve().orElse(null),
-                                                        backlog));
+                                        graph.exceptionally(failure -> null),
+                                        (response, liveGraph) -> {
+                                            List<Map<String, String>> attempts =
+                                                    liveGraph == null
+                                                            ? null
+                                                            : currentAttemptMetrics(
+                                                                    fetcher.getMetricStore(),
+                                                                    jobId,
+                                                                    vertexID,
+                                                                    liveGraph.getJobVertex(
+                                                                            vertexID));
+                                            return new A4SAggregatedMetricsResponseBody(
+                                                    response.getMrcStatus(),
+                                                    response.getCurve().orElse(null),
+                                                    includeBacklog
+                                                            ? aggregateBacklog(attempts)
+                                                            : null,
+                                                    includeCacheCapacity
+                                                            ? aggregateSlotCacheCapacity(attempts)
+                                                            : null);
+                                        });
                             } catch (Exception e) {
                                 log.warn(
                                         "A4S [{}]: jobId={} vertexId={} message={}",
@@ -132,7 +157,10 @@ public class A4SAggregatingVertexMetricsHandler
     }
 
     private CompletableFuture<A4SAggregatedMetricsResponseBody> processRequest(
-            JobID jobId, JobVertexID vertexID, RestfulGateway gateway) {
+            JobID jobId,
+            JobVertexID vertexID,
+            RestfulGateway gateway,
+            @Nullable CompletableFuture<ArchivedExecutionGraph> graph) {
         this.fetcher.update();
         MetricStore store = this.fetcher.getMetricStore();
 
@@ -170,10 +198,14 @@ public class A4SAggregatingVertexMetricsHandler
             }
 
             if (subtaskHistograms.stream().anyMatch(histogram -> histogram.getShards() != null)) {
-                return gateway.requestJob(jobId, timeout)
+                return (graph == null ? gateway.requestJob(jobId, timeout) : graph)
                         .thenApply(
-                                graph -> buildShardsResponse(
-                                        store, jobId, vertexID, graph.getJobVertex(vertexID)));
+                                liveGraph ->
+                                        buildShardsResponse(
+                                                store,
+                                                jobId,
+                                                vertexID,
+                                                liveGraph.getJobVertex(vertexID)));
             }
             return completedFuture(buildResponse(jobId, vertexID, subtaskHistograms, 0));
         } catch (IllegalArgumentException | ArithmeticException e) {
@@ -181,29 +213,8 @@ public class A4SAggregatingVertexMetricsHandler
         }
     }
 
-    private CompletableFuture<Long> observeSourceBacklog(
-            JobID jobId, JobVertexID vertexId, RestfulGateway gateway) {
-        return gateway.requestJob(jobId, timeout)
-                .thenApply(
-                        graph ->
-                                aggregateCurrentAttemptBacklog(
-                                        fetcher.getMetricStore(),
-                                        jobId,
-                                        vertexId,
-                                        graph.getJobVertex(vertexId)))
-                .exceptionally(
-                        failure -> {
-                            log.debug(
-                                    "Unable to observe source backlog for job {} vertex {}",
-                                    jobId,
-                                    vertexId,
-                                    failure);
-                            return null;
-                        });
-    }
-
     @Nullable
-    private static Long aggregateCurrentAttemptBacklog(
+    private static List<Map<String, String>> currentAttemptMetrics(
             MetricStore store,
             JobID jobId,
             JobVertexID vertexId,
@@ -213,7 +224,7 @@ public class A4SAggregatingVertexMetricsHandler
                 || vertex.getTaskVertices().length != vertex.getParallelism()) {
             return null;
         }
-        long total = 0;
+        List<Map<String, String>> attempts = new ArrayList<>();
         HashSet<Integer> indices = new HashSet<>();
         for (AccessExecutionVertex task : vertex.getTaskVertices()) {
             int index = task.getParallelSubtaskIndex();
@@ -230,11 +241,64 @@ public class A4SAggregatingVertexMetricsHandler
                             vertexId.toString(),
                             index,
                             task.getCurrentExecutionAttempt().getAttemptNumber());
-            Long pending = attempt == null ? null : readPendingRecords(attempt.metrics);
+            if (attempt == null) {
+                return null;
+            }
+            attempts.add(attempt.metrics);
+        }
+        return attempts;
+    }
+
+    @Nullable
+    private static Long aggregateBacklog(@Nullable List<Map<String, String>> attempts) {
+        if (attempts == null) {
+            return null;
+        }
+        long total = 0;
+        for (Map<String, String> attempt : attempts) {
+            Long pending = readPendingRecords(attempt);
             if (pending == null || pending > Long.MAX_VALUE - total) {
                 return null;
             }
             total += pending;
+        }
+        return total;
+    }
+
+    @Nullable
+    private static Long aggregateSlotCacheCapacity(@Nullable List<Map<String, String>> attempts) {
+        if (attempts == null) {
+            return null;
+        }
+        long total = 0;
+        HashSet<UUID> caches = new HashSet<>();
+        for (Map<String, String> attempt : attempts) {
+            String allocation = null;
+            for (Map.Entry<String, String> entry : attempt.entrySet()) {
+                if (!MetricNames.A4S_SLOT_BLOCK_CACHE.equals(entry.getKey())
+                        && !entry.getKey().endsWith("." + MetricNames.A4S_SLOT_BLOCK_CACHE)) {
+                    continue;
+                }
+                if (allocation != null && !allocation.equals(entry.getValue())) {
+                    return null;
+                }
+                allocation = entry.getValue();
+            }
+            if (allocation == null || allocation.indexOf(':') != 36) {
+                return null;
+            }
+            try {
+                UUID cache = UUID.fromString(allocation.substring(0, 36));
+                long capacity = Long.parseLong(allocation.substring(37));
+                // Aliases within an attempt can describe one cache. Across subtasks they
+                // indicate shared ownership and cannot be used as per-vertex capacity.
+                if (capacity <= 0 || capacity > Long.MAX_VALUE - total || !caches.add(cache)) {
+                    return null;
+                }
+                total += capacity;
+            } catch (IllegalArgumentException e) {
+                return null;
+            }
         }
         return total;
     }

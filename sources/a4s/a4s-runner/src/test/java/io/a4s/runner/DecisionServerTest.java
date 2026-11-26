@@ -427,6 +427,31 @@ class DecisionServerTest {
     }
 
     @Test
+    void transportsObservedCacheCapacityWithoutChangingThePlan() throws Exception {
+        var original = Wire.decode(EXAMPLE, EvaluationRequest.class);
+        var unknown =
+                decode(
+                        EXAMPLE_JSON.replace(
+                                "\"upstreamOperators\": []",
+                                "\"upstreamOperators\": [], \"telemetry\": {}"));
+        assertFalse(
+                new String(Wire.encode(unknown), StandardCharsets.UTF_8)
+                        .contains("observedBlockCacheCapacityBytes"));
+        var withCapacity =
+                decode(
+                        EXAMPLE_JSON.replace(
+                                "\"upstreamOperators\": []",
+                                "\"upstreamOperators\": [], \"telemetry\": {\"observedBlockCacheCapacityBytes\":9007199254740993}"));
+        var decoded = Wire.decode(Wire.encode(withCapacity), EvaluationRequest.class);
+        assertEquals(
+                9007199254740993L,
+                decoded.snapshot.operators.get(0).telemetry.observedBlockCacheCapacityBytes);
+        var policy = new A4sPolicy();
+        assertArrayEquals(
+                Wire.encode(policy.evaluate(original)), Wire.encode(policy.evaluate(decoded)));
+    }
+
+    @Test
     void preservesHistogramProvenanceInTheWireContract() throws Exception {
         var start = EXAMPLE_JSON.indexOf("\"missRateCurve\": [");
         var end = EXAMPLE_JSON.indexOf(']', start);

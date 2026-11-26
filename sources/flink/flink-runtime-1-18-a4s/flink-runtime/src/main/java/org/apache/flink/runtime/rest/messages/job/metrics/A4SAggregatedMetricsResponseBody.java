@@ -34,7 +34,10 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
 
     public static final String FIELD_NAME_OBSERVED_BACKLOG = "observedSourceBacklogRecords";
 
+    public static final String FIELD_NAME_CACHE_CAPACITY = "observedBlockCacheCapacityBytes";
+
     @Nullable private final Long observedSourceBacklogRecords;
+    @Nullable private final Long observedBlockCacheCapacityBytes;
 
     public A4SAggregatedMetricsResponseBody(@Nullable MissRateCurve scaledMrc) {
         this(null, scaledMrc);
@@ -45,13 +48,23 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
         this(status, scaledMrc, null);
     }
 
+    public A4SAggregatedMetricsResponseBody(
+            @Nullable Status status,
+            @Nullable MissRateCurve scaledMrc,
+            @Nullable Long observedSourceBacklogRecords) {
+        this(status, scaledMrc, observedSourceBacklogRecords, null);
+    }
+
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
             @JsonProperty(FIELD_NAME_STATUS) @Nullable Status status,
             @JsonProperty(FIELD_NAME_SCALED_MRC) @Nullable MissRateCurve scaledMrc,
-            @JsonProperty(FIELD_NAME_OBSERVED_BACKLOG) @Nullable Long observedSourceBacklogRecords) {
+            @JsonProperty(FIELD_NAME_OBSERVED_BACKLOG) @Nullable Long observedSourceBacklogRecords,
+            @JsonProperty(FIELD_NAME_CACHE_CAPACITY) @Nullable
+                    Long observedBlockCacheCapacityBytes) {
         super(status, scaledMrc);
         this.observedSourceBacklogRecords = observedSourceBacklogRecords;
+        this.observedBlockCacheCapacityBytes = observedBlockCacheCapacityBytes;
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -59,5 +72,12 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
     @Nullable
     public Long getObservedSourceBacklogRecords() {
         return observedSourceBacklogRecords;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty(FIELD_NAME_CACHE_CAPACITY)
+    @Nullable
+    public Long getObservedBlockCacheCapacityBytes() {
+        return observedBlockCacheCapacityBytes;
     }
 }

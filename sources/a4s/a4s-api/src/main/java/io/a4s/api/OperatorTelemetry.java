@@ -39,26 +39,9 @@ public final class OperatorTelemetry {
     public final Long stateAccessCount;
     public final Long sourceBacklogRecords;
     public final Map<String, String> taskPlacement;
+    /** Total observed physical block-cache capacity across this operator's exclusive tasks. */
+    public final Long observedBlockCacheCapacityBytes;
 
-    @ConstructorProperties({
-        "inputRecordsPerSecond",
-        "outputRecordsPerSecond",
-        "processingCapacityRecordsPerSecond",
-        "busyFraction",
-        "idleFraction",
-        "backpressuredFraction",
-        "cpuUtilization",
-        "allocatedTotalMemoryBytes",
-        "allocatedMemoryPerTaskBytes",
-        "cacheUsedBytes",
-        "stateSizeBytes",
-        "cacheHits",
-        "cacheMisses",
-        "stateAccessNanos",
-        "stateAccessCount",
-        "sourceBacklogRecords",
-        "taskPlacement"
-    })
     public OperatorTelemetry(
             Double inputRecordsPerSecond,
             Double outputRecordsPerSecond,
@@ -77,6 +60,66 @@ public final class OperatorTelemetry {
             Long stateAccessCount,
             Long sourceBacklogRecords,
             Map<String, String> taskPlacement) {
+        this(
+                inputRecordsPerSecond,
+                outputRecordsPerSecond,
+                processingCapacityRecordsPerSecond,
+                busyFraction,
+                idleFraction,
+                backpressuredFraction,
+                cpuUtilization,
+                allocatedTotalMemoryBytes,
+                allocatedMemoryPerTaskBytes,
+                cacheUsedBytes,
+                stateSizeBytes,
+                cacheHits,
+                cacheMisses,
+                stateAccessNanos,
+                stateAccessCount,
+                sourceBacklogRecords,
+                taskPlacement,
+                null);
+    }
+
+    @ConstructorProperties({
+        "inputRecordsPerSecond",
+        "outputRecordsPerSecond",
+        "processingCapacityRecordsPerSecond",
+        "busyFraction",
+        "idleFraction",
+        "backpressuredFraction",
+        "cpuUtilization",
+        "allocatedTotalMemoryBytes",
+        "allocatedMemoryPerTaskBytes",
+        "cacheUsedBytes",
+        "stateSizeBytes",
+        "cacheHits",
+        "cacheMisses",
+        "stateAccessNanos",
+        "stateAccessCount",
+        "sourceBacklogRecords",
+        "taskPlacement",
+        "observedBlockCacheCapacityBytes"
+    })
+    public OperatorTelemetry(
+            Double inputRecordsPerSecond,
+            Double outputRecordsPerSecond,
+            Double processingCapacityRecordsPerSecond,
+            Double busyFraction,
+            Double idleFraction,
+            Double backpressuredFraction,
+            Double cpuUtilization,
+            Long allocatedTotalMemoryBytes,
+            Long allocatedMemoryPerTaskBytes,
+            Long cacheUsedBytes,
+            Long stateSizeBytes,
+            Long cacheHits,
+            Long cacheMisses,
+            Long stateAccessNanos,
+            Long stateAccessCount,
+            Long sourceBacklogRecords,
+            Map<String, String> taskPlacement,
+            Long observedBlockCacheCapacityBytes) {
         Checks.nonnegative(inputRecordsPerSecond, "inputRecordsPerSecond");
         Checks.nonnegative(outputRecordsPerSecond, "outputRecordsPerSecond");
         Checks.nonnegative(
@@ -93,6 +136,7 @@ public final class OperatorTelemetry {
         Checks.nonnegative(cacheMisses, "cacheMisses");
         Checks.nonnegative(stateAccessNanos, "stateAccessNanos");
         Checks.nonnegative(stateAccessCount, "stateAccessCount");
+        Checks.nonnegative(observedBlockCacheCapacityBytes, "observedBlockCacheCapacityBytes");
         taskPlacement = taskPlacement == null ? Map.of() : Map.copyOf(taskPlacement);
         this.inputRecordsPerSecond = inputRecordsPerSecond;
         this.outputRecordsPerSecond = outputRecordsPerSecond;
@@ -111,5 +155,6 @@ public final class OperatorTelemetry {
         this.stateAccessCount = stateAccessCount;
         this.sourceBacklogRecords = sourceBacklogRecords;
         this.taskPlacement = taskPlacement;
+        this.observedBlockCacheCapacityBytes = observedBlockCacheCapacityBytes;
     }
 }

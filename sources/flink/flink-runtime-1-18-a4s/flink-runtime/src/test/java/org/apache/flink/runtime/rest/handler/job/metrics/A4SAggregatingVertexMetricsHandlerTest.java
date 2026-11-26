@@ -30,6 +30,7 @@ import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.metrics.dump.MetricDump;
 import org.apache.flink.runtime.metrics.dump.QueryScopeInfo;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
@@ -183,6 +184,83 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
     }
 
     @Test
+    public void testSlotCacheCapacityRequiresDistinctCurrentAllocations() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(2);
+        ArchivedExecutionVertex[] tasks = {runningTask(0, 1), runningTask(1, 2)};
+        when(vertex.getTaskVertices()).thenReturn(tasks);
+        Map<String, String> paths = new HashMap<>();
+        paths.put(JobIDPathParameter.KEY, jobId.toString());
+        paths.put(JobVertexIdPathParameter.KEY, jobVertexId.toString());
+        HandlerRequest<EmptyRequestBody> request =
+                HandlerRequest.resolveParametersAndCreate(
+                        EmptyRequestBody.getInstance(),
+                        handler.getMessageHeaders().getUnresolvedMessageParameters(),
+                        paths,
+                        Collections.singletonMap(
+                                "get",
+                                Collections.singletonList(
+                                        A4SAggregatedMetricsResponseBody
+                                                .FIELD_NAME_CACHE_CAPACITY)),
+                        Collections.emptyList());
+
+        final String cache0 = "34d73888-3125-4cdf-9295-5ac3794d77e1";
+        final String cache1 = "e6a1ef14-d1e9-4014-bc02-2bd6fa55ab04";
+        putSlotCache(0, 1, "op", cache0 + ":67108864");
+        putSlotCache(1, 1, "op", cache1 + ":9007199254740993");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCapacityBytes());
+
+        putSlotCache(1, 2, "op", cache0 + ":67108864");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCapacityBytes());
+
+        putSlotCache(0, 1, "alias", cache0 + ":67108864");
+        putSlotCache(1, 2, "op", cache1 + ":9007199254740993");
+        assertEquals(
+                Long.valueOf(9007199321849857L),
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCapacityBytes());
+        assertNull(
+                handler.handleRequest(
+                                createRequest(jobId.toString(), jobVertexId.toString()),
+                                restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCapacityBytes());
+
+        putSlotCache(0, 1, "alias", cache1 + ":67108864");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCapacityBytes());
+
+        putSlotCache(0, 1, "alias", cache0 + ":67108864");
+        putSlotCache(1, 2, "op", cache1 + ":" + Long.MAX_VALUE);
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCapacityBytes());
+    }
+
+    private void putSlotCache(int subtask, int attempt, String scope, String reading) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), subtask, attempt, scope),
+                        MetricNames.A4S_SLOT_BLOCK_CACHE,
+                        reading));
+    }
+
+    @Test
     public void testSourceBacklogRequiresEveryCurrentAttempt() throws Exception {
         ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
         ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
@@ -190,7 +268,7 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                 .thenReturn(CompletableFuture.completedFuture(graph));
         when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
         when(vertex.getParallelism()).thenReturn(2);
-        ArchivedExecutionVertex[] tasks = {runningBacklogTask(0, 1), runningBacklogTask(1, 2)};
+        ArchivedExecutionVertex[] tasks = {runningTask(0, 1), runningTask(1, 2)};
         when(vertex.getTaskVertices()).thenReturn(tasks);
 
         Map<String, String> paths = new HashMap<>();
@@ -253,7 +331,7 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                         .getObservedSourceBacklogRecords());
     }
 
-    private static ArchivedExecutionVertex runningBacklogTask(int index, int attemptNumber) {
+    private static ArchivedExecutionVertex runningTask(int index, int attemptNumber) {
         ArchivedExecutionVertex task = mock(ArchivedExecutionVertex.class);
         ArchivedExecution attempt = mock(ArchivedExecution.class);
         when(task.getExecutionState()).thenReturn(ExecutionState.RUNNING);

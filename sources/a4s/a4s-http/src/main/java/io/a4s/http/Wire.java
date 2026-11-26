@@ -17,12 +17,14 @@
 
 package io.a4s.http;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import io.a4s.api.EvaluationRequest;
+import io.a4s.api.OperatorTelemetry;
 import java.io.IOException;
 
 public final class Wire {
@@ -40,7 +42,13 @@ public final class Wire {
                     .disable(MapperFeature.ALLOW_COERCION_OF_SCALARS)
                     .enable(JsonParser.Feature.STRICT_DUPLICATE_DETECTION)
                     .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+                    .addMixIn(OperatorTelemetry.class, OperatorTelemetryFields.class)
                     .build();
+
+    private abstract static class OperatorTelemetryFields {
+        @JsonInclude(JsonInclude.Include.NON_NULL)
+        public Long observedBlockCacheCapacityBytes;
+    }
 
     private Wire() {}
 

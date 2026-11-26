@@ -56,6 +56,12 @@ The Flink adapter now carries running subtask placement from the attempt-level R
 
 A local Flink MiniCluster with a separate runner recorded three requests across the guarded checkpoint rescale fixture. The placement maps for both vertices in each request exactly matched the TaskManager IDs returned by direct Flink REST reads. The three recommendations replayed exactly, and the restored job produced all 200 expected outputs. All 95 focused autoscaler tests passed, including placement changes, reordered roster entries, missing subtasks and HTTP request decoding.
 
+### Measured slot cache capacity
+
+A local Flink job with two RocksDB column families reported four native capacity gauges for one 55,924,053-byte block cache. The task’s applied managed reservation was 67,108,864 bytes. The real operator REST collector and evaluator carried the native value into a snapshot and the separate runner received it once as vertex telemetry. The stateless source had unavailable cache capacity. Both recorded recommendations replayed exactly. The checkpoint rescale preserved the counts from both column families and produced all 200 expected outputs. The snapshots retained the existing legacy allocation semantics.
+
+Runtime tests reject duplicate cache identities across subtasks, conflicting aliases, retired attempts, partial coverage and arithmetic overflow. All eight runtime tests, 16 standalone tests and 95 focused autoscaler tests passed. The contract tests verified exact integer transport above the precision of a Java double and omission when capacity is unavailable.
+
 ## Local packaging check
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.

@@ -48,6 +48,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -156,9 +157,22 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
         var pathIt = parameters.getPathParameters().iterator();
         ((JobIDPathParameter) pathIt.next()).resolve(jobId);
         ((JobVertexIdPathParameter) pathIt.next()).resolve(jobVertexID);
-        if (includeBacklog) {
+        var conf = ctx.getConfiguration();
+        boolean includeCache =
+                conf.get(AutoScalerOptions.JUSTIN_ENABLED)
+                        && conf.get(AutoScalerOptions.A4S_ENABLED)
+                        && conf.getBoolean(
+                                "state.backend.rocksdb.metrics.block-cache-capacity", false);
+        if (includeBacklog || includeCache) {
             var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
-            filter.resolve(List.of(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG));
+            var fields = new ArrayList<String>();
+            if (includeBacklog) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG);
+            }
+            if (includeCache) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_CAPACITY);
+            }
+            filter.resolve(fields);
         }
 
         try (var restClient = ctx.getRestClusterClient()) {
