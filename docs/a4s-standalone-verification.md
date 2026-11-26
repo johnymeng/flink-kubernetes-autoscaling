@@ -52,7 +52,7 @@ The staged Q8 comparison pinned the same runtime at `3015abd8e505569ac914c55e9e7
 
 ### Prepare the Q20 follow-up
 
-The [Q20 renderer](../scripts/a4s/prepare-q20-comparison.py) uses the existing [checkpoint experiment template](../experiments/1729-checkpoint-aware-rescaling/instruction.md). It creates three repetitions, rotating original, embedded, and remote through each position. It pins the workload image and both worker selectors, assigns separate namespaces and checkpoint paths, and enables runner deployment only for the remote arm. The original and extracted operators use their shared 600 MiB A4S limit and native checkpoint recovery. The renderer selects periodic checkpoints with a one-minute default and disables the separate template's checkpoint-gated producer pause. Python 3.9 or later and PyYAML are required.
+The [Q20 renderer](../scripts/a4s/prepare-q20-comparison.py) uses the existing [checkpoint experiment template](../experiments/1729-checkpoint-aware-rescaling/instruction.md). It creates three repetitions, rotating original, embedded, and remote through each position. It pins the workload image, replaces the template's `tier` selectors with the requested hostnames, and places the operator and remote runner on the selected JobManager host. Both Flink roles can use one idle worker when capacity permits. Each arm gets a separate namespace and checkpoint path. The original and extracted operators use their shared 600 MiB A4S limit and native checkpoint recovery. The renderer selects periodic checkpoints with a one-minute default and disables the separate template's checkpoint-gated producer pause. Python 3.9 or later and PyYAML are required.
 
 ```bash
 scripts/a4s/prepare-q20-comparison.py "$OUTPUT_DIR" --prefix "$SERIES_ID" \

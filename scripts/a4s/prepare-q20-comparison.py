@@ -66,7 +66,9 @@ def render_job(directory, run_id, args):
         ("taskManager", args.taskmanager_node),
     )
     for manager, node in selectors:
-        spec[manager]["podTemplate"]["spec"]["nodeSelector"]["kubernetes.io/hostname"] = node
+        node_selector = spec[manager]["podTemplate"]["spec"]["nodeSelector"]
+        node_selector.pop("tier", None)
+        node_selector["kubernetes.io/hostname"] = node
     config = spec["flinkConfiguration"]
     for key in OTHER_OPERATOR_SETTINGS | MODE_SETTINGS:
         config.pop(key, None)
@@ -85,10 +87,11 @@ def render_arm(out, run_id, mode, args):
         "watchNamespaces": [run_id],
         "image": {"repository": repository, "digest": digest},
         "webhook": {"create": False},
+        "operatorPod": {"nodeSelector": {"kubernetes.io/hostname": args.jobmanager_node}},
     }
     if mode != "original":
         config["job.autoscaler.a4s.snapshot.record-file"] = SNAPSHOT_FILE
-        values["operatorPod"] = {"env": [{"name": "A4S_SNAPSHOT_DIR", "value": "/tmp"}]}
+        values["operatorPod"]["env"] = [{"name": "A4S_SNAPSHOT_DIR", "value": "/tmp"}]
     if mode == "remote":
         config["job.autoscaler.a4s.runner.url"] = RUNNER_URL
         runner_path = ROOT / "cluster/a4s/runner.yaml"
@@ -96,7 +99,9 @@ def render_arm(out, run_id, mode, args):
         for resource in runner:
             resource["metadata"]["namespace"] = run_id
             if resource["kind"] == "Deployment":
-                resource["spec"]["template"]["spec"]["containers"][0]["image"] = args.runner_image
+                pod = resource["spec"]["template"]["spec"]
+                pod["nodeSelector"] = {"kubernetes.io/hostname": args.jobmanager_node}
+                pod["containers"][0]["image"] = args.runner_image
         write_yaml(directory / "runner.yaml", *runner)
     write_yaml(directory / "job.yaml", job)
     write_yaml(directory / "operator-values.yaml", values)
