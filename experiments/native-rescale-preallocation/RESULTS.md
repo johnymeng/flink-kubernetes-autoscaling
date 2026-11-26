@@ -55,3 +55,18 @@ A 16 MiB increase in the join's managed memory at P10 went through the existing 
 Automatic A4S ran for a separate 600-second window with the existing policy and the same 16-slot cap. It issued two timed requests. A memory-only native fallback reduced the join from 158 MiB to 33 MiB at P1. The runtime reported the actual allocation and the autoscaler persisted `APPLIED`.
 
 The second request targeted a P24 join, requiring 28 slots with the source tasks. It used the normal native path without preparation and remained `COMMITTING` at cutoff while the job waited for resources. That request was acknowledged and had no recorded restart completion. The experiment kept its original cap and included the incomplete outcome. [Automatic verification trace](evidence/q8-automatic-verification.json)
+
+## Exploratory state-heavy SQL Q20 pair
+
+Q20 was selected as the representative SQL follow-up. Two additional 600-second windows ran on c167 with the same runtime and operator build, matching SQL libraries, concrete seed profiles, and exactly-once checkpoint configuration. Each used a fresh isolated broker and one continuous producer on c182. It offered 60,000 mixed Nexmark events/s. The terminal Kafka log-end offsets summed to 35.41 million and 35.48 million respectively. The producer submitted one job per arm and its Pod did not restart.
+
+| Transition | Immediate processing gap | Enabled processing gap | Decision to all tasks running, immediate → enabled |
+| --- | ---: | ---: | ---: |
+| P1 → P2 | 7.00 s | 7.82 s | 2.04 → 4.87 s |
+| P2 → P4 | 76.02 s | 36.00 s | 70.85 → 43.36 s |
+
+P2 → P4 acquired one additional TaskManager. The old join processed another 201,974 observed records during the 10.097-second preparation window, and all 13 target slots were ready before restart. The post-termination wait before graph construction was 9.164 s with immediate restart and 0.006 s with preparation. Extra scheduled requests during preparation were 29.36 CPU-core-seconds and 22.02 GiB-seconds above the old allocation.
+
+Both arms restored a checkpoint and resumed the same topics. Observed sums over all 24 partitions of each consumed topic were positive after redeployment and subsequently increased. The producer and broker ran through the native changes with their original identities. Initial and final broker offsets, consumer positions, and the Flink partition offset series are included in the raw evidence. The immediate arm's offset sampler resumed with batched queries partway through the window. Its initial run of the sampler returned errors and is retained in the archive. The lag snapshots are terminal observations. This pair cannot establish a reproducible reduction across SQL workloads or state sizes. SQL evidence covers Q20.
+
+[SQL paired observations](evidence/q20-exploratory-pair.json) · [SQL stage timeline](evidence/q20-stages.png)

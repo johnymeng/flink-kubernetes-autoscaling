@@ -1,0 +1,391 @@
+{
+  "comparison": "one exploratory Q20 pair, same verified build and Kafka setup",
+  "matched_seed_and_deployment": true,
+  "immediate": {
+    "run": "live-e8cea6bc",
+    "mode": "false",
+    "source": "3015abd8e505569ac914c55e9e795b89d5053d6c",
+    "offered_mixed_events_per_second": 60000,
+    "source_offset_samples_with_all_partitions": 68,
+    "initial_broker_offsets": {
+      "nexmark-auction": 0,
+      "nexmark-bid": 0,
+      "nexmark-person": 0
+    },
+    "terminal_broker_offsets": {
+      "nexmark-auction": 2141410,
+      "nexmark-bid": 32553716,
+      "nexmark-person": 718918
+    },
+    "producer_pods": [
+      {
+        "uid": "9cb27d33-1b86-42ca-bd9a-391310a13c07",
+        "node": "c182",
+        "image": "142.150.234.165:5000/flink-benchmark-runtime@sha256:cb27866a6136aa3b1fcd79caa6d5edbd7832fc4e30f5bf8db71a25f224a7bf92",
+        "restarts": 0
+      }
+    ],
+    "producer_job_submissions": [
+      "a629eacae982bb1330de69c2f6867d84"
+    ],
+    "scheduled_flink_pod_requests": {
+      "covered_seconds": 578.8480000000001,
+      "cpu_core_seconds": 8512.599999999999,
+      "memory_gib_seconds": 7108.01
+    },
+    "decisions": [
+      {
+        "scheduled_offset_seconds": 120,
+        "decision_epoch_ms": 1795664782739.3704,
+        "acknowledgement_status": 200,
+        "acknowledgement_seconds": 0.2401142578125,
+        "generation": 2,
+        "result": "applied",
+        "stage_timestamps_ms": {
+          "REQUEST_RECEIVED": [
+            1795664782875
+          ],
+          "RESOURCES_DECLARED": [
+            1795664782907
+          ],
+          "RESTART_START": [
+            1795664782907
+          ],
+          "OLD_TASKS_TERMINATED": [
+            1795664783123
+          ],
+          "GRAPH_CREATE_REQUESTED": [
+            1795664783128
+          ],
+          "REPLACEMENT_GRAPH_CREATED": [
+            1795664783140
+          ],
+          "CHECKPOINT_RESTORE_START": [
+            1795664783140
+          ],
+          "CHECKPOINT_RESTORE_END": [
+            1795664783306
+          ],
+          "ALL_TARGET_TASKS_RUNNING": [
+            1795664784783
+          ]
+        },
+        "preparation_seconds": null,
+        "old_graph_positive_intervals_during_preparation": 0,
+        "time_to_ready_seconds": null,
+        "decision_to_all_running_seconds": 2.043629638671875,
+        "old_task_termination_seconds": 0.216,
+        "replacement_graph_creation_seconds": 0.012,
+        "checkpoint_restore_seconds": 0.166,
+        "first_observed_replacement_progress_bounds_ms": [
+          1795664787763.3845,
+          1795664788761.258
+        ],
+        "execution_interruption_upper_seconds": 5.854258056640625,
+        "observed_positive_progress_gap_seconds": 7.001025390625,
+        "sustained_throughput_recovery_seconds": null,
+        "kafka_offsets_before_restart": null,
+        "kafka_offsets_after_redeployment": [
+          1795664816477,
+          {
+            "nexmark-bid": 3252156,
+            "nexmark-auction": 237502
+          }
+        ],
+        "wait_after_old_termination_seconds": 0.005
+      },
+      {
+        "scheduled_offset_seconds": 330,
+        "decision_epoch_ms": 1795664992739.3552,
+        "acknowledgement_status": 200,
+        "acknowledgement_seconds": 0.10288671875,
+        "generation": 3,
+        "result": "applied",
+        "stage_timestamps_ms": {
+          "REQUEST_RECEIVED": [
+            1795664992836
+          ],
+          "RESOURCES_DECLARED": [
+            1795664992837
+          ],
+          "RESTART_START": [
+            1795664992837
+          ],
+          "OLD_TASKS_TERMINATED": [
+            1795664993366
+          ],
+          "GRAPH_CREATE_REQUESTED": [
+            1795665002530
+          ],
+          "REPLACEMENT_GRAPH_CREATED": [
+            1795665002541
+          ],
+          "CHECKPOINT_RESTORE_START": [
+            1795665002541
+          ],
+          "CHECKPOINT_RESTORE_END": [
+            1795665002545
+          ],
+          "ALL_TARGET_TASKS_RUNNING": [
+            1795665063587
+          ]
+        },
+        "preparation_seconds": null,
+        "old_graph_positive_intervals_during_preparation": 0,
+        "time_to_ready_seconds": null,
+        "decision_to_all_running_seconds": 70.84764477539062,
+        "old_task_termination_seconds": 0.529,
+        "replacement_graph_creation_seconds": 0.011,
+        "checkpoint_restore_seconds": 0.004,
+        "first_observed_replacement_progress_bounds_ms": [
+          1795665066767.093,
+          1795665067779.3179
+        ],
+        "execution_interruption_upper_seconds": 74.94231787109375,
+        "observed_positive_progress_gap_seconds": 76.01800146484375,
+        "sustained_throughput_recovery_seconds": null,
+        "kafka_offsets_before_restart": [
+          1795664992739,
+          {
+            "nexmark-bid": 8503501,
+            "nexmark-auction": 571049
+          }
+        ],
+        "kafka_offsets_after_redeployment": [
+          1795665117739,
+          {
+            "nexmark-bid": 8770629,
+            "nexmark-auction": 610421
+          }
+        ],
+        "wait_after_old_termination_seconds": 9.164
+      }
+    ],
+    "artifact_digests": {
+      "q8": "sha256:6b0a756d688bc8a021054b8ba87bedd24abecf0fd9825bc663b58fc629e47004",
+      "operator": "sha256:e3c8bea8a40f0c7a0680d9f1624222f12c7c765e6aa0b0875621eb02e16c8d91",
+      "q20": "sha256:77b8b1a61fb261e006cd42bad5178a3bc7af15c62d9c1a120cfa15ab56c56332",
+      "producer": "sha256:cb27866a6136aa3b1fcd79caa6d5edbd7832fc4e30f5bf8db71a25f224a7bf92",
+      "broker": "sha256:f5f8605794dce59d1d566f63667682771c2fec9e96088b0d6a5ef0f8476dd4b2"
+    }
+  },
+  "enabled": {
+    "run": "live-425cbf26",
+    "mode": "true",
+    "source": "3015abd8e505569ac914c55e9e795b89d5053d6c",
+    "offered_mixed_events_per_second": 60000,
+    "source_offset_samples_with_all_partitions": 98,
+    "initial_broker_offsets": {
+      "nexmark-auction": 0,
+      "nexmark-bid": 0,
+      "nexmark-person": 0
+    },
+    "terminal_broker_offsets": {
+      "nexmark-auction": 2145200,
+      "nexmark-bid": 32617584,
+      "nexmark-person": 720000
+    },
+    "producer_pods": [
+      {
+        "uid": "a6153260-e5bf-4e0b-8efc-b33cb2494fa6",
+        "node": "c182",
+        "image": "142.150.234.165:5000/flink-benchmark-runtime@sha256:cb27866a6136aa3b1fcd79caa6d5edbd7832fc4e30f5bf8db71a25f224a7bf92",
+        "restarts": 0
+      }
+    ],
+    "producer_job_submissions": [
+      "5463c87aee1304473f95e55c0102284c"
+    ],
+    "scheduled_flink_pod_requests": {
+      "covered_seconds": 573.824,
+      "cpu_core_seconds": 8425.683999999997,
+      "memory_gib_seconds": 7036.543
+    },
+    "decisions": [
+      {
+        "scheduled_offset_seconds": 120,
+        "decision_epoch_ms": 1795665970383.327,
+        "acknowledgement_status": 200,
+        "acknowledgement_seconds": 0.144836181640625,
+        "generation": 2,
+        "result": "applied",
+        "stage_timestamps_ms": {
+          "REQUEST_RECEIVED": [
+            1795665970512
+          ],
+          "PREPARATION_STARTED": [
+            1795665970523
+          ],
+          "RESOURCES_DECLARED": [
+            1795665970524
+          ],
+          "FIRST_NEW_SLOT_AVAILABLE": [
+            1795665970604
+          ],
+          "PREPARATION_PROGRESS": [
+            1795665970605
+          ],
+          "PREPARATION_READY": [
+            1795665970606
+          ],
+          "PREPARATION_COMMITTED": [
+            1795665970606
+          ],
+          "RESTART_START": [
+            1795665970606
+          ],
+          "OLD_TASKS_TERMINATED": [
+            1795665971001
+          ],
+          "GRAPH_CREATE_REQUESTED": [
+            1795665971007
+          ],
+          "REPLACEMENT_GRAPH_CREATED": [
+            1795665971080
+          ],
+          "CHECKPOINT_RESTORE_START": [
+            1795665971080
+          ],
+          "CHECKPOINT_RESTORE_END": [
+            1795665971182
+          ],
+          "ALL_TARGET_TASKS_RUNNING": [
+            1795665975256
+          ]
+        },
+        "preparation_seconds": 0.083,
+        "old_graph_positive_intervals_during_preparation": 0,
+        "time_to_ready_seconds": 0.082,
+        "decision_to_all_running_seconds": 4.872673095703125,
+        "old_task_termination_seconds": 0.395,
+        "replacement_graph_creation_seconds": 0.073,
+        "checkpoint_restore_seconds": 0.102,
+        "first_observed_replacement_progress_bounds_ms": [
+          1795665977577.0115,
+          1795665978403.246
+        ],
+        "execution_interruption_upper_seconds": 7.79724609375,
+        "observed_positive_progress_gap_seconds": 7.824314453125,
+        "sustained_throughput_recovery_seconds": null,
+        "kafka_offsets_before_restart": [
+          1795665970383,
+          {
+            "nexmark-bid": 2145091,
+            "nexmark-auction": 153562
+          }
+        ],
+        "kafka_offsets_after_redeployment": [
+          1795665985383,
+          {
+            "nexmark-bid": 2134327,
+            "nexmark-auction": 196856
+          }
+        ],
+        "extra_scheduled_requests_during_preparation": {
+          "covered_seconds": 0.083,
+          "cpu_core_seconds": 0.0,
+          "memory_gib_seconds": 0.0
+        },
+        "wait_after_old_termination_seconds": 0.006
+      },
+      {
+        "scheduled_offset_seconds": 330,
+        "decision_epoch_ms": 1795666180383.3464,
+        "acknowledgement_status": 200,
+        "acknowledgement_seconds": 0.11450537109375,
+        "generation": 3,
+        "result": "applied",
+        "stage_timestamps_ms": {
+          "REQUEST_RECEIVED": [
+            1795666180493
+          ],
+          "PREPARATION_STARTED": [
+            1795666180495
+          ],
+          "RESOURCES_DECLARED": [
+            1795666180495
+          ],
+          "FIRST_NEW_SLOT_AVAILABLE": [
+            1795666180582
+          ],
+          "PREPARATION_PROGRESS": [
+            1795666180583,
+            1795666190591
+          ],
+          "FIRST_NEW_TASKMANAGER_REGISTERED": [
+            1795666190569
+          ],
+          "PREPARATION_READY": [
+            1795666190591
+          ],
+          "PREPARATION_COMMITTED": [
+            1795666190592
+          ],
+          "RESTART_START": [
+            1795666190592
+          ],
+          "OLD_TASKS_TERMINATED": [
+            1795666191112
+          ],
+          "GRAPH_CREATE_REQUESTED": [
+            1795666191118
+          ],
+          "REPLACEMENT_GRAPH_CREATED": [
+            1795666191130
+          ],
+          "CHECKPOINT_RESTORE_START": [
+            1795666191130
+          ],
+          "CHECKPOINT_RESTORE_END": [
+            1795666191134
+          ],
+          "ALL_TARGET_TASKS_RUNNING": [
+            1795666223746
+          ]
+        },
+        "preparation_seconds": 10.097,
+        "old_graph_positive_intervals_during_preparation": 5,
+        "time_to_ready_seconds": 10.096,
+        "decision_to_all_running_seconds": 43.362653564453126,
+        "old_task_termination_seconds": 0.52,
+        "replacement_graph_creation_seconds": 0.012,
+        "checkpoint_restore_seconds": 0.004,
+        "first_observed_replacement_progress_bounds_ms": [
+          1795666224409.8967,
+          1795666225409.9976
+        ],
+        "execution_interruption_upper_seconds": 34.81799755859375,
+        "observed_positive_progress_gap_seconds": 36.00272241210938,
+        "sustained_throughput_recovery_seconds": null,
+        "kafka_offsets_before_restart": [
+          1795666190383,
+          {
+            "nexmark-bid": 8816169,
+            "nexmark-auction": 610052
+          }
+        ],
+        "kafka_offsets_after_redeployment": [
+          1795666275383,
+          {
+            "nexmark-bid": 9120188,
+            "nexmark-auction": 621693
+          }
+        ],
+        "extra_scheduled_requests_during_preparation": {
+          "covered_seconds": 10.097,
+          "cpu_core_seconds": 29.364,
+          "memory_gib_seconds": 22.023
+        },
+        "old_join_observed_records_during_preparation": 201974,
+        "wait_after_old_termination_seconds": 0.006
+      }
+    ],
+    "artifact_digests": {
+      "q8": "sha256:6b0a756d688bc8a021054b8ba87bedd24abecf0fd9825bc663b58fc629e47004",
+      "operator": "sha256:e3c8bea8a40f0c7a0680d9f1624222f12c7c765e6aa0b0875621eb02e16c8d91",
+      "q20": "sha256:77b8b1a61fb261e006cd42bad5178a3bc7af15c62d9c1a120cfa15ab56c56332",
+      "producer": "sha256:cb27866a6136aa3b1fcd79caa6d5edbd7832fc4e30f5bf8db71a25f224a7bf92",
+      "broker": "sha256:f5f8605794dce59d1d566f63667682771c2fec9e96088b0d6a5ef0f8476dd4b2"
+    }
+  }
+}
