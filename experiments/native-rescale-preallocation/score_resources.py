@@ -104,6 +104,42 @@ def backlog_result(samples, start, end):
             "samples": len(selected)}
 
 
+def jvm_summary(rows):
+    samples = [
+        (row["captured_ms"], {
+            worker: {metric["id"]: float(metric["value"]) for metric in metrics}
+            for worker, metrics in row["workers"].items() if metrics
+        })
+        for row in rows if row.get("workers")
+    ]
+    cpu_time = "Status.JVM.CPU.Time"
+    heap = "Status.JVM.Memory.Heap.Used"
+    nonheap = "Status.JVM.Memory.NonHeap.Used"
+    cpu_seconds = covered = 0
+    for (start, old), (end, new) in zip(samples, samples[1:]):
+        seconds = (end - start) / 1000
+        if not 0 < seconds <= 14:
+            continue
+        deltas = [
+            new[worker][cpu_time] - old[worker][cpu_time]
+            for worker in old.keys() & new.keys()
+            if 0 <= old[worker].get(cpu_time, -1) <= new[worker].get(cpu_time, -1)
+        ]
+        if deltas:
+            cpu_seconds += sum(deltas) / 1_000_000_000
+            covered += seconds
+    memory = [
+        sum(metrics[heap] + metrics[nonheap] for metrics in workers.values())
+        for _, workers in samples if workers
+        and all(heap in values and nonheap in values for values in workers.values())
+    ]
+    return {
+        "comparable_cpu_counter_seconds": covered,
+        "observed_taskmanager_jvm_cpu_core_seconds": cpu_seconds if covered else None,
+        "peak_observed_taskmanager_jvm_heap_and_nonheap_bytes": max(memory, default=None),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("lab_receipt", type=Path)
@@ -142,6 +178,9 @@ def main():
         "end_to_end_latency_percentiles": None,
         "decisions": decisions,
     }
+    jvm_path = directory / "jvm-resources.jsonl"
+    if jvm_path.exists():
+        summary["taskmanager_jvms"] = jvm_summary(read_lines(jvm_path))
     print(json.dumps(summary, indent=2))
 
 
