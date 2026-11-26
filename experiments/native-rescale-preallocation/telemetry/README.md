@@ -18,4 +18,6 @@ The sampler selects auctions deterministically from a mix of `id`, `dateTime`, `
 
 Run `score_q8_latency.py LAB_RECEIPT RESULTS_ROOT` to report matched and unmatched witnesses, pooled P50/P95/P99, and 30-second time bins aligned to the input release. P50 requires two matches, P95 requires 20, and P99 requires 100. A result with insufficient samples remains missing. Use the supplied Figure 10 renderer with query `q8`. The logging probe is applied identically to every latency arm and does not provide an exactly-once assertion about the discard sink.
 
+The same observer reads cgroup v2 CPU time and memory charged to each owned TaskManager container at five-second intervals. It opens one bounded reader per Pod UID. The score reports CPU-core-seconds with observed TaskManager-seconds of coverage. It also reports peak summed `memory.current` among reporting containers in a five-second bin, which includes charged page cache. These measurements cover TaskManagers. Pod requests and JVM metrics are separate series.
+
 Run the adapter regression checks with `python3 -m unittest discover -s experiments/native-rescale-preallocation/telemetry -v`.

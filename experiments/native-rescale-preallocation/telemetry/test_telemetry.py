@@ -2,7 +2,7 @@
 import unittest
 
 from score_broker_offsets import PARTITIONS, observe
-from score_q8_latency import score
+from score_q8_latency import score, summarize_cgroups
 
 
 def snapshot(epoch, end, committed):
@@ -70,6 +70,18 @@ class Q8LatencyTest(unittest.TestCase):
         ]
         _, result = score(records, 1000, 61000)
         self.assertEqual((49, 94, 98), (result["p50_ms"], result["p95_ms"], result["p99_ms"]))
+
+    def test_container_counters_do_not_bridge_pod_changes_or_gaps(self):
+        records = [
+            {"epoch_ms": epoch, "pod_uid": uid, "cpu_usage_usec": cpu,
+             "memory_current_bytes": memory}
+            for epoch, uid, cpu, memory in [(1000, "a", 0, 5), (6000, "a", 2_000_000, 8),
+                                            (16000, "a", 9_000_000, 9), (16900, "b", 0, 7)]
+        ]
+        result = summarize_cgroups(records, 1000, 20000)
+        self.assertEqual(5, result["cpu_covered_taskmanager_seconds"])
+        self.assertEqual(2, result["observed_taskmanager_container_cpu_core_seconds"])
+        self.assertEqual(16, result["peak_observed_taskmanager_memory_current_bytes_5s_bin"])
 
 
 if __name__ == "__main__":

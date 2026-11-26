@@ -67,6 +67,34 @@ def score(records, start, cutoff):
     }
 
 
+def summarize_cgroups(records, start, cutoff):
+    by_pod = defaultdict(list)
+    memory_samples = defaultdict(dict)
+    for row in records:
+        epoch = row["epoch_ms"]
+        if start <= epoch < cutoff:
+            uid = row["pod_uid"]
+            by_pod[uid].append((epoch, row["cpu_usage_usec"]))
+            bucket = (epoch - start) // 5000
+            memory_samples[bucket][uid] = row["memory_current_bytes"]
+
+    covered = usage = 0
+    for samples in by_pod.values():
+        ordered = sorted(samples)
+        for (left, first), (right, last) in zip(ordered, ordered[1:]):
+            if 0 < right - left <= 8000 and last >= first:
+                covered += (right - left) / 1000
+                usage += (last - first) / 1_000_000
+    return {
+        "observed_taskmanagers": len(by_pod),
+        "cpu_covered_taskmanager_seconds": covered,
+        "observed_taskmanager_container_cpu_core_seconds": usage if covered else None,
+        "mean_cpu_cores_per_observed_taskmanager": usage / covered if covered else None,
+        "peak_observed_taskmanager_memory_current_bytes_5s_bin": max(
+            (sum(workers.values()) for workers in memory_samples.values()), default=None),
+    }
+
+
 def convert(lab, output):
     spec = json.loads((lab / "execution-spec.json").read_text())
     capture = json.loads((lab / "scout/q8-record-latency-capture.json").read_text())
@@ -78,6 +106,11 @@ def convert(lab, output):
             spec["prefix_or_timed_release_ms"],
             spec["run_deadline_ms"],
         )
+    cgroups = lab / "scout/q8-taskmanager-cgroups.jsonl"
+    if cgroups.exists():
+        with cgroups.open() as raw:
+            summary["taskmanager_container_utilization"] = summarize_cgroups(
+                map(json.loads, raw), spec["prefix_or_timed_release_ms"], spec["run_deadline_ms"])
     index = {"run_id": spec["run"], "environment": spec["worker"],
              "autoscaler": "preallocation" if spec["arm"] == "true" else "immediate"}
     query = output / "nexmark/q8"

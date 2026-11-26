@@ -11,6 +11,20 @@ import time
 
 INPUT = re.compile(r"Q8_LATENCY_INPUT auction=([0-9a-f]{64}) epoch_ms=(\d+)")
 OUTPUT = re.compile(r"Q8_LATENCY_OUTPUT auction=([0-9a-f]{64}) person=([0-9a-f]{64}) epoch_ms=(\d+)")
+CGROUP_LINE = re.compile(r"(\d+) (\d+) (\d+)\n?")
+CGROUP_COMMAND = """
+while :; do
+    sample=$(date +%s%3N)
+    test "$sample" -lt "$1" || exit 0
+    usage=
+    while read -r key value; do
+        if test "$key" = usage_usec; then usage=$value; break; fi
+    done </sys/fs/cgroup/cpu.stat
+    test -n "$usage" && read -r memory </sys/fs/cgroup/memory.current || exit 1
+    printf '%s %s %s\\n' "$sample" "$usage" "$memory"
+    sleep 5
+done
+"""
 
 
 def main():
@@ -32,6 +46,7 @@ def main():
         raise ValueError("Q8 namespace ownership changed")
 
     followers = {}
+    cgroup_readers = {}
     threads = []
     observed = {}
     errors = []
@@ -39,7 +54,9 @@ def main():
     cutoff = spec["run_deadline_ms"]
     stopping = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
-    with (bundle / "scout/q8-record-latency.jsonl").open("x", buffering=1) as file:
+    scout = bundle / "scout"
+    with ((scout / "q8-record-latency.jsonl").open("x", buffering=1) as file,
+          (scout / "q8-taskmanager-cgroups.jsonl").open("x", buffering=1) as cgroup_file):
         def follow(process, pod, uid):
             for line in process.stdout:
                 for kind, pattern in (("input", INPUT), ("output", OUTPUT)):
@@ -53,6 +70,17 @@ def main():
                             file.write(json.dumps(row) + "\n")
                             observed[uid][kind] += 1
                         break
+
+        def follow_cgroup(process, pod, uid):
+            for line in process.stdout:
+                match = CGROUP_LINE.fullmatch(line)
+                if match:
+                    epoch, cpu, memory = map(int, match.groups())
+                    row = {"epoch_ms": epoch, "cpu_usage_usec": cpu, "memory_current_bytes": memory,
+                           "pod": pod, "pod_uid": uid}
+                    with lock:
+                        cgroup_file.write(json.dumps(row) + "\n")
+                        observed[uid]["cgroup_samples"] += 1
 
         try:
             while not stopping.is_set() and time.time_ns() // 1_000_000 < cutoff + 5000:
@@ -73,11 +101,23 @@ def main():
                                and container["image"] == spec["image"]
                                for container in pod["spec"]["containers"]):
                         raise ValueError("TaskManager image differs from the admitted Q8 release")
+                    with lock:
+                        observed.setdefault(uid, {"pod": name, "input": 0, "output": 0,
+                                                  "connections": 0, "cgroup_samples": 0})
+                    if uid not in cgroup_readers:
+                        process = subprocess.Popen(
+                            [*kube, "exec", name, "-c", "flink-main-container", "--",
+                             "sh", "-c", CGROUP_COMMAND, "cgroup", str(cutoff)],
+                            stdout=subprocess.PIPE, text=True,
+                        )
+                        cgroup_readers[uid] = process
+                        thread = threading.Thread(target=follow_cgroup, args=(process, name, uid))
+                        thread.start()
+                        threads.append(thread)
                     previous = followers.get(uid)
                     if previous is not None and (previous.poll() is None or previous.returncode == 0):
                         continue
                     with lock:
-                        observed.setdefault(uid, {"pod": name, "input": 0, "output": 0, "connections": 0})
                         observed[uid]["connections"] += 1
                     process = subprocess.Popen(
                         [*kube, "logs", "-f", name, "-c", "flink-main-container", "--tail=-1"],
@@ -89,12 +129,13 @@ def main():
                     threads.append(thread)
                 time.sleep(2)
         finally:
-            for process in followers.values():
+            processes = [*followers.values(), *cgroup_readers.values()]
+            for process in processes:
                 if process.poll() is None:
                     process.terminate()
             for thread in threads:
                 thread.join(timeout=8)
-            for process in followers.values():
+            for process in processes:
                 if process.poll() is None:
                     process.kill()
             for thread in threads:
