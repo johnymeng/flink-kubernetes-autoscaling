@@ -1,0 +1,57 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package io.a4s.core;
+
+import io.a4s.api.CachePoint;
+import io.a4s.api.OperatorMetrics;
+import java.util.List;
+import java.util.OptionalLong;
+
+/** Lazily evaluates the minimum measured operator-wide cache required at each parallelism. */
+public final class MemoryParallelismCurve {
+    private final List<CachePoint> points;
+    private final FixedLatencyModel model;
+    private final double target;
+
+    public MemoryParallelismCurve(OperatorMetrics metrics, FixedLatencyModel model) {
+        this.points =
+                metrics.histogram == null
+                        ? metrics.missRateCurve
+                        : MissRateCurves.fromHistogram(metrics.histogram);
+        this.target = metrics.targetRecordsPerSecond;
+        this.model = model;
+    }
+
+    public boolean hasMeasurements() {
+        return !points.isEmpty();
+    }
+
+    public OptionalLong minimumCacheBytes(int parallelism) {
+        double maximumMissRate = model.maximumMissRate(parallelism, target);
+        return maximumMissRate < 0
+                ? OptionalLong.empty()
+                : MissRateCurves.supportedCapacity(points, maximumMissRate);
+    }
+
+    double predict(int parallelism, long capacityBytes) {
+        // A minimum allocation is on the curve. Rounding a per-task allocation up
+        // can exceed the last measured point, so predict at the proven capacity.
+        return model.predictAtRate(
+                parallelism, MissRateCurves.interpolate(points, capacityBytes).orElseThrow());
+    }
+}

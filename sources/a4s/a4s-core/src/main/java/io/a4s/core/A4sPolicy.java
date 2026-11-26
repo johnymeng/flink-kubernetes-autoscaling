@@ -1,0 +1,515 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package io.a4s.core;
+
+import io.a4s.api.EvaluationRequest;
+import io.a4s.api.MigrationEstimate;
+import io.a4s.api.OperatorConfiguration;
+import io.a4s.api.OperatorDecision;
+import io.a4s.api.OperatorMetrics;
+import io.a4s.api.PlatformCapabilities;
+import io.a4s.api.PolicyConfiguration.Mode;
+import io.a4s.api.ScalingPlan;
+import io.a4s.api.ScalingPlan.Action;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.CancellationException;
+
+public final class A4sPolicy implements ScalingPolicy {
+    public static final String MODEL_VERSION = "fixed-latency-v1";
+    private static final long BYTES_PER_MIB = 1024L * 1024L;
+    private final MigrationCostModel migrationModel;
+
+    public A4sPolicy() {
+        this((current, candidate) -> Optional.empty());
+    }
+
+    public A4sPolicy(MigrationCostModel migrationModel) {
+        this.migrationModel = Objects.requireNonNull(migrationModel);
+    }
+
+    @Override
+    public ScalingPlan evaluate(EvaluationRequest request) {
+        var snapshot = request.snapshot;
+        var constraints = request.constraints;
+        long expiry = expiry(request);
+        if (!snapshot.metricsComplete || request.evaluatedAtMillis > expiry) {
+            return hold(
+                    request,
+                    Action.INSUFFICIENT_METRICS,
+                    "Incomplete or expired measurement window",
+                    0);
+        }
+        if (snapshot.reconfigurationInProgress || request.previousState.pendingDecisionId != null) {
+            return hold(request, Action.NO_CHANGE, "Previous reconfiguration is unresolved", 0);
+        }
+        if (snapshot.lastReconfigurationMillis != null
+                && request.evaluatedAtMillis - snapshot.lastReconfigurationMillis
+                        < constraints.cooldownMillis) {
+            return hold(request, Action.NO_CHANGE, "Reconfiguration cooldown", 0);
+        }
+        if (constraints.requiresPlacement
+                || constraints.latencyObjectiveMillis != null
+                || constraints.backlogRecoveryMillis != null) {
+            return hold(
+                    request, Action.UNSUPPORTED_ACTION, "Requested objective has no v1 model", 0);
+        }
+
+        var model = new FixedLatencyModel(request.policy);
+        var frontiers = new ArrayList<Frontier>(snapshot.operators.size());
+        var selected = new ArrayList<OperatorDecision>(snapshot.operators.size());
+        for (var operator : snapshot.operators) {
+            if (operator.cacheSensitive && operator.targetRecordsPerSecond == null) {
+                return hold(
+                        request,
+                        Action.INSUFFICIENT_METRICS,
+                        "Missing demand for " + operator.operatorId,
+                        0);
+            }
+            if (operator.histogram != null
+                    && (operator.histogram.startMillis < snapshot.windowStartMillis
+                            || operator.histogram.endMillis != snapshot.windowEndMillis)) {
+                return hold(
+                        request,
+                        Action.INSUFFICIENT_METRICS,
+                        "Histogram does not cover the current measurement end for "
+                                + operator.operatorId,
+                        0);
+            }
+            var frontier = new Frontier(request, operator, model);
+            if (frontier.curve != null && !frontier.curve.hasMeasurements()) {
+                return hold(
+                        request,
+                        Action.INSUFFICIENT_METRICS,
+                        "Missing MRC for " + operator.operatorId,
+                        0);
+            }
+            var first = frontier.atOrAbove(operator.startingParallelism);
+            if (first == null) {
+                return hold(
+                        request,
+                        Action.INFEASIBLE_CONFIGURATION,
+                        "No supported configuration for " + operator.operatorId,
+                        0);
+            }
+            frontiers.add(frontier);
+            selected.add(first);
+        }
+
+        for (int attempt = 1; attempt <= request.policy.maxAttempts; attempt++) {
+            if (withinBudgets(request, selected)) {
+                var decisions = new LinkedHashMap<String, OperatorDecision>();
+                for (int i = 0; i < selected.size(); i++) {
+                    decisions.put(snapshot.operators.get(i).operatorId, selected.get(i));
+                }
+                return recommend(request, decisions, attempt);
+            }
+            if (attempt == request.policy.maxAttempts || !advance(frontiers, selected)) {
+                return hold(
+                        request,
+                        Action.INFEASIBLE_CONFIGURATION,
+                        "No placement fits resource budgets",
+                        attempt);
+            }
+        }
+        throw new IllegalStateException("Invalid attempt limit");
+    }
+
+    private ScalingPlan recommend(
+            EvaluationRequest request, Map<String, OperatorDecision> decisions, int attempts) {
+        var capabilities = request.snapshot.capabilities;
+        boolean changes = false;
+        boolean preserveState = false;
+        for (var operator : request.snapshot.operators) {
+            var current = operator.current;
+            var target = decisions.get(operator.operatorId).target;
+            boolean horizontal = current.parallelism != target.parallelism;
+            boolean cache = !Objects.equals(current.cachePerTaskBytes, target.cachePerTaskBytes);
+            boolean managed =
+                    !Objects.equals(
+                            current.managedMemoryPerTaskBytes, target.managedMemoryPerTaskBytes);
+            if (horizontal && !capabilities.supports(PlatformCapabilities.Action.PARALLELISM)
+                    || cache && !capabilities.supports(PlatformCapabilities.Action.CACHE_PER_TASK)
+                    || managed
+                            && !capabilities.supports(
+                                    PlatformCapabilities.Action.MANAGED_MEMORY_PER_TASK)) {
+                return hold(
+                        request,
+                        Action.UNSUPPORTED_ACTION,
+                        "Required scaling action is unsupported",
+                        attempts);
+            }
+            if (horizontal || cache || managed) {
+                changes = true;
+                preserveState |= !Boolean.FALSE.equals(operator.stateful);
+            }
+        }
+        if (!changes) {
+            return hold(
+                    request,
+                    Action.NO_CHANGE,
+                    "Current allocation matches the recommendation",
+                    attempts);
+        }
+        if (preserveState
+                && !capabilities.supports(PlatformCapabilities.Action.STATEFUL_RECOVERY)) {
+            return hold(
+                    request,
+                    Action.UNSUPPORTED_ACTION,
+                    "State-preserving execution is unsupported",
+                    attempts);
+        }
+        MigrationEstimate migration =
+                migrationModel.predict(request.snapshot, Map.copyOf(decisions)).orElse(null);
+        Long limit = request.constraints.maxDowntimeMillis;
+        if (limit != null
+                && (migration == null
+                        || migration.downtimeMillis == null
+                        || migration.downtimeMillis > limit)) {
+            return hold(
+                    request,
+                    Action.INFEASIBLE_CONFIGURATION,
+                    "Downtime objective cannot be verified",
+                    attempts);
+        }
+        return plan(
+                request,
+                Action.RESCALE,
+                decisions,
+                migration,
+                preserveState,
+                attempts,
+                "Measured support and configured resource bounds");
+    }
+
+    private static boolean withinBudgets(
+            EvaluationRequest request, List<OperatorDecision> selected) {
+        long remainingCache =
+                request.constraints.totalCacheBudgetBytes == null
+                        ? Long.MAX_VALUE
+                        : request.constraints.totalCacheBudgetBytes;
+        boolean limitCache = request.constraints.totalCacheBudgetBytes != null;
+        double cpu = 0;
+        for (var decision : selected) {
+            var target = decision.target;
+            var maxManaged = request.constraints.maxManagedMemoryPerTaskBytes;
+            if (maxManaged != null
+                    && (request.policy.mode != Mode.LEGACY_SLOT_RESERVATION
+                            || decision.modeledMinimumTotalCacheBytes != null)
+                    && (target.managedMemoryPerTaskBytes == null
+                            || target.managedMemoryPerTaskBytes > maxManaged
+                            || request.policy.mode == Mode.LEGACY_SLOT_RESERVATION
+                                    && (request.policy.managedMemoryBaseBytes > maxManaged
+                                            || decision.modeledMinimumTotalCacheBytes
+                                                    > maxManaged
+                                                            - request.policy
+                                                                    .managedMemoryBaseBytes))) {
+                return false;
+            }
+            if (target.cachePerTaskBytes != null
+                    && (target.cachePerTaskBytes < request.constraints.minCachePerTaskBytes
+                            || target.cachePerTaskBytes
+                                    > request.constraints.maxCachePerTaskBytes)) {
+                return false;
+            }
+            if (limitCache) {
+                if (decision.targetTotalCacheBytes == null
+                        || decision.targetTotalCacheBytes > remainingCache) {
+                    return false;
+                }
+                remainingCache -= decision.targetTotalCacheBytes;
+            }
+            if (request.constraints.cpuBudgetCores != null) {
+                if (target.cpuCoresPerTask == null) {
+                    return false;
+                }
+                cpu += target.cpuCoresPerTask * target.parallelism;
+                if (cpu > request.constraints.cpuBudgetCores) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private static boolean advance(List<Frontier> frontiers, List<OperatorDecision> selected) {
+        int bestIndex = -1;
+        OperatorDecision best = null;
+        long bestDelta = Long.MAX_VALUE;
+        for (int i = 0; i < selected.size(); i++) {
+            var current = selected.get(i);
+            if (frontiers.get(i).curve == null) {
+                continue;
+            }
+            var next = frontiers.get(i).atOrAbove(current.target.parallelism + 1);
+            if (next == null) {
+                continue;
+            }
+            long delta = next.modeledMinimumTotalCacheBytes - current.modeledMinimumTotalCacheBytes;
+            if (best == null || delta < bestDelta) {
+                bestIndex = i;
+                best = next;
+                bestDelta = delta;
+            }
+        }
+        if (bestIndex < 0) {
+            return false;
+        }
+        selected.set(bestIndex, best);
+        return true;
+    }
+
+    /**
+     * Validate an actionable response against the original request before platform revalidation.
+     */
+    public boolean isApplicable(EvaluationRequest request, ScalingPlan plan, long nowMillis) {
+        var snapshot = request.snapshot;
+        if (plan.action != Action.RESCALE
+                || plan.schemaVersion != request.schemaVersion
+                || !plan.snapshotId.equals(snapshot.snapshotId)
+                || !plan.jobId.equals(snapshot.jobId)
+                || !plan.executionGeneration.equals(snapshot.executionGeneration)
+                || !plan.decisionId.equals(decisionId(request))
+                || !MODEL_VERSION.equals(plan.modelVersion)
+                || plan.expiresAtMillis != expiry(request)
+                || nowMillis > plan.expiresAtMillis
+                || plan.attempts < 1
+                || plan.attempts > request.policy.maxAttempts
+                || plan.policyState.version != request.previousState.version
+                || !Objects.equals(
+                        plan.policyState.pendingDecisionId, request.previousState.pendingDecisionId)
+                || !snapshot.metricsComplete
+                || snapshot.reconfigurationInProgress
+                || request.previousState.pendingDecisionId != null
+                || plan.operators.size() != snapshot.operators.size()
+                || snapshot.lastReconfigurationMillis != null
+                        && request.evaluatedAtMillis - snapshot.lastReconfigurationMillis
+                                < request.constraints.cooldownMillis
+                || request.constraints.requiresPlacement
+                || request.constraints.latencyObjectiveMillis != null
+                || request.constraints.backlogRecoveryMillis != null) {
+            return false;
+        }
+
+        var selected = new ArrayList<OperatorDecision>(snapshot.operators.size());
+        var model = new FixedLatencyModel(request.policy);
+        for (var operator : snapshot.operators) {
+            var decision = plan.operators.get(operator.operatorId);
+            var current = plan.currentConfiguration.get(operator.operatorId);
+            if (decision == null
+                    || current == null
+                    || !sameAllocation(operator.current, current)
+                    || operator.cacheSensitive && operator.targetRecordsPerSecond == null) {
+                return false;
+            }
+            int parallelism = decision.target.parallelism;
+            if (parallelism < Math.max(operator.startingParallelism, operator.minParallelism)
+                    || parallelism > operator.maxParallelism
+                    || !operator.permittedParallelisms.isEmpty()
+                            && java.util.Collections.binarySearch(
+                                            operator.permittedParallelisms, parallelism)
+                                    < 0) {
+                return false;
+            }
+            var frontier = new Frontier(request, operator, model);
+            if (frontier.curve == null
+                    && parallelism
+                            != Math.max(operator.startingParallelism, operator.minParallelism)) {
+                return false;
+            }
+            var expected = frontier.candidate(parallelism);
+            if (expected == null
+                    || !sameAllocation(expected.target, decision.target)
+                    || !Objects.equals(
+                            expected.modeledMinimumTotalCacheBytes,
+                            decision.modeledMinimumTotalCacheBytes)
+                    || !Objects.equals(
+                            expected.predictedRecordsPerSecond,
+                            decision.predictedRecordsPerSecond)) {
+                return false;
+            }
+            selected.add(decision);
+        }
+        var checked = recommend(request, plan.operators, plan.attempts);
+        return withinBudgets(request, selected)
+                && checked.action == Action.RESCALE
+                && plan.requiresStatePreservation == checked.requiresStatePreservation;
+    }
+
+    private static boolean sameAllocation(
+            OperatorConfiguration first, OperatorConfiguration second) {
+        return first.parallelism == second.parallelism
+                && Objects.equals(first.cachePerTaskBytes, second.cachePerTaskBytes)
+                && Objects.equals(first.managedMemoryPerTaskBytes, second.managedMemoryPerTaskBytes)
+                && Objects.equals(first.cpuCoresPerTask, second.cpuCoresPerTask);
+    }
+
+    public static long expiry(EvaluationRequest request) {
+        long end = request.snapshot.windowEndMillis;
+        long lifetime = request.constraints.maxSnapshotAgeMillis;
+        return lifetime > Long.MAX_VALUE - end ? Long.MAX_VALUE : end + lifetime;
+    }
+
+    public static String decisionId(EvaluationRequest request) {
+        var snapshot = request.snapshot;
+        String key =
+                snapshot.jobId.length()
+                        + ":"
+                        + snapshot.jobId
+                        + snapshot.executionGeneration.length()
+                        + ":"
+                        + snapshot.executionGeneration
+                        + snapshot.snapshotId;
+        return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+    }
+
+    private static ScalingPlan hold(
+            EvaluationRequest request, Action action, String rationale, int attempts) {
+        return plan(request, action, Map.of(), null, false, attempts, rationale);
+    }
+
+    private static ScalingPlan plan(
+            EvaluationRequest request,
+            Action action,
+            Map<String, OperatorDecision> decisions,
+            MigrationEstimate migration,
+            boolean preserveState,
+            int attempts,
+            String rationale) {
+        var snapshot = request.snapshot;
+        var current = new LinkedHashMap<String, OperatorConfiguration>();
+        snapshot.operators.forEach(operator -> current.put(operator.operatorId, operator.current));
+        return new ScalingPlan(
+                request.schemaVersion,
+                decisionId(request),
+                snapshot.snapshotId,
+                snapshot.jobId,
+                snapshot.executionGeneration,
+                action,
+                current,
+                decisions,
+                migration,
+                rationale,
+                MODEL_VERSION,
+                expiry(request),
+                preserveState,
+                attempts,
+                request.previousState);
+    }
+
+    private static final class Frontier {
+        private final EvaluationRequest request;
+        private final OperatorMetrics operator;
+        private final MemoryParallelismCurve curve;
+
+        private Frontier(
+                EvaluationRequest request, OperatorMetrics operator, FixedLatencyModel model) {
+            this.request = request;
+            this.operator = operator;
+            this.curve =
+                    operator.cacheSensitive ? new MemoryParallelismCurve(operator, model) : null;
+        }
+
+        private OperatorDecision atOrAbove(int startingParallelism) {
+            int start = Math.max(startingParallelism, operator.minParallelism);
+            if (!operator.permittedParallelisms.isEmpty()) {
+                int index =
+                        java.util.Collections.binarySearch(operator.permittedParallelisms, start);
+                for (int i = index >= 0 ? index : -index - 1;
+                        i < operator.permittedParallelisms.size();
+                        i++) {
+                    var candidate = candidate(operator.permittedParallelisms.get(i));
+                    if (candidate != null) {
+                        return candidate;
+                    }
+                }
+            } else {
+                for (int parallelism = start;
+                        parallelism <= operator.maxParallelism;
+                        parallelism++) {
+                    var candidate = candidate(parallelism);
+                    if (candidate != null) {
+                        return candidate;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private OperatorDecision candidate(int parallelism) {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new CancellationException("A4S evaluation interrupted");
+            }
+            var current = operator.current;
+            Long minimum = null;
+            Double throughput = null;
+            Long cache = current.cachePerTaskBytes;
+            Long managed = current.managedMemoryPerTaskBytes;
+            if (curve != null) {
+                var required = curve.minimumCacheBytes(parallelism);
+                if (required.isEmpty()) {
+                    return null;
+                }
+                minimum = required.getAsLong();
+                if (request.policy.mode == Mode.LEGACY_SLOT_RESERVATION) {
+                    cache = null;
+                    managed = legacyManagedMemoryBytes(request, minimum);
+                    if (managed == null) {
+                        return null;
+                    }
+                    // This reservation convention supplies no physical cache capacity guarantee.
+                } else {
+                    long perTask = minimum / parallelism + (minimum % parallelism == 0 ? 0 : 1);
+                    cache = Math.max(perTask, request.constraints.minCachePerTaskBytes);
+                    double predicted = curve.predict(parallelism, minimum);
+                    throughput = Double.isFinite(predicted) ? predicted : null;
+                }
+            }
+            if (cache != null && cache > Long.MAX_VALUE / parallelism) {
+                return null;
+            }
+            var target =
+                    new OperatorConfiguration(parallelism, cache, managed, current.cpuCoresPerTask);
+            return new OperatorDecision(
+                    target, target.totalCacheBytes(), minimum, throughput, null);
+        }
+    }
+
+    private static Long legacyManagedMemoryBytes(EvaluationRequest request, long requiredBytes) {
+        long base = request.policy.managedMemoryBaseBytes;
+        Long override = request.policy.managedMemoryOverrideBytes;
+        if (override != null) {
+            return override;
+        }
+        if (requiredBytes > Long.MAX_VALUE - base) {
+            return null;
+        }
+        long raw = requiredBytes + base;
+        if (raw == 0) {
+            return null;
+        }
+        long mib = raw / BYTES_PER_MIB + (raw % BYTES_PER_MIB != 0 ? 1 : 0);
+        return mib > Long.MAX_VALUE / BYTES_PER_MIB ? null : mib * BYTES_PER_MIB;
+    }
+}
