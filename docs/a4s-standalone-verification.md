@@ -122,7 +122,34 @@ Two local Flink 1.18 MiniCluster startup smokes ran Q8 with two joined-result su
 | First | 15,450 | 4,460–4,469 | 5,400–5,409 | 5,400–5,409 |
 | Second | 45,550 | 4,480–4,489 | 8,410–8,419 | 8,410–8,419 |
 
-These results verify the collection and show variability during startup. Matched embedded and remote latency remains unverified.
+These results verify the collection and show variability during startup.
+
+### Fixed-allocation Q8 crossover on c167
+
+Run `live-0e13269a` used one 600-second timed DataStream Q8 deployment at an 80,000-record/s configured input cap. It used operator `86d298c1` and the workload probe from `a239ef59` overlaid on the archived Q8 replay job. The two source vertices each ran at parallelism 2, and the join ran at 1. Admission verified five occupied slots on two four-core TaskManagers, a 192 MiB applied managed reservation per slot, and a 1,536 MiB total managed memory pool. The latency histogram was empty before timed input release.
+
+The same operator and runner stayed up throughout the run. The operator evaluated snapshots with `job.autoscaler.scaling.enabled=false`. After 120 seconds of warmup, the run alternated the runner URL and snapshot filename in the job's operator settings. Six periods started 75 seconds apart in embedded, remote, remote, embedded, embedded, remote order. Each period allowed 20 seconds for reconciliation and captured counters for about 50 seconds. Every capture verified the same running attempts and applied profiles. There were 47 evaluations in the measured intervals, with all 23 remote calls returning HTTP 200 and zero evaluation calls to the runner in embedded intervals. All 69 archived evaluations, including the guards, replayed exactly.
+
+| Period | Mode | Source output records/s | Join input records/s | Joined results sampled | p50 / p95 / p99 lower bin edge (ms) | Cache miss fraction |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | Embedded | 21,384 | 21,561 | 50 | 780 / 780 / 780 | 34.5% |
+| 2 | Remote | 22,319 | 22,319 | 4,950 | 760 / 930 / 930 | 33.3% |
+| 3 | Remote | 21,048 | 21,845 | 2,600 | 560 / 580 / 850 | 30.5% |
+| 4 | Embedded | 20,791 | 21,194 | 2,550 | 630 / 630 / 1,230 | 38.4% |
+| 5 | Embedded | 22,394 | 22,394 | 2,600 | 700 / 770 / 1,220 | 30.7% |
+| 6 | Remote | 16,454 | 16,950 | 200 | 670 / 1,180 / 1,180 | 44.3% |
+
+Latency bins are 10 ms wide and measure from the source chain's timestamp to the joined-result sink. The 50 samples in period 1 all landed in the same bin. All periods had zero clock-error and overflow samples. The join's measured block-cache capacity was 160 MiB throughout. Repeated column-family capacity readings referred to the same slot cache. The cache miss fractions use the database-level hit and miss counter deltas. Replay backlog grew by 2.88–3.15 million records per measured interval.
+
+For the three adjacent pairs, remote join-input throughput changed by +3.5%, +3.1%, and −24.3% relative to embedded. In the last remote period, estimated live window state grew from about 760 to 909 MiB, with a 44.3% miss fraction compared with 30.7% in the preceding embedded period. Remote server handling in that late period took 4.0–5.0 ms per request, within the earlier remote timing range. The run has one deployment, a growing backlog, and uneven latency sample counts. The observed differences leave the 5% transport-only steady-state throughput criterion and steady-state latency regression unverified.
+
+Across all 23 in-window remote evaluations, server handling took 5.8 ms p50, 13.2 ms p95, and 15.0 ms p99. Runner RSS grew from 58,260 to 77,704 KiB and process CPU increased by 451 ticks across the scoped samples. Flink completed 45 checkpoints and reported zero restores. The owned namespace was removed and the worker lock was released. The latest branch also passed 47 focused `ScalingExecutorTest` cases, including a successful remote recommendation blocked from actuation by observe-only configuration.
+
+Recompute the period summaries from the captured run directory, which contains `execution-spec.json` and `scout/crossover`. [Scorer](../scripts/a4s/score-q8-crossover.py)
+
+```bash
+python3 scripts/a4s/score-q8-crossover.py "$Q8_RUN_BUNDLE"
+```
 
 ### Prepare the Q20 follow-up
 
@@ -172,6 +199,6 @@ All 111 embedded and remote recordings replayed byte for byte. Replaying copies 
 | Verified | The independent Maven build, packaged runner, Kubernetes Service smoke, and standalone CI exercise the same v1 evaluation path without Flink. Embedded and HTTP evaluation agree on matched inputs. The live Q8 and Q20 captures reproduce through offline replay. |
 | Verified | Local Flink recovered RocksDB state at a different parallelism and preserved the Kafka transactional output oracle. Live Q20 restored checkpoints during memory-only updates. Runner failure, stale recommendations, and incomplete or uncommitted overrides were tested separately. |
 | Implemented, partially verified | The adapter now includes the verified exclusive-slot CPU quota in the evaluation request. Focused tests and replay cover this change. The lab binaries used the preceding adapter with the final operator-side quota check. The live Kafka workload uses a blackhole sink, so the deterministic committed-output oracle has only been exercised locally. |
-| Observed performance differences | The remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. The Q8 runs chose different parallelism, and the Q20 runs applied different reservations and accumulated backlog. The transport-only steady-state target, matched end-to-end record latency percentiles and time to recover target throughput remain open. |
+| Observed performance differences | The adaptive remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. Their allocations diverged. The fixed-allocation Q8 crossover verified the transport and collected matched record latency bins. Its three within-job throughput differences ranged from −24.3% to +3.5%. Run-to-run variability, the transport-only steady-state target, steady-state latency regression, and time to recover target throughput remain open. |
 | Platform dependencies | The Flink adapter supplies demand from the existing Flink evaluator and consumes the JobManager's aggregate `scaledMrc`. The operator supplies pending reconciliation and resource information. An atomic execution-generation precondition for Justin writes would close the remaining check-to-use interval. |
 | Unsupported in v1 | Physical placement, a calibrated migration cost model, and a verified Flink 2.x or ForSt integration remain outside the current implementation. The optimizer checks a packing when the snapshot supplies worker capacities. Online cost calibration and learned models have extension points and would need their own data and qualification. See the [future adapter guide](a4s-standalone.md#native-instrumentation-and-future-adapters). |
