@@ -142,6 +142,7 @@ public final class Q20KafkaLatencySinkFactory implements DynamicTableSinkFactory
 
         private synchronized String snapshot() {
             var json = new StringBuilder().append("{\"attempt\":").append(attempt)
+                    .append(",\"sampledAtMs\":").append(System.currentTimeMillis())
                     .append(",\"segments\":[[").append(SHORT_END_MILLIS).append(',').append(SHORT_WIDTH_MILLIS)
                     .append("],[").append(MEDIUM_END_MILLIS).append(',').append(MEDIUM_WIDTH_MILLIS)
                     .append("],[").append(OVERFLOW_MILLIS).append(',').append(LONG_WIDTH_MILLIS).append("]]")

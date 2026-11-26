@@ -405,9 +405,24 @@ All 49 in-window evaluations carried both source-backlog counters, and each repo
 
 Pooled Kafka-to-join p95 bins were 110–119 ms embedded and 120–129 ms remote. Pooled p99 bins were 290–299 ms embedded and 430–439 ms remote. The adjacent-pair p99 differences were −170, +340, and −50 ms from the lower bin edges. Omitting the second pair reversed the pooled p99 ordering to 410 ms embedded and 240 ms remote. The 3,781 samples had zero timestamp errors and overflows. They describe one deployment, and the sensitivity to period selection leaves the tail-latency effect open.
 
+The highest-p99 remote period had eight runner evaluations, with a maximum server handling time of 8.0 ms. The first remote period had a lower p99 and a higher maximum runner handling time of 24.0 ms. Every measured window overlapped a completed checkpoint. The checkpoint in the highest-p99 window took 1.02 seconds, and a checkpoint in an embedded window took 1.32 seconds. The archived latency histograms were captured at window boundaries, and the archived RocksDB samples omitted compaction gauges. This timing evidence leaves the cause of the tail variation unresolved.
+
 The largest gauge was 588 bytes. The 25 measured remote calls returned HTTP 200 with 7.5 ms p50, 21.4 ms p95, and 24.0 ms p99 runner handling time. Median and maximum re-encoded request sizes were about 62.3 and 104.7 KB. The runner used 4.3–18.4 millicores in remote periods and peaked at 55.4 MiB working set. Flink averaged 2.47 JVM cores across the 600-second observation. The measured join cache held 160 MiB of capacity and approximately 160 MiB of occupancy at the median. The median sampled cache miss fraction was 1.5%, and estimated live state peaked at about 280 MiB.
 
 All 73 decisions replayed exactly. The job completed 14 checkpoints with zero restores. Scaling stayed disabled, and scoped cleanup returned the worker lock.
+
+### Capture Q20 latency intervals
+
+The timestamped V2 gauge records the TaskManager clock when Flink samples its cumulative histogram. The collector emits newline-delimited JSON with a baseline per running roster, fresh intervals with per-subtask sample bounds, and gaps for unavailable data. Repeated REST reads of a cached gauge leave the baseline in place. A fresh gauge with an empty delta records a zero-sample interval. A roster change or a capture gap starts a new baseline.
+
+```bash
+python3 scripts/a4s/q8-latency.py capture-series "$FLINK_REST" "$JOB_ID" "$JOIN_VERTEX" \
+  --duration-sec 75 --interval-sec 5 > latency-series.jsonl
+```
+
+Use the updated probe JAR for interval capture. Earlier probe archives still work with `summarize`. Align checkpoints and runtime logs to each interval's `subtaskIntervalsMs`, and compare intervals contained in the intended evaluation windows. Use the same Flink `metrics.fetcher.update-interval` in both modes. The Flink 1.18 default is 10,000 ms. Faster REST polling can return the same cached gauge, so the TaskManager timestamps determine the available interval resolution.
+
+The local Kafka and RocksDB checkpoint fixture polled once per second with a two-second metric refresh. It recorded 14 fresh intervals and retained exactly seven latency samples before recovery and two afterward, with separate baselines for the two attempts. A fully populated timestamped gauge round-tripped through Flink's serializer at 42,792 bytes. The earlier matched Q8 scorecard reproduced byte for byte.
 
 ## Acceptance status and remaining work
 

@@ -2,9 +2,12 @@ import copy
 import runpy
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
-summarize = runpy.run_path(str(Path(__file__).with_name("q8-latency.py")))["summarize"]
+collector = runpy.run_path(str(Path(__file__).with_name("q8-latency.py")))
+summarize = collector["summarize"]
+timed_interval = collector["timed_interval"]
 
 
 def histogram(counts, invalid=0):
@@ -87,6 +90,61 @@ class LatencySummaryTest(unittest.TestCase):
                 change(window)
                 with self.assertRaises(ValueError):
                     summarize(self.before, window)
+
+    def make_timed(self):
+        for snapshot in (self.before, self.after):
+            snapshot["metric"] = "q20KafkaLatencyV2"
+            for sample in snapshot["histograms"].values():
+                sample.pop("binMs")
+                sample["overflowAtMs"] = 900_000
+                sample["segments"] = [[2_000, 10], [60_000, 100], [900_000, 1_000]]
+                sample["sampledAtMs"] = 100
+
+    def test_timed_interval_distinguishes_cached_reads_from_zero_output(self):
+        self.make_timed()
+        self.assertIsNone(timed_interval(self.before, self.after))
+        self.after["histograms"]["0"]["sampledAtMs"] = 200
+        self.assertIsNone(timed_interval(self.before, self.after))
+        self.after["histograms"]["1"]["sampledAtMs"] = 220
+        result = timed_interval(self.before, self.after)
+        self.assertEqual(result["subtaskIntervalsMs"], {"0": [100, 200], "1": [100, 220]})
+        self.assertEqual(result["latency"]["samples"], 0)
+        self.after["histograms"]["0"]["counts"]["9"] = 1
+        self.assertEqual(timed_interval(self.before, self.after)["latency"]["p99"]["lowerMs"], 90)
+
+    def test_timed_interval_rejects_invalid_sample_times_and_attempts(self):
+        self.make_timed()
+        changes = [
+            lambda window: window["histograms"]["0"].pop("sampledAtMs"),
+            lambda window: window["histograms"]["0"].update(sampledAtMs=99),
+            lambda window: window["histograms"]["0"]["counts"].update({"1": 101}),
+            lambda window: window["roster"].update({"0": [1, 2, "tm2"]}),
+        ]
+        for change in changes:
+            window = copy.deepcopy(self.after)
+            change(window)
+            with self.assertRaises(ValueError):
+                timed_interval(self.before, window)
+
+    def test_failed_poll_starts_new_baseline(self):
+        self.make_timed()
+        later = copy.deepcopy(self.after)
+        later["observedAtMs"] += 1
+        later["histograms"]["0"].update(sampledAtMs=200, counts={"1": 102})
+        later["histograms"]["1"].update(sampledAtMs=200)
+        trace = collector["capture_series"]
+        clock = [0]
+
+        def advance(seconds):
+            clock[0] += seconds
+
+        responses = mock.Mock(side_effect=[self.before, OSError("fetch failed"), self.after, later])
+        with mock.patch.dict(trace.__globals__, {"capture": responses}), \
+                mock.patch("time.monotonic", side_effect=lambda: clock[0]), \
+                mock.patch("time.sleep", side_effect=advance):
+            events = list(trace("http://127.0.0.1:8081", "job", "join", 4, 1))
+        self.assertEqual([event["event"] for event in events], ["baseline", "gap", "baseline", "interval"])
+        self.assertEqual(events[-1]["latency"]["samples"], 2)
 
 
 if __name__ == "__main__":

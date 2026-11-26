@@ -12,10 +12,11 @@ from urllib.request import urlopen
 
 
 METRIC = "q8AuctionLatencyV1"
+Q20_METRIC = "q20KafkaLatencyV2"
 BUCKET_LAYOUTS = {
     METRIC: ((120_000, 10),),
     "q20KafkaLatencyV1": ((900_000, 10),),
-    "q20KafkaLatencyV2": ((2_000, 10), (60_000, 100), (900_000, 1_000)),
+    Q20_METRIC: ((2_000, 10), (60_000, 100), (900_000, 1_000)),
 }
 
 
@@ -151,6 +152,57 @@ def summarize(before, after):
     }
 
 
+def sample_times(snapshot):
+    times = {task: value.get("sampledAtMs") for task, value in snapshot["histograms"].items()}
+    if not times or any(type(stamp) is not int or stamp <= 0 for stamp in times.values()):
+        raise ValueError("The latency gauge must provide TaskManager sample times")
+    return times
+
+
+def timed_interval(before, after):
+    """Describe an interval only when every sink gauge has advanced."""
+    if any(before[key] != after[key] for key in ("job", "vertex", "roster", "metric")):
+        raise ValueError("The latency capture changed identity or task attempts")
+    starts, ends = sample_times(before), sample_times(after)
+    if starts.keys() != ends.keys() or starts.keys() != before["roster"].keys():
+        raise ValueError("The sample times must cover the running sink roster")
+    for task, start in starts.items():
+        if ends[task] < start:
+            raise ValueError("A TaskManager sample time regressed")
+        if ends[task] == start and before["histograms"][task] != after["histograms"][task]:
+            raise ValueError("A latency gauge changed at the same sample time")
+    if any(starts[task] == ends[task] for task in starts):
+        return None
+    return {
+        "event": "interval", "job": after["job"], "vertex": after["vertex"], "metric": after["metric"],
+        "roster": after["roster"], "subtaskIntervalsMs": {task: [start, ends[task]] for task, start in starts.items()},
+        "observedAtMs": after["observedAtMs"], "latency": summarize(before, after),
+    }
+
+
+def capture_series(rest_url, job, vertex, duration_sec, interval_sec):
+    deadline = time.monotonic() + duration_sec
+    baseline = None
+    while (started := time.monotonic()) < deadline:
+        try:
+            current = capture(rest_url, job, vertex, Q20_METRIC)
+            times = sample_times(current)
+            if baseline is None or current["roster"] != baseline["roster"]:
+                baseline = current
+                yield {
+                    "event": "baseline", "job": job, "vertex": vertex, "metric": Q20_METRIC,
+                    "roster": current["roster"], "sampledAtMs": times, "observedAtMs": current["observedAtMs"],
+                }
+            elif (interval := timed_interval(baseline, current)) is not None:
+                baseline = current
+                yield interval
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            baseline = None
+            yield {"event": "gap", "job": job, "vertex": vertex, "metric": Q20_METRIC,
+                   "observedAtMs": time.time_ns() // 1_000_000, "error": str(error)}
+        time.sleep(max(0, min(deadline, started + interval_sec) - time.monotonic()))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="mode", required=True)
@@ -159,10 +211,28 @@ def main():
     capture_command.add_argument("job_id")
     capture_command.add_argument("vertex_id")
     capture_command.add_argument("--metric", choices=BUCKET_LAYOUTS, default=METRIC)
+    series_command = commands.add_parser("capture-series", help="record time-bounded Q20 latency intervals")
+    series_command.add_argument("rest_url")
+    series_command.add_argument("job_id")
+    series_command.add_argument("vertex_id")
+    series_command.add_argument("--duration-sec", required=True, type=int)
+    series_command.add_argument("--interval-sec", default=5, type=int)
     summarize_command = commands.add_parser("summarize")
     summarize_command.add_argument("before", type=Path)
     summarize_command.add_argument("after", type=Path)
     args = parser.parse_args()
+    if args.mode == "capture-series":
+        if args.duration_sec < 1 or args.interval_sec < 1:
+            parser.error("latency capture duration and interval must be positive seconds")
+        if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in (args.job_id, args.vertex_id)):
+            parser.error("job and vertex IDs must be 32 lowercase hexadecimal digits")
+        has_interval = False
+        for event in capture_series(args.rest_url, args.job_id, args.vertex_id, args.duration_sec, args.interval_sec):
+            print(json.dumps(event, sort_keys=True), flush=True)
+            has_interval |= event["event"] == "interval"
+        if not has_interval:
+            parser.exit(2, "No timestamped latency intervals were recorded\n")
+        return
     try:
         if args.mode == "capture":
             result = capture(args.rest_url, args.job_id, args.vertex_id, args.metric)
