@@ -339,7 +339,7 @@ A local Kafka and Flink test verified that the timed query kept all three origin
 
 The lab pilot `live-414743c5` used the rebuilt runtime on Java 11 and the v1 latency probe with one-in-64 sampling. The virtual API, broker, producer, Flink, operator, and runner were scoped to c167. Startup verified the exact image and JAR pins, an empty latency gauge, and `LogAppendTime` on the bid topic. The job completed three fixed-allocation observation windows in embedded, remote, remote order. Their join input rates were 9,000, 8,925, and 9,123 records/s. Their p95 Kafka-to-join latencies were 123.18, 178.32, and 236.52 seconds, with 3,850 valid samples and zero timestamp or overflow errors. All 32 recorded decisions replayed exactly. The last checkpoint observation showed 12 completed checkpoints and zero restores. The partial run leaves the performance comparison open.
 
-The fourth window stopped when Flink returned an empty gauge value. The last valid v1 gauge was 63,657 bytes. Flink's actual metric serializer omitted the same gauge after a test added 400 occupied bins and grew it to 67,657 bytes. A fully populated v2 gauge with maximum positive counts serialized and deserialized exactly at 42,764 bytes. The collector still reads archived v1 captures. The run-owned namespace was removed and the shared worker lock was available after teardown. A complete lab run with the bounded probe remains open.
+The fourth window stopped when Flink returned an empty gauge value. The last valid v1 gauge was 63,657 bytes. Flink's actual metric serializer omitted the same gauge after a test added 400 occupied bins and grew it to 67,657 bytes. A fully populated v2 gauge with maximum positive counts serialized and deserialized exactly at 42,764 bytes. The collector still reads archived v1 captures. The run-owned namespace was removed and the shared worker lock was available after teardown.
 
 ### Exclusive-slot Kafka Q20 comparison on c167
 
@@ -369,6 +369,25 @@ The runner handled 51 successful evaluation requests within the remote measureme
 
 All 111 embedded and remote recordings replayed byte for byte. Replaying copies with the 16-core budget supplied rejected all 57 oversized candidates and retained the two applied memory-only recommendations. The branch now publishes that constraint when verified applied slots support the accounting. The change passed all 46 focused `ScalingExecutorTest` cases, including a case that omits slot group IDs as the lab REST response did. The benchmark continued on the pinned binaries and the new adapter constraint received local verification.
 
+### Full timed Q20 comparison with the bounded gauge
+
+Run `live-a7afda59` used the rebuilt Flink distribution, operator, and runner from `14ce6b95` and the bounded probe from `2a248155`. The query, broker, and producer used the pilot's input settings with one-in-64 sampling. All run-owned pods stayed on c167. The JobManager ran Java 11, and the TaskManager mapping matched the pinned RocksDB library. Three TaskManagers registered 12 cores and 2,304 MiB of total managed capacity. Across the six windows the job held ten occupied slots, with the same three applied vertex profiles and task roster. Scaling stayed disabled through the 600-second workload.
+
+| Period | Mode | Source output records/s | Join input records/s | Join output records/s | Latency samples | p50 / p95 / p99 lower bin edge (s) |
+| ---: | --- | ---: | ---: | ---: | ---: | --- |
+| 1 | Embedded | 9,763 | 9,979 | 1,982 | 1,544 | 102 / 117 / 119 |
+| 2 | Remote | 9,165 | 9,356 | 1,566 | 1,220 | 157 / 173 / 176 |
+| 3 | Remote | 8,438 | 8,438 | 1,743 | 1,358 | 210 / 230 / 234 |
+| 4 | Embedded | 7,620 | 7,773 | 1,382 | 1,078 | 282 / 292 / 294 |
+| 5 | Embedded | 6,805 | 6,692 | 947 | 738 | 334 / 359 / 362 |
+| 6 | Remote | 6,266 | 6,346 | 1,537 | 1,197 | 400 / 413 / 415 |
+
+Duration-weighted join input was 8,148 records/s embedded and 8,046 remote, a remote change of −1.2%. The adjacent pairs measured −6.3%, +8.5%, and −5.2%. The pooled p95 lower bin edges were 353 seconds embedded and 408 seconds remote. Period p95 rose throughout the run and was higher in the later window of each pair, including the pair with embedded second. At terminal capture, committed offsets left 16.84 million bids and 1.09 million auctions in Kafka. The growing lag and a single deployment leave steady-state throughput and the effect of evaluation mode on latency open.
+
+The six windows recorded 7,135 valid latency samples without timestamp errors or overflow. The largest gauge was 8,878 bytes. All 64 recorded decisions replayed exactly, and all 23 measured runner calls returned HTTP 200. Runner handling took 6.9 ms p50, 23.9 ms p95, and 25.7 ms p99. Re-encoded requests were 73,919 bytes at the median and 104,452 bytes at the maximum. The runner used 4.1–12.8 millicores in remote periods, and its peak observed working set was 52.8 MiB. Flink averaged 1.79 JVM cores across the full observation window. The median join cache occupancy was approximately 160 MiB and the median sampled cache miss fraction was 3.5%. This capture had no measured block-cache capacity gauge.
+
+Flink completed 16 checkpoints with zero restores. Scoped cleanup passed and returned the worker lock. The Figure 10 rendering retained the missing values in its 601 release-aligned rows. The renderer used finite samples to set axis limits.
+
 ## Acceptance status and remaining work
 
 | Status | Evidence and scope |
@@ -376,6 +395,6 @@ All 111 embedded and remote recordings replayed byte for byte. Replaying copies 
 | Verified | The independent Maven build, packaged runner, Kubernetes Service smoke, and standalone CI exercise the same v1 evaluation path without Flink. Embedded and HTTP evaluation agree on matched inputs. The live Q8 and Q20 captures reproduce through offline replay. |
 | Verified | Local Flink recovered RocksDB state at a different parallelism and preserved the Kafka transactional output oracle. Live Q20 restored checkpoints during memory-only updates. Runner failure, stale recommendations, and incomplete or uncommitted overrides were tested separately. |
 | Implemented, partially verified | The rebuilt Q8 release carried the configured exclusive-slot CPU quota, per-source backlog, and join telemetry in every evaluation. The live Kafka workload uses a blackhole sink, so the deterministic committed-output oracle has only been exercised locally. |
-| Observed performance differences | The adaptive remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. Their allocations diverged. Two earlier fixed-allocation Q8 deployments measured remote join input 6.2% and 0.7% lower. The rebuilt release measured 1.3% higher in one deployment, with variable paired latency. The 5% steady-state throughput and latency criteria remain open. The archived embedded and remote Q20 measurements first reached the initiating throughput targets about 42 seconds after checkpoint restore in both deployments. |
+| Observed performance differences | The adaptive remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. Their allocations diverged. Two earlier fixed-allocation Q8 deployments measured remote join input 6.2% and 0.7% lower. The rebuilt release measured 1.3% higher in one Q8 deployment and 1.2% lower in one Q20 deployment. Latency varied across Q8 pairs and increased with run time in Q20. The 5% steady-state throughput and latency criteria remain open. The archived embedded and remote Q20 measurements first reached the initiating throughput targets about 42 seconds after checkpoint restore in both deployments. |
 | Platform dependencies | The Flink adapter supplies demand from the existing Flink evaluator and consumes the JobManager's aggregate `scaledMrc`. The operator persists one conditional Justin target at a time and confirms the running allocation before recording it in deployment status. Runtime and operator verification use local fixtures. |
 | Unsupported in v1 | Physical placement, a calibrated migration cost model, and a verified Flink 2.x or ForSt integration remain outside the current implementation. The optimizer checks a packing when the snapshot supplies worker capacities. Online cost calibration and learned models have extension points and would need their own data and qualification. See the [future adapter guide](a4s-standalone.md#native-instrumentation-and-future-adapters). |
