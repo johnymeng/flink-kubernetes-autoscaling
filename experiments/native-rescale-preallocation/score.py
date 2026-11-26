@@ -98,6 +98,7 @@ def score_decision(decision, generations, intervals):
     def first(event):
         return next(iter(events.get(event, [])), None)
 
+    preparation_start = first("PREPARATION_STARTED")
     restart = first("RESTART_START")
     running = first("ALL_TARGET_TASKS_RUNNING")
     ready = first("PREPARATION_READY")
@@ -126,7 +127,12 @@ def score_decision(decision, generations, intervals):
         "generation": generation,
         "result": outcome,
         "stage_timestamps_ms": events,
-        "preparation_seconds": difference(first("PREPARATION_STARTED"), first("PREPARATION_COMMITTED")),
+        "preparation_seconds": difference(preparation_start, first("PREPARATION_COMMITTED")),
+        "old_graph_positive_intervals_during_preparation": sum(
+            1 for start, end, _, rate in intervals
+            if preparation_start is not None and restart is not None
+            and preparation_start <= start < end <= restart and rate > 0
+        ),
         "time_to_ready_seconds": difference(first("RESOURCES_DECLARED"), ready),
         "decision_to_all_running_seconds": difference(decision_ms, running),
         "old_task_termination_seconds": difference(restart, old_terminated),

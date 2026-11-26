@@ -33,7 +33,7 @@ The observer verifies the effective feature setting and initial profiles before 
 ## Score both arms consistently
 
 ```bash
-python3 experiments/native-rescale-preallocation/score.py   "$RUN_EVIDENCE" "$JOBMANAGER_LOG" > "$RUN_EVIDENCE/timings.json"
+python3 experiments/native-rescale-preallocation/score.py "$RUN_EVIDENCE" "$JOBMANAGER_LOG" > "$RUN_EVIDENCE/timings.json"
 ```
 
 The scorer matches the manual request against the JobManager event timestamps and measures record progress only on comparable task attempts. It marks unmatched requests and unavailable phase observations in the output.
