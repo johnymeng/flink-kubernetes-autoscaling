@@ -13,6 +13,7 @@ import org.apache.flink.api.java.utils.ParameterTool;
 import org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend;
 import org.apache.flink.streaming.api.TimeCharacteristic;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.CheckpointConfig;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.AssignerWithPeriodicWatermarks;
@@ -54,20 +55,27 @@ public class Query8 {
         final int auctionSrcRate = params.getInt("auction-srcRate", 50000);
 
         final int personSrcRate = params.getInt("person-srcRate", 30000);
+        final boolean exclusiveSlots = params.getBoolean("a4s-exclusive-slots", false);
 
         env.setParallelism(params.getInt("p-window", 1));
 
         logger.debug(String.valueOf(params.getInt("auction-srcRate")));
 
-        DataStream<Person> persons = env.addSource(new PersonSourceFunction(personSrcRate))
+        SingleOutputStreamOperator<Person> personSource = env.addSource(new PersonSourceFunction(personSrcRate))
                 .name("Custom Source: Persons")
-                .setParallelism(params.getInt("p-person-source", 1))
-                .assignTimestampsAndWatermarks(new PersonTimestampAssigner());
+                .setParallelism(params.getInt("p-person-source", 1));
+        if (exclusiveSlots) {
+            personSource.slotSharingGroup("q8-person");
+        }
+        DataStream<Person> persons = personSource.assignTimestampsAndWatermarks(new PersonTimestampAssigner());
 
-        DataStream<Auction> auctions = env.addSource(new AuctionSourceFunction(auctionSrcRate))
+        SingleOutputStreamOperator<Auction> auctionSource = env.addSource(new AuctionSourceFunction(auctionSrcRate))
                 .name("Custom Source: Auctions")
-                .setParallelism(params.getInt("p-auction-source", 1))
-                .assignTimestampsAndWatermarks(new AuctionTimestampAssigner());
+                .setParallelism(params.getInt("p-auction-source", 1));
+        if (exclusiveSlots) {
+            auctionSource.slotSharingGroup("q8-auction");
+        }
+        DataStream<Auction> auctions = auctionSource.assignTimestampsAndWatermarks(new AuctionTimestampAssigner());
 
         // SELECT Rstream(P.id, P.name, A.reserve)
         // FROM Person [RANGE 1 HOUR] P, Auction [RANGE 1 HOUR] A
@@ -94,6 +102,9 @@ public class Query8 {
                         });
 
 
+        if (exclusiveSlots) {
+            joined.getTransformation().setSlotSharingGroup("q8-join");
+        }
         GenericTypeInfo<Object> objectTypeInfo = new GenericTypeInfo<>(Object.class);
         joined.addSink(new DiscardingSink<>());
 
