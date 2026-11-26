@@ -30,6 +30,25 @@ The JNI trace made 512 deterministic reads across two databases sharing one cach
 
 The local ELF requires `GLIBC_2.38`. The lab image build targets Ubuntu 22.04 and must use the repository's matching JNI build path.
 
+### Native profiler overhead on resident RocksDB reads
+
+The original and extracted JNI builds above read an identical workload pinned to one local CPU. Each trial used a fresh JVM and warmed a 64 MiB RocksDB block cache before timing 1,310,720 point reads. The SST contained 32,768 keys with 1,000-byte values. The driver checked every returned value and observed one data-block hit per read with zero misses. The two series used separate RAM-backed fixtures. Each series rotated the six combinations of binary and sampling rate through all six run positions, giving 12 pairs per sampling rate across both series.
+
+| SHARDS sampling | Original CPU ns/read | Extracted CPU ns/read | Paired CPU change, median and range | Original / extracted anonymous RSS growth |
+| --- | ---: | ---: | ---: | ---: |
+| Off | 1,695 | 1,741 | +2.50% (−2.06% to +6.61%) | 678 / 686 KiB |
+| 2% | 1,797 | 1,812 | +2.21% (−0.73% to +5.15%) | 816 / 810 KiB |
+| 100% | 2,135 | 2,199 | +3.57% (−2.69% to +16.41%) | 6,400 / 6,392 KiB |
+
+The read-thread CPU time and process-wide anonymous RSS deltas are medians. Both binaries selected 25,200 of the 1,310,720 timed accesses in each 2% trial. The paired CPU difference at 2% was within the range observed with profiling off. Full sampling was more variable. The experiment isolates resident point reads and provides no estimate of end-to-end Flink performance or allocator-only memory use.
+
+To reproduce the six-block comparison on Linux, use the matched JNI JARs with their native dependencies available on `LD_LIBRARY_PATH`. Pass an allowed CPU ID and a writable scratch directory with capacity for the fixture. The launcher records JAR hashes, the SST checksum, the JDK version and per-trial measurements.
+
+```bash
+TMPDIR=/dev/shm scripts/a4s/measure-native-shards.sh \
+  "$ORIGINAL_JNI_JAR" "$EXTRACTED_JNI_JAR" "$OUTPUT_DIR" "$CPU_ID"
+```
+
 ## Local control-plane overhead
 
 A Linux x86-64 VM ran a Java 17 loopback client against the standalone JAR using the generic Q8-shaped JSON example. The request and response bodies were 1,583 and 844 bytes. The client warmed each path, then measured three repetitions with 5,000 embedded evaluations and 100 HTTP round trips per repetition. HTTP samples include serialization, process scheduling and loopback. All plans matched the embedded output.
@@ -122,8 +141,13 @@ The runner handled 51 successful evaluation requests within the remote measureme
 
 All 111 embedded and remote recordings replayed byte for byte. Replaying copies with the 16-core budget supplied rejected all 57 oversized candidates and retained the two applied memory-only recommendations. The branch now publishes that constraint when verified applied slots support the accounting. The change passed all 46 focused `ScalingExecutorTest` cases, including a case that omits slot group IDs as the lab REST response did. The benchmark continued on the pinned binaries and the new adapter constraint received local verification.
 
-## Remaining work
+## Acceptance status and remaining work
 
-The fixed model still depends on Flink's existing demand evaluation and on aggregate MRC observations in the first adapter. It takes the pending-reconciliation and live resource inputs from the operator. An atomic Flink execution-generation precondition for Justin writes would close the remaining check-to-use interval. The current greedy optimizer checks job budgets and verifies a packing when worker capacities are supplied. It returns no physical placement plan.
-
-There is no verified Flink 2.x or ForSt adapter, online model port, learned model or concrete migration model. A future adapter must prove positive platform capabilities and separately validate stateful recovery, actual cache geometry, and performance calibration.
+| Status | Evidence and scope |
+| --- | --- |
+| Verified | The independent Maven build, packaged runner, Kubernetes Service smoke, and standalone CI exercise the same v1 evaluation path without Flink. Embedded and HTTP evaluation agree on matched inputs. The live Q8 and Q20 captures reproduce through offline replay. |
+| Verified | Local Flink recovered RocksDB state at a different parallelism and preserved the Kafka transactional output oracle. Live Q20 restored checkpoints during memory-only updates. Runner failure, stale recommendations, and incomplete or uncommitted overrides were tested separately. |
+| Implemented, partially verified | The adapter now includes the verified exclusive-slot CPU quota in the evaluation request. Focused tests and replay cover this change. The lab binaries used the preceding adapter with the final operator-side quota check. The live Kafka workload uses a blackhole sink, so the deterministic committed-output oracle has only been exercised locally. |
+| Observed performance differences | The remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. The Q8 runs chose different parallelism, and the Q20 runs applied different reservations and accumulated backlog. The transport-only steady-state target, end-to-end record latency percentiles and time to recover target throughput remain open. |
+| Platform dependencies | The Flink adapter supplies demand from the existing Flink evaluator and consumes the JobManager's aggregate `scaledMrc`. The operator supplies pending reconciliation and resource information. An atomic execution-generation precondition for Justin writes would close the remaining check-to-use interval. |
+| Unsupported in v1 | Physical placement, a calibrated migration cost model, and a verified Flink 2.x or ForSt integration remain outside the current implementation. The optimizer checks a packing when the snapshot supplies worker capacities. Online cost calibration and learned models have extension points and would need their own data and qualification. See the [future adapter guide](a4s-standalone.md#native-instrumentation-and-future-adapters). |
