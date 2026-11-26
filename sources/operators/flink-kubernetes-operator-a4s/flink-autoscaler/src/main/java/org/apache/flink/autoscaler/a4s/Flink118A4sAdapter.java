@@ -149,7 +149,7 @@ public final class Flink118A4sAdapter {
                             useCache ? OperatorMetrics.CapacityAxis.LEGACY_AGGREGATE_BYTES : null,
                             points,
                             null,
-                            telemetry(metrics, profile)));
+                            telemetry(metrics, profile, current)));
         }
         double baseMiB = conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
         if (!Double.isFinite(baseMiB) || baseMiB < 0 || baseMiB > 600) {
@@ -255,8 +255,13 @@ public final class Flink118A4sAdapter {
     }
 
     private static OperatorTelemetry telemetry(
-            Map<ScalingMetric, EvaluatedScalingMetric> metrics, ResourceProfile profile) {
+            Map<ScalingMetric, EvaluatedScalingMetric> metrics,
+            ResourceProfile profile,
+            int parallelism) {
         Double busy = finite(metrics.get(ScalingMetric.LOAD));
+        long bytesPerSlot = profile.getTotalMemory().getBytes();
+        Long totalSlotBytes =
+                bytesPerSlot <= Long.MAX_VALUE / parallelism ? bytesPerSlot * parallelism : null;
         return new OperatorTelemetry(
                 finite(metrics.get(ScalingMetric.INPUT_RATE)),
                 finite(metrics.get(ScalingMetric.OUTPUT_RATE)),
@@ -265,8 +270,8 @@ public final class Flink118A4sAdapter {
                 null,
                 null,
                 null,
-                null,
-                profile.getTotalMemory().getBytes(),
+                totalSlotBytes,
+                bytesPerSlot,
                 null,
                 null,
                 null,

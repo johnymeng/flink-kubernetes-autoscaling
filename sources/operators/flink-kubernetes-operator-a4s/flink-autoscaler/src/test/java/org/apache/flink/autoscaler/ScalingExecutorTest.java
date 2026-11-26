@@ -1496,6 +1496,13 @@ public class ScalingExecutorTest {
 
         assertThat(request.constraints.cpuBudgetCores)
                 .isEqualTo(publishBudget ? configuredQuota : null);
+        long bytesPerSlot = profile.getTotalMemory().getBytes();
+        assertThat(request.snapshot.operators)
+                .allSatisfy(operator -> {
+                    assertThat(operator.telemetry.allocatedMemoryPerTaskBytes).isEqualTo(bytesPerSlot);
+                    assertThat(operator.telemetry.allocatedTotalMemoryBytes)
+                            .isEqualTo(bytesPerSlot * operator.current.parallelism);
+                });
         assertThat(new A4sPolicy().evaluate(request).action)
                 .isEqualTo(publishBudget
                         ? ScalingPlan.Action.INFEASIBLE_CONFIGURATION
