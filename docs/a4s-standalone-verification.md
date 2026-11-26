@@ -24,6 +24,12 @@ Two local regressions reproduced acceptance of inconsistent forecast metadata an
 
 All 19 standalone Maven tests and 49 Flink scaling-executor cases passed. The executor rejected a loopback runner reply with an unsupported migration estimate and kept scaling history and both override maps empty. The offline Flink test used the established formatter and Checkstyle skip flags. The new runner replayed all 209 archived Q8 and Q20 decisions exactly, and the 89 actionable plans passed local validation with their recorded inputs and clocks.
 
+### Resume after a standalone runner outage
+
+A local Flink 1.18 MiniCluster completed a RocksDB checkpoint after 120 deterministic records. The test killed the dedicated runner JVM and verified that its loopback port refused connections. The production scaling executor received a connection failure and recorded one evaluation with a null recommendation. The local autoscaler store kept scaling history, pending intent and both override maps empty. Flink retained the same execution token and resource requirements.
+
+A replacement runner JVM bound the same endpoint. A later evaluation led the production operator service to apply the conditional Justin update and recover the job at parallelism two with its original slot profiles. The fixture dropped the reply after acceptance and observed completion without a second PUT. It verified all 200 expected IDs and keyed counts. The runner replayed both successful local decisions and all 211 recorded decisions from the two timestamped Q8 deployments and paced Q20. This is local recovery evidence with the in-memory autoscaler store and live Flink scheduler.
+
 ### Source backlog transport
 
 The Q20 archive has 222 source entries across 111 A4S requests, all with unavailable snapshot backlog. The operator was reading the optional REST field but dropped it before constructing the request. The adapter now carries the latest verified count as a `Long` outside the persisted rate history. A missing or invalid observation on the next collection leaves the next snapshot field unavailable. Flink's existing lag input to the sizing policy remains available through the ordinary metric collector.
