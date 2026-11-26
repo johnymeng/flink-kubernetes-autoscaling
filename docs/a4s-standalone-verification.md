@@ -315,6 +315,28 @@ Each image argument takes a digest-pinned reference. Before live runs, verify th
 
 The offline preflight rendered and checked all nine job configurations. The local Helm render confirmed each operator's watched namespace, digest and recording settings. It used historical image receipts as fixture inputs. Use a common runtime built with support for the renderer's `pipeline.exclusive-vertex-slots` setting. The exact Q20 SQL workload produced one shared slot group and returned zero applied profiles with the setting disabled. With it enabled, all three vertices returned confirmed profiles in a local Flink run against an empty Kafka broker. The setting leaves default submissions alone and rejects a shared group with an explicit resource budget before modifying the graph.
 
+### Optional Q20 record latency
+
+The timed SQL variant samples the elapsed time from the bid record's Kafka append timestamp to the joined row reaching the discard sink. Set `message.timestamp.type=LogAppendTime` on the isolated bid topic before producing records and verify that the broker and TaskManager clocks agree. The original SQL and producer remain available in the workload JAR. The timed query carries one extra timestamp through the join. Start a fresh checkpoint lineage and use the same probe JAR and sampling rate in every measured arm.
+
+Build the workload overlay with Java 11 or later. Pass `--latency-probe` to the Q20 renderer and pin all arms to the workload image whose `nexmark-flink-0.3-SNAPSHOT.jar` contains this overlay. The renderer selects `q20_latency_unique` for every arm.
+
+```bash
+python3 scripts/a4s/build-q20-latency.py "$Q20_BASE_JAR" "$Q20_TIMED_JAR" \
+  --base-sha256 "$Q20_BASE_SHA256" --flink-classpath "$FLINK_HOME/lib/*"
+```
+
+Capture the join vertex at both ends of each observation window. The script verifies the running subtask roster and rejects a window that spans an attempt change. After recovery, start a new window with the new roster. The histogram samples one out of 1,024 joined rows by default. It reports 10 ms bins and a separate overflow bucket from 900 seconds.
+
+```bash
+python3 scripts/a4s/q8-latency.py capture "$FLINK_REST" "$JOB_ID" "$JOIN_VERTEX" \
+  --metric q20KafkaLatencyV1 > before.json
+# Capture after.json with the same command at the end of the observation window.
+python3 scripts/a4s/q8-latency.py summarize before.json after.json
+```
+
+A local Kafka and Flink test verified that the timed query kept all three original Q20 vertex IDs. The broker replaced deliberately old producer timestamps with its append time. The query recorded exactly seven expected joined rows in the first attempt. After replacing the TaskManager, Flink restored one RocksDB checkpoint and joined two new bids against the restored auction without replaying the previous outputs into the new window. Both windows had zero invalid or overflow samples. The collector rejected the window spanning the old and new attempts. The timed variant still needs matched lab latency measurements.
+
 ### Exclusive-slot Kafka Q20 comparison on c167
 
 The benchmark used the exact `q20_unique` Kafka SQL query, one isolated KRaft broker per arm, 24 partitions per topic, and a common producer capped at 40,000 mixed events/s and 24 million events starting at ID 1. The 600-second windows used one worker and a 16-slot cap. The two source vertices began at parallelism 6 and 3, and the join began at 1. Each applied slot profile reserved one CPU core and 192 MiB managed memory. Flink ran one-minute checkpoints in exactly-once mode and used `last-state` upgrades with deployment memory tuning disabled. The common runtime JAR had SHA-256 `eb1d07e26430eb5bc6ec3acf29724015bae943f0899b23859ff782b01c8bdfc8`. The operators were built from `a285fcf4453d38feff9c80b53bf57c8207d30930` and `86d298c1843ae2e75d19da50dc4a0277dc65d930`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capture and combine the opt-in DataStream Q8 sink latency gauges."""
+"""Capture and combine the opt-in Q8 and Q20 sink latency gauges."""
 
 import argparse
 import json
@@ -13,11 +13,11 @@ from urllib.request import urlopen
 
 METRIC = "q8AuctionLatencyV1"
 BIN_MS = 10
-OVERFLOW_AT_MS = 120_000
-OVERFLOW_BIN = OVERFLOW_AT_MS // BIN_MS
+OVERFLOW_MS = {METRIC: 120_000, "q20KafkaLatencyV1": 900_000}
 
 
-def capture(rest_url, job, vertex):
+def capture(rest_url, job, vertex, gauge=METRIC):
+    overflow_at_ms = OVERFLOW_MS[gauge]
     if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in (job, vertex)):
         raise ValueError("Job and vertex IDs must be 32 lowercase hexadecimal digits")
 
@@ -39,7 +39,7 @@ def capture(rest_url, job, vertex):
             )
             or sorted(task["subtask"] for task in subtasks) != list(range(details["parallelism"]))
         ):
-            raise ValueError("Q8 latency requires a complete running sink roster")
+            raise ValueError("Latency capture requires a complete running sink roster")
         return {
             str(task["subtask"]): [task["attempt"], task["start-time"], task["taskmanager-id"]]
             for task in subtasks
@@ -48,45 +48,53 @@ def capture(rest_url, job, vertex):
     vertex_path = f"/jobs/{job}/vertices/{vertex}"
     metrics_path = vertex_path + "/metrics"
     before = roster()
-    ids = [metric["id"] for metric in fetch(metrics_path) if metric["id"].endswith("." + METRIC)]
+    ids = [metric["id"] for metric in fetch(metrics_path) if metric["id"].endswith("." + gauge)]
     if not ids:
-        raise ValueError("The Q8 latency gauge is unavailable for this vertex")
+        raise ValueError(f"The latency gauge {gauge} is unavailable for this vertex")
     response = fetch(metrics_path + "?" + urlencode({"get": ",".join(ids)}))
     observed = {}
     for metric in response:
         task = metric["id"].partition(".")[0]
         if metric["id"] not in ids or task in observed or task not in before:
-            raise ValueError("Ambiguous Q8 latency gauge identity")
+            raise ValueError("Ambiguous latency gauge identity")
         value = json.loads(metric["value"])
-        validate_histogram(value, before[task][0])
+        validate_histogram(value, before[task][0], overflow_at_ms)
         observed[task] = value
     observed_at = time.time_ns() // 1_000_000
     if before != roster() or observed.keys() != before.keys():
-        raise ValueError("Q8 sink attempt changed or gauge coverage was incomplete")
-    return {
+        raise ValueError("Sink attempt changed or gauge coverage was incomplete")
+    result = {
         "job": job, "vertex": vertex, "observedAtMs": observed_at,
         "roster": before, "histograms": observed,
     }
+    if gauge != METRIC:
+        result["metric"] = gauge
+    return result
 
 
-def validate_histogram(value, attempt):
+def validate_histogram(value, attempt, overflow_at_ms):
     if (
         type(value["attempt"]) is not int or value["attempt"] != attempt
-        or value["binMs"] != BIN_MS or value["overflowAtMs"] != OVERFLOW_AT_MS
+        or value["binMs"] != BIN_MS or value["overflowAtMs"] != overflow_at_ms
         or type(value["invalid"]) is not int or value["invalid"] < 0
     ):
-        raise ValueError("Q8 latency gauge does not match the running attempt or v1 layout")
+        raise ValueError("Latency gauge does not match the running attempt or expected layout")
     for bin_id, count in value["counts"].items():
         bin_index = int(bin_id)
-        if (str(bin_index) != bin_id or not 0 <= bin_index <= OVERFLOW_BIN
+        if (str(bin_index) != bin_id or not 0 <= bin_index <= overflow_at_ms // BIN_MS
                 or type(count) is not int or count <= 0):
-            raise ValueError("Invalid Q8 latency bucket")
+            raise ValueError("Invalid latency bucket")
 
 
 def summarize(before, after):
+    gauge = before.get("metric", METRIC)
+    if gauge not in OVERFLOW_MS or after.get("metric", METRIC) != gauge:
+        raise ValueError("The latency snapshots must describe the same supported gauge")
+    overflow_at_ms = OVERFLOW_MS[gauge]
+    overflow_bin = overflow_at_ms // BIN_MS
     if (any(before[key] != after[key] for key in ("job", "vertex", "roster"))
             or not before["roster"] or before["observedAtMs"] >= after["observedAtMs"]):
-        raise ValueError("The two Q8 snapshots must cover one ordered, unchanged sink roster")
+        raise ValueError("The two snapshots must cover one ordered, unchanged sink roster")
     if any(snapshot["histograms"].keys() != before["roster"].keys() for snapshot in (before, after)):
         raise ValueError("The two snapshots must cover every running subtask")
 
@@ -95,15 +103,15 @@ def summarize(before, after):
     for task, (attempt, _, _) in before["roster"].items():
         old, new = (snapshot["histograms"][task] for snapshot in (before, after))
         for value in (old, new):
-            validate_histogram(value, attempt)
+            validate_histogram(value, attempt, overflow_at_ms)
         if new["invalid"] < old["invalid"]:
-            raise ValueError("The Q8 clock error counter reset")
+            raise ValueError("The clock error counter reset")
         invalid += new["invalid"] - old["invalid"]
         bins = old["counts"] | new["counts"]
         for bin_id in bins:
             delta = new["counts"].get(bin_id, 0) - old["counts"].get(bin_id, 0)
             if delta < 0:
-                raise ValueError("The Q8 latency histogram reset")
+                raise ValueError("The latency histogram reset")
             totals[int(bin_id)] += delta
 
     count = sum(totals.values())
@@ -117,12 +125,12 @@ def summarize(before, after):
             if rank <= 0:
                 return {
                     "lowerMs": index * BIN_MS,
-                    "upperMs": None if index == OVERFLOW_BIN else (index + 1) * BIN_MS - 1,
+                    "upperMs": None if index == overflow_bin else (index + 1) * BIN_MS - 1,
                 }
         raise AssertionError("The latency rank exceeds the recorded sample count")
 
     return {
-        "samples": count, "invalidClockSamples": invalid, "overflowSamples": totals[OVERFLOW_BIN],
+        "samples": count, "invalidClockSamples": invalid, "overflowSamples": totals[overflow_bin],
         "p50": percentile(50), "p95": percentile(95), "p99": percentile(99),
     }
 
@@ -134,17 +142,18 @@ def main():
     capture_command.add_argument("rest_url")
     capture_command.add_argument("job_id")
     capture_command.add_argument("vertex_id")
+    capture_command.add_argument("--metric", choices=OVERFLOW_MS, default=METRIC)
     summarize_command = commands.add_parser("summarize")
     summarize_command.add_argument("before", type=Path)
     summarize_command.add_argument("after", type=Path)
     args = parser.parse_args()
     try:
         if args.mode == "capture":
-            result = capture(args.rest_url, args.job_id, args.vertex_id)
+            result = capture(args.rest_url, args.job_id, args.vertex_id, args.metric)
         else:
             result = summarize(json.loads(args.before.read_text()), json.loads(args.after.read_text()))
     except (KeyError, OSError, TypeError, ValueError) as error:
-        parser.exit(2, f"Q8 latency measurement failed: {error}\n")
+        parser.exit(2, f"Latency measurement failed: {error}\n")
     print(json.dumps(result, sort_keys=True))
 
 

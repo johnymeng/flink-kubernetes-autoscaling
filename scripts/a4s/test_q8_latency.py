@@ -40,6 +40,21 @@ class LatencySummaryTest(unittest.TestCase):
         self.assertEqual(summary["samples"], 0)
         self.assertIsNone(summary["p99"])
 
+    def test_q20_latency_uses_its_own_overflow_bucket(self):
+        for snapshot in (self.before, self.after):
+            snapshot["metric"] = "q20KafkaLatencyV1"
+            for gauge in snapshot["histograms"].values():
+                gauge["overflowAtMs"] = 900_000
+        self.after["histograms"]["0"]["counts"].update({"80000": 10, "90000": 1})
+        summary = summarize(self.before, self.after)
+        self.assertEqual(summary["samples"], 11)
+        self.assertEqual(summary["overflowSamples"], 1)
+        self.assertEqual(summary["p50"], {"lowerMs": 800_000, "upperMs": 800_009})
+        self.assertEqual(summary["p99"], {"lowerMs": 900_000, "upperMs": None})
+        self.after.pop("metric")
+        with self.assertRaises(ValueError):
+            summarize(self.before, self.after)
+
     def test_rejects_resets_and_incomplete_or_changed_attempts(self):
         changes = [
             ("reset", lambda window: window["histograms"]["0"]["counts"].clear()),

@@ -61,6 +61,8 @@ def render_job(directory, run_id, args):
     spec["image"] = args.workload_image
     job_args = spec["job"]["args"]
     job_args[job_args.index("--bootstrap-servers") + 1] = args.bootstrap_servers
+    if args.latency_probe:
+        job_args[job_args.index("--query") + 1] = "q20_latency_unique"
     selectors = (
         ("jobManager", args.jobmanager_node),
         ("taskManager", args.taskmanager_node),
@@ -134,6 +136,8 @@ def main():
     parser.add_argument("--jobmanager-node", required=True)
     parser.add_argument("--taskmanager-node", required=True)
     parser.add_argument("--checkpoint-interval", default="1m")
+    parser.add_argument("--latency-probe", action="store_true",
+                        help="select q20_latency_unique from an instrumented workload image")
     args = parser.parse_args()
     if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?", args.prefix):
         parser.error("--prefix must be a DNS label of up to 40 characters")
