@@ -146,6 +146,19 @@ def running_roster(frame):
     return roster
 
 
+def score_timed_latency(frames, start, end, sample_times, timed_interval):
+    """Use the widest histogram interval entirely inside the measurement window."""
+    eligible = []
+    for index, frame in enumerate(frames):
+        if index:
+            timed_interval(frames[index - 1], frame)
+        if all(start <= stamp <= end for stamp in sample_times(frame).values()):
+            eligible.append(frame)
+    if len(eligible) < 2:
+        return None
+    return timed_interval(eligible[0], eligible[-1])
+
+
 def score(bundle, latency_script):
     arm = bundle / "scout"
     paths = sorted((arm / "crossover").glob("[0-9][0-9]-*"))
@@ -157,7 +170,8 @@ def score(bundle, latency_script):
             pod_samples = list(map(json.loads, stream))
     spec = read(bundle / "execution-spec.json")
     assert (arm / "crossover/complete").is_file() and len(paths) == len(spec["crossover_order"])
-    merge_latency = runpy.run_path(str(latency_script))["summarize"]
+    latency_tools = runpy.run_path(str(latency_script))
+    merge_latency = latency_tools["summarize"]
     decisions, all_periods = set(), []
     observed_intervals = []
     admission = arm / "admission/confirmed-applied-profiles.json"
@@ -219,6 +233,15 @@ def score(bundle, latency_script):
             "cacheMissFraction": misses / (hits + misses)
             if hits is not None and misses is not None and hits + misses > 0 else None,
         }
+        timed_path = path / "latency-timed-snapshots.json"
+        if timed_path.is_file():
+            frames = read(timed_path)
+            if len(frames) < 2 or frames[0] != before["latency"] or frames[-1] != after["latency"]:
+                raise ValueError(f"Latency series endpoints differ from the Q8 window {path.name}")
+            summary["timestampAlignedLatency"] = score_timed_latency(
+                frames, planned["observeFromMs"], planned["observeToMs"],
+                latency_tools["sample_times"], latency_tools["timed_interval"],
+            )
         if pod_samples:
             summary["podResources"] = pod_resources_by_period(pod_samples, start, finish)
         all_periods.append(summary)

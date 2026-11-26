@@ -4,9 +4,36 @@ import unittest
 from pathlib import Path
 
 
-pod_resources_by_period = runpy.run_path(
-    str(Path(__file__).with_name("score-q8-crossover.py"))
-)["pod_resources_by_period"]
+scorer = runpy.run_path(str(Path(__file__).with_name("score-q8-crossover.py")))
+pod_resources_by_period = scorer["pod_resources_by_period"]
+latency_tools = runpy.run_path(str(Path(__file__).with_name("q8-latency.py")))
+
+
+class TimedLatencyTest(unittest.TestCase):
+    def frame(self, observed, sampled, samples):
+        return {
+            "job": "job", "vertex": "join", "observedAtMs": observed,
+            "roster": {"0": [0, 1, "tm0"], "1": [0, 1, "tm1"]},
+            "histograms": {
+                task: {"attempt": 0, "binMs": 10, "overflowAtMs": 120_000, "invalid": 0,
+                       "sampledAtMs": stamp, "counts": {"10": samples}}
+                for task, stamp in zip(("0", "1"), sampled)
+            },
+        }
+
+    def test_excludes_cached_start_and_samples_past_the_end(self):
+        frames = [self.frame(105, (98, 102), 2), self.frame(115, (110, 112), 3),
+                  self.frame(135, (130, 132), 5), self.frame(145, (138, 142), 7)]
+        result = scorer["score_timed_latency"](frames, 100, 140, latency_tools["sample_times"],
+                                               latency_tools["timed_interval"])
+        self.assertEqual(result["subtaskIntervalsMs"], {"0": [110, 130], "1": [112, 132]})
+        self.assertEqual(result["latency"]["samples"], 4)
+
+    def test_reports_unavailable_until_every_sink_gauge_advances(self):
+        frames = [self.frame(105, (100, 102), 2), self.frame(115, (100, 112), 2)]
+        result = scorer["score_timed_latency"](frames, 100, 140, latency_tools["sample_times"],
+                                               latency_tools["timed_interval"])
+        self.assertIsNone(result)
 
 
 class PodResourcesTest(unittest.TestCase):

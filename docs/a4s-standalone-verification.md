@@ -277,6 +277,8 @@ Recompute the period summaries from the captured run directory, which contains `
 python3 scripts/a4s/score-q8-crossover.py "$Q8_RUN_BUNDLE"
 ```
 
+For runs that capture `latency-timed-snapshots.json` in each period, the scorer reports `timestampAlignedLatency` using the widest histogram delta with every sink task’s sample bounds inside that period. It reports null when any task lacks two distinct in-window histogram samples. The field includes the covered timestamps and sample count to make the latency comparison auditable.
+
 ### Repeat with reversed mode order
 
 A second 600-second deployment, `live-6ea76950`, reversed every mode assignment on c167. Both deployments used the same pinned workload, operator, native library and runner, with scaling disabled. The comparison verifies the workload settings, starting profiles and unchanged five-task roster within each deployment. Each deployment is one experimental unit with six observation periods. The order below refers to measured periods after warmup.
