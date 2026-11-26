@@ -29,6 +29,8 @@ import org.apache.flink.runtime.rest.messages.json.JobVertexIDKeySerializer;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnyGetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnySetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonSerialize;
 
@@ -42,6 +44,11 @@ import java.util.Optional;
 /** Body for change job requests. */
 @FlinkJsonSchema.AdditionalFields(type = JustinVertexResourceRequirements.class)
 public class JustinResourceRequirementsBody implements RequestBody, ResponseBody {
+    @Nullable
+    @JsonProperty("executionToken")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String executionToken;
+
     @JsonAnySetter
     @JsonAnyGetter
     @JsonSerialize(keyUsing = JobVertexIDKeySerializer.class)
@@ -56,6 +63,7 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
             @Nullable JustinResourceRequirements jobResourceRequirements) {
         if (jobResourceRequirements != null) {
             this.jobVertexResourceRequirements = jobResourceRequirements.getJobVertexParallelisms();
+            this.executionToken = jobResourceRequirements.getExecutionToken().orElse(null);
         } else {
             this.jobVertexResourceRequirements = new HashMap<>();
         }
@@ -66,7 +74,7 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
         if (jobVertexResourceRequirements.isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(new JustinResourceRequirements(jobVertexResourceRequirements));
+        return Optional.of(new JustinResourceRequirements(jobVertexResourceRequirements, executionToken));
     }
 
     @Override
@@ -78,11 +86,12 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
             return false;
         }
         final JustinResourceRequirementsBody that = (JustinResourceRequirementsBody) o;
-        return Objects.equals(jobVertexResourceRequirements, that.jobVertexResourceRequirements);
+        return Objects.equals(jobVertexResourceRequirements, that.jobVertexResourceRequirements)
+                && Objects.equals(executionToken, that.executionToken);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(jobVertexResourceRequirements);
+        return Objects.hash(jobVertexResourceRequirements, executionToken);
     }
 }

@@ -36,11 +36,13 @@ import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -51,8 +53,9 @@ import static org.mockito.Mockito.when;
 class JustinResourceRequirementsHandlerTest {
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testAppliedProfileIsOptIn(boolean includeApplied) throws Exception {
+    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    void appliedProfileAndExecutionTokenAreIndependentOptIns(
+            boolean includeApplied, boolean includeToken) throws Exception {
         final JobID jobId = new JobID();
         final JobVertexID vertexId = new JobVertexID();
         final ResourceProfile requested =
@@ -66,20 +69,25 @@ class JustinResourceRequirementsHandlerTest {
                                 new JustinVertexResourceRequirements(
                                         new JustinVertexResourceRequirements.Parallelism(1, 1),
                                         requested,
-                                        applied)));
+                                        applied)),
+                        "execution-token");
         final RestfulGateway gateway = mock(RestfulGateway.class);
         when(gateway.requestJustinResourceRequirements(jobId))
+                .thenReturn(CompletableFuture.completedFuture(requirements));
+        when(gateway.requestJustinResourceRequirements(jobId, true))
                 .thenReturn(CompletableFuture.completedFuture(requirements));
         final JustinResourceRequirementsHandler handler =
                 new JustinResourceRequirementsHandler(
                         () -> CompletableFuture.completedFuture(gateway),
                         Time.seconds(5),
                         Collections.emptyMap());
-        final Map<String, List<String>> query =
-                includeApplied
-                        ? Collections.singletonMap(
-                                "include-applied-profile", Collections.singletonList("true"))
-                        : Collections.emptyMap();
+        final Map<String, List<String>> query = new HashMap<>();
+        if (includeApplied) {
+            query.put("include-applied-profile", Collections.singletonList("true"));
+        }
+        if (includeToken) {
+            query.put("include-execution-token", Collections.singletonList("true"));
+        }
         final JustinResourceRequirementsBody response =
                 handler.handleRequest(
                                 HandlerRequest.resolveParametersAndCreate(
@@ -93,8 +101,13 @@ class JustinResourceRequirementsHandlerTest {
                                 gateway)
                         .get();
         final ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
-        final JsonNode vertex =
-                mapper.readTree(mapper.writeValueAsBytes(response)).path(vertexId.toString());
+        final byte[] json = mapper.writeValueAsBytes(response);
+        final JsonNode root = mapper.readTree(json);
+        final JsonNode vertex = root.path(vertexId.toString());
+        assertThat(root.has("executionToken")).isEqualTo(includeToken);
+        assertThat(mapper.readValue(json, JustinResourceRequirementsBody.class)
+                .asJobResourceRequirements().get().getExecutionToken())
+                .isEqualTo(includeToken ? Optional.of("execution-token") : Optional.empty());
         assertThat(vertex.at("/resourceProfile/managedMemory/bytes").asLong())
                 .isEqualTo(requested.getManagedMemory().getBytes());
         if (includeApplied) {

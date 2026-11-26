@@ -241,6 +241,12 @@ public interface SchedulerNG extends GlobalFailureHandler, AutoCloseableAsync {
                         "The %s does not support changing the parallelism without a job restart. This feature is currently only expected to work with the %s.",
                         getClass().getSimpleName(), AdaptiveScheduler.class.getSimpleName()));
     }
+
+    default JustinResourceRequirements requestJustinResourceRequirements(
+            boolean includeExecutionToken) {
+        return requestJustinResourceRequirements();
+    }
+
     /**
      * Update {@link JustinResourceRequirements job resource requirements}.
      *

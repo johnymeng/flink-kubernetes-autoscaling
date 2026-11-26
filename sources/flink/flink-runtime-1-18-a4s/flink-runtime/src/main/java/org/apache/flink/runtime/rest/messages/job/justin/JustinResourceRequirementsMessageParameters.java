@@ -21,18 +21,20 @@ package org.apache.flink.runtime.rest.messages.job.justin;
 import org.apache.flink.runtime.rest.messages.JobMessageParameters;
 import org.apache.flink.runtime.rest.messages.MessageQueryParameter;
 
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 
 /** Parameters for reading Justin resource requirements. */
 public class JustinResourceRequirementsMessageParameters extends JobMessageParameters {
 
     public final IncludeAppliedProfileParameter includeAppliedProfile =
             new IncludeAppliedProfileParameter();
+    public final IncludeExecutionTokenParameter includeExecutionToken =
+            new IncludeExecutionTokenParameter();
 
     @Override
     public Collection<MessageQueryParameter<?>> getQueryParameters() {
-        return Collections.singletonList(includeAppliedProfile);
+        return Arrays.asList(includeAppliedProfile, includeExecutionToken);
     }
 
     /** Opt-in for returning resource profiles confirmed by the scheduler. */
@@ -56,6 +58,28 @@ public class JustinResourceRequirementsMessageParameters extends JobMessageParam
         @Override
         public String getDescription() {
             return "Whether to include confirmed applied slot profiles in the response.";
+        }
+    }
+
+    /** Opt-in for the token used by conditional Justin updates. */
+    public static final class IncludeExecutionTokenParameter extends MessageQueryParameter<Boolean> {
+        public IncludeExecutionTokenParameter() {
+            super("include-execution-token", MessageParameterRequisiteness.OPTIONAL);
+        }
+
+        @Override
+        public Boolean convertStringToValue(String value) {
+            return Boolean.valueOf(value);
+        }
+
+        @Override
+        public String convertValueToString(Boolean value) {
+            return value.toString();
+        }
+
+        @Override
+        public String getDescription() {
+            return "Whether to include the scheduler's conditional-update token when available.";
         }
     }
 }

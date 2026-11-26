@@ -21,6 +21,7 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.StaleJustinExecutionException;
 import org.apache.flink.runtime.rest.handler.AbstractRestHandler;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.RestHandlerException;
@@ -31,6 +32,7 @@ import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequireme
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsUpdateHeaders;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
+import org.apache.flink.util.ExceptionUtils;
 
 import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
 
@@ -39,6 +41,7 @@ import javax.annotation.Nonnull;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * Rest handler for updating {@link JobResourceRequirements resource requirements} of a given job.
@@ -71,7 +74,21 @@ public class JustinResourceRequirementsUpdateHandler
         if (maybeJobResourceRequirements.isPresent()) {
             return gateway.updateJustinResourceRequirements(
                             jobId, maybeJobResourceRequirements.get())
-                    .thenApply(ignored -> EmptyResponseBody.getInstance());
+                    .handle(
+                            (ack, failure) -> {
+                                if (failure == null) {
+                                    return EmptyResponseBody.getInstance();
+                                }
+                                final Throwable cause = ExceptionUtils.stripCompletionException(failure);
+                                if (ExceptionUtils.findThrowable(cause, StaleJustinExecutionException.class)
+                                        .isPresent()) {
+                                    throw new CompletionException(new RestHandlerException(
+                                            "The execution or its resource requirements changed before the Justin update.",
+                                            HttpResponseStatus.CONFLICT,
+                                            cause));
+                                }
+                                throw new CompletionException(cause);
+                            });
         }
         throw new RestHandlerException(
                 "Request body does not specify resource requirements.",

@@ -975,6 +975,13 @@ public class JobMaster extends FencedRpcEndpoint<JobMasterId>
     }
 
     @Override
+    public CompletableFuture<JustinResourceRequirements> requestJustinResourceRequirements(
+            boolean includeExecutionToken) {
+        return CompletableFuture.completedFuture(
+                schedulerNG.requestJustinResourceRequirements(includeExecutionToken));
+    }
+
+    @Override
     public CompletableFuture<Acknowledge> updateJustinResourceRequirements(
             JustinResourceRequirements justinResourceRequirements) {
         schedulerNG.updateJustinResourceRequirements(justinResourceRequirements);

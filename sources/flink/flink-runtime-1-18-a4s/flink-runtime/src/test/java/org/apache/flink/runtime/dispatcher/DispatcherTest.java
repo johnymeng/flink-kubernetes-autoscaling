@@ -52,6 +52,8 @@ import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobGraphBuilder;
 import org.apache.flink.runtime.jobgraph.JobGraphTestUtils;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.StaleJustinExecutionException;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
@@ -155,6 +157,11 @@ import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 /** Test for the {@link Dispatcher} component. */
 public class DispatcherTest extends AbstractDispatcherTest {
@@ -1433,6 +1440,30 @@ public class DispatcherTest extends AbstractDispatcherTest {
         assertThatFuture(dispatcherGateway.requestJobResourceRequirements(jobId))
                 .eventuallySucceeds()
                 .isNotEqualTo(JobResourceRequirements.empty());
+    }
+
+    @Test
+    public void rejectedConditionalJustinUpdateDoesNotPersistRequirements() throws Exception {
+        configuration.set(JobManagerOptions.SCHEDULER, JobManagerOptions.SchedulerType.Adaptive);
+        final TestingJobGraphStore jobGraphStore = spy(TestingJobGraphStore.newBuilder().build());
+        haServices.setJobGraphStore(jobGraphStore);
+        jobGraphStore.start(null);
+        dispatcher = createAndStartDispatcher(
+                heartbeatServices, haServices, JobMasterServiceLeadershipRunnerFactory.INSTANCE);
+        final DispatcherGateway gateway = dispatcher.getSelfGateway(DispatcherGateway.class);
+        jobMasterLeaderElection.isLeader(UUID.randomUUID());
+        gateway.submitJob(jobGraph, TIMEOUT).get();
+        awaitStatus(gateway, jobId, JobStatus.CREATED);
+
+        final JobVertex vertex = jobGraph.getVertices().iterator().next();
+        final JustinResourceRequirements target = JustinResourceRequirements.newBuilder()
+                .setParallelismForJobVertex(vertex.getID(), 1, 1, ResourceProfile.UNKNOWN).build();
+        final JustinResourceRequirements guarded = new JustinResourceRequirements(
+                target.getJobVertexParallelisms(), "stale-execution");
+        assertThatFuture(gateway.updateJustinResourceRequirements(jobId, guarded))
+                .eventuallyFailsWith(ExecutionException.class)
+                .withCauseInstanceOf(StaleJustinExecutionException.class);
+        verify(jobGraphStore, never()).putJustinResourceRequirements(eq(jobId), any());
     }
 
     @Test
