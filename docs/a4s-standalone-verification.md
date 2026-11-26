@@ -22,6 +22,14 @@ The [three-way decision check](a4s-standalone.md#compare-legacy-embedded-and-rem
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.
 
+## Full local RocksDB JNI check
+
+The vendored `rocksdbjava` target built a fresh x86-64 JNI JAR with Snappy on Ubuntu 24.04 using GCC 13. The local build supplied the standard C++ headers required by this compiler and used the Makefile's warning override. The original estimator was also linked using the same compiler, compression libraries and common object files. Both JARs passed all four RocksDB `LRUCacheTest` cases. The standalone SHARDS library passed its C++11 test independently.
+
+The JNI trace made 512 deterministic reads across two databases sharing one cache. Every run preserved the sample and cold-miss counts, kept the databases' cold references distinct, and passed through Flink's SHARDS histogram JSON and MRC conversion. Seven of twelve paired traces matched after excluding estimator timing. The other five shifted repeat accesses by one bin when the allocator-reported tracked bytes differed. Both binaries exhibited all four tracked-byte trajectories. Within each trajectory, every histogram bin and every remaining header field matched. The fresh feature JNI JAR also passed the packaged local Kafka rescale, committed-output and replay checks.
+
+The local ELF requires `GLIBC_2.38`. The lab image build targets Ubuntu 22.04 and must use the repository's matching JNI build path.
+
 ## Local control-plane overhead
 
 A Linux x86-64 VM ran a Java 17 loopback client against the standalone JAR using the generic Q8-shaped JSON example. The request and response bodies were 1,583 and 844 bytes. The client warmed each path, then measured three repetitions with 5,000 embedded evaluations and 100 HTTP round trips per repetition. HTTP samples include serialization, process scheduling and loopback. All plans matched the embedded output.
