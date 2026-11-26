@@ -222,7 +222,7 @@ public class ScalingMetricCollectorTest {
         var source = new VertexInfo(sourceId, Map.of(), 2, 128, true, IOMetrics.FINISHED_METRICS);
         var sink =
                 new VertexInfo(
-                        sinkId, Map.of(sourceId, HASH), 2, 128, false, new IOMetrics(291532, 1, 2));
+                        sinkId, Map.of(sourceId, HASH), 2, 128, false, new IOMetrics(291532, 1, 2, true));
 
         assertEquals(
                 new JobTopology(source, sink), metricsCollector.getJobTopology(jobDetailsInfo));

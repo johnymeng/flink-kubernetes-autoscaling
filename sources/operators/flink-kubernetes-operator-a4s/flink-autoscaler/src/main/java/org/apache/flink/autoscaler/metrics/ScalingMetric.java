@@ -216,7 +216,13 @@ public enum ScalingMetric {
 
     ABSOLUTE_ROCKSDB_BUSY_TIME(true),
 
-    INPUT_RATE(false);
+    INPUT_RATE(false),
+
+    /** Output counter observed with complete coverage in the Flink REST response. */
+    OBSERVED_NUM_RECORDS_OUT(false),
+
+    /** Observed output throughput over the complete autoscaler measurement window. */
+    OUTPUT_RATE(false);
 
     @Getter private final boolean calculateAverage;
 

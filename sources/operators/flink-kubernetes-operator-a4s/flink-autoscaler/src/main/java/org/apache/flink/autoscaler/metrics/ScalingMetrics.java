@@ -89,7 +89,16 @@ public class ScalingMetrics {
                 getNumRecordsInAccumulated(flinkMetrics, ioMetrics, jobVertexID, isSource);
 
         scalingMetrics.put(ScalingMetric.NUM_RECORDS_IN, numRecordsIn);
-        scalingMetrics.put(ScalingMetric.NUM_RECORDS_OUT, (double) ioMetrics.getNumRecordsOut());
+        long numRecordsOut = ioMetrics.getNumRecordsOut();
+        scalingMetrics.put(ScalingMetric.NUM_RECORDS_OUT, (double) numRecordsOut);
+        if (conf.get(AutoScalerOptions.JUSTIN_ENABLED)
+                && conf.get(AutoScalerOptions.A4S_ENABLED)
+                && ioMetrics.isNumRecordsOutComplete()
+                && numRecordsOut >= 0
+                && numRecordsOut <= (1L << 53)) {
+            // The metric history stores doubles. Larger counters cannot be differenced exactly.
+            scalingMetrics.put(ScalingMetric.OBSERVED_NUM_RECORDS_OUT, (double) numRecordsOut);
+        }
 
         if (isSource) {
             double numRecordsInPerSecond =

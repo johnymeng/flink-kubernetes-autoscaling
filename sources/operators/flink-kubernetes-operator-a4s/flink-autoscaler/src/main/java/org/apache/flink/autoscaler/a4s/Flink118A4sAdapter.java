@@ -233,7 +233,7 @@ public final class Flink118A4sAdapter {
         Double busy = finite(metrics.get(ScalingMetric.LOAD));
         return new OperatorTelemetry(
                 finite(metrics.get(ScalingMetric.INPUT_RATE)),
-                null,
+                finite(metrics.get(ScalingMetric.OUTPUT_RATE)),
                 finite(metrics.get(ScalingMetric.TRUE_PROCESSING_RATE)),
                 busy != null && busy <= 1 ? busy : null,
                 null,

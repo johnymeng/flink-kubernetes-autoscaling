@@ -149,6 +149,12 @@ public class ScalingMetricEvaluator {
                 computeBusyTimeAvg(conf, metricsHistory, vertex, vertexInfo.getParallelism());
 
         evaluatedMetrics.put(INPUT_RATE, EvaluatedScalingMetric.avg(inputRateAvg));
+        if (latestVertexMetrics.containsKey(OBSERVED_NUM_RECORDS_OUT)) {
+            double outputRate = getCompleteOutputRate(vertex, metricsHistory);
+            if (Double.isFinite(outputRate)) {
+                evaluatedMetrics.put(OUTPUT_RATE, EvaluatedScalingMetric.avg(outputRate));
+            }
+        }
         evaluatedMetrics.put(
                 TRUE_PROCESSING_RATE,
                 EvaluatedScalingMetric.avg(
@@ -181,6 +187,23 @@ public class ScalingMetricEvaluator {
 
         computeProcessingRateThresholds(evaluatedMetrics, conf, processingBacklog, restartTime);
         return evaluatedMetrics;
+    }
+
+    private static double getCompleteOutputRate(
+            JobVertexID vertex, SortedMap<Instant, CollectedMetrics> metricsHistory) {
+        double previous = 0;
+        for (var sample : metricsHistory.values()) {
+            var metrics = sample.getVertexMetrics().get(vertex);
+            double counter =
+                    metrics == null
+                            ? Double.NaN
+                            : metrics.getOrDefault(OBSERVED_NUM_RECORDS_OUT, Double.NaN);
+            if (!Double.isFinite(counter) || counter < previous) {
+                return Double.NaN;
+            }
+            previous = counter;
+        }
+        return getRate(OBSERVED_NUM_RECORDS_OUT, vertex, metricsHistory);
     }
 
     /**
