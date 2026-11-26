@@ -209,6 +209,32 @@ class DecisionServerTest {
     }
 
     @Test
+    void preservesHistogramProvenanceInTheWireContract() throws Exception {
+        var start = EXAMPLE_JSON.indexOf("\"missRateCurve\": [");
+        var end = EXAMPLE_JSON.indexOf(']', start);
+        var input =
+                EXAMPLE_JSON.substring(0, start)
+                        + "\"missRateCurve\": [], \"histogram\": {"
+                        + "\"estimator\":\"SHARDS\",\"counterKind\":\"INTERVAL\","
+                        + "\"population\":\"user-data\",\"cacheScope\":\"isolated\","
+                        + "\"counterGeneration\":\"attempt-1\",\"sampling\":\"rate=1/4,seed=2\","
+                        + "\"startMillis\":1000,\"endMillis\":10000,\"partitions\":4,"
+                        + "\"capacityBytesPerPartition\":[67108864,201326592,402653184],"
+                        + "\"frequencies\":[30,15,35],\"missesOutsideBuckets\":20}"
+                        + EXAMPLE_JSON.substring(end + 1);
+        var decoded = decode(input);
+        var roundTrip = Wire.decode(Wire.encode(decoded), EvaluationRequest.class);
+        var histogram = roundTrip.snapshot.operators.get(0).histogram;
+        assertEquals("rate=1/4,seed=2", histogram.sampling);
+        assertEquals("attempt-1", histogram.counterGeneration);
+        assertEquals(20, histogram.missesOutsideBuckets);
+        assertEquals(ScalingPlan.Action.RESCALE, new A4sPolicy().evaluate(roundTrip).action);
+        var stale = decode(input.replace("\"endMillis\":10000", "\"endMillis\":9000"));
+        assertEquals(
+                ScalingPlan.Action.INSUFFICIENT_METRICS, new A4sPolicy().evaluate(stale).action);
+    }
+
+    @Test
     void timeoutAndTerminationFailWithoutProducingAPlan() throws Exception {
         var request = Wire.decode(EXAMPLE, EvaluationRequest.class);
         var client = new DecisionClient();
