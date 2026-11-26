@@ -95,12 +95,14 @@ V1 keeps the original fixed-latency equation and bounded greedy retry on support
 
 ## Record and replay
 
-Set `A4S_SNAPSHOT_DIR` to a writable benchmark-only mount in the operator. Set `job.autoscaler.a4s.snapshot.record-file` to a fresh basename such as `q8-remote-1.jsonl`. Recording captures the exact request before evaluation and is capped at 256 MiB per file. Actual runtime results and model inputs are archived separately by the experiment.
+Set `A4S_SNAPSHOT_DIR` to a writable benchmark-only mount in the operator. Set `job.autoscaler.a4s.snapshot.record-file` to a fresh basename such as `q8-remote-1.jsonl`. Recording writes a versioned JSONL row after each evaluation attempt. It captures the exact request and the returned recommendation, including its model version and rationale. An evaluation that returns no response has a null recommendation. Recording is capped at 256 MiB per file. The experiment archives actual runtime results separately.
 
 ```bash
 java -jar sources/a4s/a4s-runner/target/a4s-runner.jar replay \
   --input snapshots.jsonl --policy a4s --output decisions.jsonl
 ```
+
+Add `--verify` to require every replayed recommendation to match the recorded recommendation. Verification compares canonical JSON and reports the line of the first mismatch or missing recommendation. Replay publishes the output after processing all rows successfully. Existing request-only JSONL files can still be replayed.
 
 `--policy a4s` uses the captured mode. `CACHE` and `LEGACY_SLOT_RESERVATION` select an alternate mode for comparison with the same recorded constraints and capabilities, which may reject the new mode. To compare model parameters, edit a copy of the captured request file and retain both inputs and outputs. A prediction from replay is a model estimate. Stateful recovery, live throughput, and performance under an alternative configuration require a deployment or validated simulator.
 

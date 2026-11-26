@@ -19,7 +19,9 @@ package io.a4s.runner;
 
 import io.a4s.api.EvaluationRequest;
 import io.a4s.api.PolicyConfiguration;
+import io.a4s.api.ScalingPlan;
 import io.a4s.core.A4sPolicy;
+import io.a4s.http.RecordedEvaluation;
 import io.a4s.http.Wire;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
@@ -29,6 +31,8 @@ import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
 
 public final class Main {
     private Main() {}
@@ -47,7 +51,7 @@ public final class Main {
             server.start();
         } else {
             throw new IllegalArgumentException(
-                    "Expected serve or replay --input FILE --output FILE [--policy MODE]");
+                    "Expected serve or replay --input FILE --output FILE [--policy MODE] [--verify]");
         }
     }
 
@@ -55,22 +59,29 @@ public final class Main {
         Path input = null;
         Path output = null;
         String policy = "a4s";
-        for (int i = 1; i < args.length; i += 2) {
+        boolean verify = false;
+        for (int i = 1; i < args.length; i++) {
+            if (args[i].equals("--verify")) {
+                verify = true;
+                continue;
+            }
             if (i + 1 >= args.length) {
                 throw new IllegalArgumentException("Missing value for " + args[i]);
             }
-            switch (args[i]) {
+            String option = args[i];
+            String value = args[++i];
+            switch (option) {
                 case "--input":
-                    input = Path.of(args[i + 1]);
+                    input = Path.of(value);
                     break;
                 case "--output":
-                    output = Path.of(args[i + 1]);
+                    output = Path.of(value);
                     break;
                 case "--policy":
-                    policy = args[i + 1];
+                    policy = value;
                     break;
                 default:
-                    throw new IllegalArgumentException("Unknown replay option " + args[i]);
+                    throw new IllegalArgumentException("Unknown replay option " + option);
             }
         }
         if (input == null
@@ -78,7 +89,22 @@ public final class Main {
                 || Files.exists(output) && Files.isSameFile(input, output)) {
             throw new IllegalArgumentException("Replay requires distinct input and output files");
         }
-        final String selectedPolicy = policy;
+        Path staging =
+                Files.createTempFile(output.toAbsolutePath().getParent(), ".a4s-replay-", ".jsonl");
+        try {
+            replayToFile(input, staging, policy, verify);
+            Files.move(
+                    staging,
+                    output,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+        } finally {
+            Files.deleteIfExists(staging);
+        }
+    }
+
+    private static void replayToFile(Path input, Path output, String policy, boolean verify)
+            throws IOException {
         var engine = new A4sPolicy();
         try (var source = new BufferedInputStream(Files.newInputStream(input));
                 var sink = new BufferedOutputStream(Files.newOutputStream(output))) {
@@ -86,14 +112,29 @@ public final class Main {
             long row = 0;
             while ((line = readLine(source)) != null) {
                 row++;
+                RecordedEvaluation recording;
+                ScalingPlan plan;
                 try {
-                    var request =
-                            withPolicy(Wire.decode(line, EvaluationRequest.class), selectedPolicy);
-                    sink.write(Wire.encode(engine.evaluate(request)));
-                    sink.write('\n');
+                    recording = Wire.decodeRecording(line);
+                    plan = engine.evaluate(withPolicy(recording.request, policy));
                 } catch (IllegalArgumentException | IOException e) {
                     throw new IOException("Invalid replay request at line " + row, e);
                 }
+                byte[] computed = Wire.encode(plan);
+                if (verify) {
+                    if (recording.recommendation == null) {
+                        throw new IOException("No recorded recommendation at line " + row);
+                    }
+                    if (!Arrays.equals(computed, Wire.encode(recording.recommendation))) {
+                        throw new IOException(
+                                "Recorded recommendation differs at line "
+                                        + row
+                                        + " for snapshot "
+                                        + plan.snapshotId);
+                    }
+                }
+                sink.write(computed);
+                sink.write('\n');
             }
         }
     }
@@ -129,8 +170,8 @@ public final class Main {
         var line = new ByteArrayOutputStream();
         int next;
         while ((next = input.read()) != -1 && next != '\n') {
-            if (line.size() >= Wire.MAX_BODY_BYTES) {
-                throw new IOException("Replay line exceeds the request size limit");
+            if (line.size() >= Wire.MAX_RECORD_BYTES) {
+                throw new IOException("Replay line exceeds the recording size limit");
             }
             line.write(next);
         }

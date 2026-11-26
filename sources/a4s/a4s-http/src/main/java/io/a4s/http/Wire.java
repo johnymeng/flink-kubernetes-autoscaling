@@ -22,10 +22,13 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import io.a4s.api.EvaluationRequest;
 import java.io.IOException;
 
 public final class Wire {
     public static final int MAX_BODY_BYTES = 2 * 1024 * 1024;
+    // A recording can contain both a complete HTTP request and a complete HTTP response.
+    public static final int MAX_RECORD_BYTES = 2 * MAX_BODY_BYTES + 1024;
 
     private static final JsonMapper JSON =
             JsonMapper.builder()
@@ -42,8 +45,16 @@ public final class Wire {
     private Wire() {}
 
     public static byte[] encode(Object value) throws IOException {
+        return encodeBounded(value, MAX_BODY_BYTES);
+    }
+
+    public static byte[] encodeRecording(RecordedEvaluation recording) throws IOException {
+        return encodeBounded(recording, MAX_RECORD_BYTES);
+    }
+
+    private static byte[] encodeBounded(Object value, int limit) throws IOException {
         byte[] bytes = JSON.writeValueAsBytes(value);
-        if (bytes.length > MAX_BODY_BYTES) {
+        if (bytes.length > limit) {
             throw new IOException("A4S payload exceeds the size limit");
         }
         return bytes;
@@ -58,5 +69,24 @@ public final class Wire {
             throw new IOException("A4S payload must be a JSON object");
         }
         return result;
+    }
+
+    /** Reads either a paired evaluation record or a legacy request-only JSONL row. */
+    public static RecordedEvaluation decodeRecording(byte[] bytes) throws IOException {
+        if (bytes.length > MAX_RECORD_BYTES) {
+            throw new IOException("A4S recording exceeds the size limit");
+        }
+        var root = JSON.readTree(bytes);
+        if (root == null || !root.isObject()) {
+            throw new IOException("A4S recording must be a JSON object");
+        }
+        if (root.has("recordingVersion")) {
+            return JSON.treeToValue(root, RecordedEvaluation.class);
+        }
+        if (bytes.length > MAX_BODY_BYTES) {
+            throw new IOException("A4S request exceeds the size limit");
+        }
+        return new RecordedEvaluation(
+                RecordedEvaluation.VERSION, JSON.treeToValue(root, EvaluationRequest.class), null);
     }
 }

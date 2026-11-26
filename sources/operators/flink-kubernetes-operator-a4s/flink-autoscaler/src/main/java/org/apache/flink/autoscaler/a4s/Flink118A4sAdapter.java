@@ -267,7 +267,8 @@ public final class Flink118A4sAdapter {
         return Double.isFinite(value) && value >= 0 && value < Long.MAX_VALUE ? (long) value : null;
     }
 
-    public void record(Configuration conf, EvaluationRequest request) throws IOException {
+    public void record(Configuration conf, EvaluationRequest request, ScalingPlan recommendation)
+            throws IOException {
         String filename = conf.get(AutoScalerOptions.A4S_SNAPSHOT_RECORD_FILE);
         if (filename == null) {
             return;
@@ -277,7 +278,7 @@ public final class Flink118A4sAdapter {
             throw new IOException(
                     "Snapshot recording requires A4S_SNAPSHOT_DIR and a JSONL basename");
         }
-        SnapshotRecorder.append(Path.of(directory).resolve(filename), request);
+        SnapshotRecorder.append(Path.of(directory).resolve(filename), request, recommendation);
     }
 
     public ScalingPlan evaluate(Configuration conf, EvaluationRequest request)

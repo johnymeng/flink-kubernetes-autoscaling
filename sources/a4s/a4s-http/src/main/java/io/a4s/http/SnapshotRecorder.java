@@ -18,6 +18,7 @@
 package io.a4s.http;
 
 import io.a4s.api.EvaluationRequest;
+import io.a4s.api.ScalingPlan;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
@@ -33,7 +34,19 @@ public final class SnapshotRecorder {
 
     public static synchronized void append(Path file, EvaluationRequest request)
             throws IOException {
-        byte[] json = Wire.encode(request);
+        appendLine(file, Wire.encode(request));
+    }
+
+    public static synchronized void append(
+            Path file, EvaluationRequest request, ScalingPlan recommendation) throws IOException {
+        appendLine(
+                file,
+                Wire.encodeRecording(
+                        new RecordedEvaluation(
+                                RecordedEvaluation.VERSION, request, recommendation)));
+    }
+
+    private static void appendLine(Path file, byte[] json) throws IOException {
         var line = ByteBuffer.allocate(json.length + 1).put(json).put((byte) '\n');
         line.flip();
         try (var channel =

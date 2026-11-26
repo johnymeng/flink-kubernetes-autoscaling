@@ -169,11 +169,14 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 var request = a4s.request(context.getJobID().toString(), generation, now, jobTopology,
                         evaluatedMetrics, scalingSummaries, profiles, conf);
                 try {
-                    a4s.record(conf, request);
-                } catch (IOException e) {
-                    LOG.warn("A4S snapshot recording failed", e);
+                    plan = a4s.evaluate(conf, request);
+                } finally {
+                    try {
+                        a4s.record(conf, request, plan);
+                    } catch (IOException e) {
+                        LOG.warn("A4S snapshot recording failed", e);
+                    }
                 }
-                plan = a4s.evaluate(conf, request);
                 if (plan.action != ScalingPlan.Action.RESCALE) {
                     LOG.info("A4S held job {} with outcome {} ({})",
                             request.snapshot.jobId, plan.action, plan.rationale);

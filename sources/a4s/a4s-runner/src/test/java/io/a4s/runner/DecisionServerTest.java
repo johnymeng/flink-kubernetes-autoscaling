@@ -110,6 +110,80 @@ class DecisionServerTest {
     }
 
     @Test
+    void verifiesARecordedHttpRecommendationAndPreservesOutputOnMismatch() throws Exception {
+        var request = Wire.decode(EXAMPLE, EvaluationRequest.class);
+        var policy = new A4sPolicy();
+        ScalingPlan recorded;
+        try (var server = new DecisionServer(new InetSocketAddress("127.0.0.1", 0), policy)) {
+            server.start();
+            recorded =
+                    new DecisionClient().evaluate(endpoint(server), Duration.ofSeconds(2), request);
+        }
+        var captures = temp.resolve("recordings.jsonl");
+        var output = temp.resolve("verified.jsonl");
+        SnapshotRecorder.append(captures, request, recorded);
+
+        var verify =
+                new String[] {
+                    "replay",
+                    "--input",
+                    captures.toString(),
+                    "--output",
+                    output.toString(),
+                    "--verify"
+                };
+        Main.main(verify);
+        var expected = List.of(new String(Wire.encode(recorded), StandardCharsets.UTF_8));
+        assertEquals(expected, Files.readAllLines(output));
+
+        var different =
+                policy.evaluate(
+                        decode(
+                                EXAMPLE_JSON.replace(
+                                        "\"metricsComplete\": true",
+                                        "\"metricsComplete\": false")));
+        SnapshotRecorder.append(captures, request, different);
+        var mismatch = assertThrows(IOException.class, () -> Main.main(verify));
+        assertTrue(mismatch.getMessage().contains("Recorded recommendation differs at line 2"));
+        assertEquals(expected, Files.readAllLines(output));
+    }
+
+    @Test
+    void replaysARequestWithoutAResponseButCannotVerifyIt() throws Exception {
+        var request = Wire.decode(EXAMPLE, EvaluationRequest.class);
+        var captures = temp.resolve("failed-evaluation.jsonl");
+        var output = temp.resolve("replayed.jsonl");
+        SnapshotRecorder.append(captures, request, null);
+
+        var missing =
+                assertThrows(
+                        IOException.class,
+                        () ->
+                                Main.main(
+                                        new String[] {
+                                            "replay",
+                                            "--verify",
+                                            "--input",
+                                            captures.toString(),
+                                            "--output",
+                                            output.toString()
+                                        }));
+        assertTrue(missing.getMessage().contains("No recorded recommendation at line 1"));
+        assertFalse(Files.exists(output));
+
+        Main.main(
+                new String[] {
+                    "replay", "--input", captures.toString(), "--output", output.toString()
+                });
+        assertEquals(
+                List.of(
+                        new String(
+                                Wire.encode(new A4sPolicy().evaluate(request)),
+                                StandardCharsets.UTF_8)),
+                Files.readAllLines(output));
+    }
+
+    @Test
     void validatesContractAndFailsClosed() throws Exception {
         var policy = new A4sPolicy();
         assertEquals(
