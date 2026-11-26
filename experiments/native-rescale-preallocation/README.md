@@ -45,6 +45,8 @@ The scorer matches the manual request against the JobManager event timestamps an
 - Backlog clearance spans decision to the first three consecutive samples after the peak that span at least nine seconds and stay at or below 110% of the median backlog in the 30 seconds before the decision. Report peak backlog and backlog at cutoff. Keep genuine zeros and failed polls distinct.
 - Calculate excess allocation by integrating CPU and memory requests over matched offsets. Report core-seconds and GiB-seconds, resource peaks, utilization, and timeout/fallback frequency.
 
+Use `compare.py --pair DISABLED_JSON ENABLED_JSON` on the scored JSON files for each matched pair. Repeat `--pair` for each repetition. The output includes incomplete requests and reports the per-transition median and range over observed paired differences.
+
 Use `score_resources.py LAB_RECEIPT TIMINGS_JSON` with the run-owned pod snapshots and the workload sampler to compute resource-time and DataStream backlog. The calculation excludes intervals with gaps greater than 14 seconds and reports coverage.
 
 Use `figure10_input.py LAB_RECEIPT RESULTS_ROOT` to adapt the archived sampler JSON lines into indexed Figure 10 CSVs. Pass `--supplemental` to include measured source backlog, scheduled CPU and memory requests, and running TaskManager pod count. Use the supplied Figure 10 `plot_run.py` with those files and its comparison arguments. Align any supplemental plots to input release and preserve the raw data. Earlier PR #5 timings measured decision-to-running under a different comparison. Estimating the new downtime effect requires the live matched repetitions.
