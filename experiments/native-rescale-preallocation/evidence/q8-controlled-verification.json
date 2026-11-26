@@ -1,0 +1,64 @@
+{
+  "run": "live-71aee4ac",
+  "offered_records_per_second": 8000,
+  "cases": [
+    {
+      "name": "P1 to P2",
+      "generation": 2,
+      "applied_parallelism": 2,
+      "status": "APPLIED"
+    },
+    {
+      "name": "P2 to P4",
+      "generation": 3,
+      "applied_parallelism": 4,
+      "status": "APPLIED"
+    },
+    {
+      "name": "P4 to P8",
+      "generation": 4,
+      "applied_parallelism": 8,
+      "status": "APPLIED"
+    },
+    {
+      "name": "P12 preparation is active",
+      "generation": 5,
+      "applied_parallelism": 8,
+      "status": "PREPARING"
+    },
+    {
+      "name": "P10 preparation superseded P12",
+      "generation": 6,
+      "applied_parallelism": 8,
+      "status": "PREPARING"
+    },
+    {
+      "name": "P10 applies after worker loss",
+      "generation": 6,
+      "applied_parallelism": 10,
+      "status": "APPLIED"
+    },
+    {
+      "name": "vertical profile is applied",
+      "generation": 7,
+      "applied_parallelism": 10,
+      "status": "APPLIED"
+    },
+    {
+      "name": "P10 to P4",
+      "generation": 8,
+      "applied_parallelism": 4,
+      "status": "APPLIED"
+    },
+    {
+      "name": "P24 defers",
+      "generation": 9,
+      "applied_parallelism": 4,
+      "status": "DEFERRED"
+    }
+  ],
+  "superseded_generation_restarted": false,
+  "deferred_generation_restarted": false,
+  "same_p4_attempts_records_after_deferral": 4552317,
+  "elapsed_counter_witness_seconds": 452.9991813964844
+}
