@@ -18,28 +18,29 @@
 
 package org.apache.flink.runtime.scheduler.adaptive.allocator;
 
-import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
-import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.runtime.jobmaster.SlotInfo;
 import org.apache.flink.runtime.scheduler.adaptive.JobSchedulingPlan.SlotAssignment;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.SlotSharingSlotAllocator.ExecutionSlotSharingGroup;
 import org.apache.flink.runtime.scheduler.strategy.ExecutionVertexID;
+import org.apache.flink.runtime.util.ResourceCounter;
 
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Comparator;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
 import java.util.stream.Collectors;
 
-/** Simple {@link SlotAssigner} that treats all slots and slot sharing groups equally. */
+/** Assigns each Justin execution slot-sharing group to a matching physical allocation. */
 public class JustinSlotAssigner implements SlotAssigner {
 
     static List<ExecutionSlotSharingGroup> createExecutionSlotSharingGroups(
@@ -67,48 +68,27 @@ public class JustinSlotAssigner implements SlotAssigner {
             Collection<? extends SlotInfo> freeSlots,
             VertexParallelism vertexParallelism,
             JobAllocationsInformation previousAllocations) {
-        final List<ExecutionSlotSharingGroup> allGroups = new ArrayList<>();
-        // An unspecified group can use any slot. Assign specific groups first.
-        jobInformation.getSlotSharingGroups().stream()
-                .sorted(
-                        Comparator.comparing(
-                                group ->
-                                        group.getResourceProfile().equals(ResourceProfile.UNKNOWN)))
-                .forEach(
-                        group ->
-                                allGroups.addAll(
-                                        createExecutionSlotSharingGroups(
-                                                vertexParallelism, group)));
+        final Map<ResourceProfile, Queue<ExecutionSlotSharingGroup>> groups = new HashMap<>();
+        ResourceCounter requirements = ResourceCounter.empty();
+        for (SlotSharingGroup group : jobInformation.getSlotSharingGroups()) {
+            final List<ExecutionSlotSharingGroup> executionGroups =
+                    createExecutionSlotSharingGroups(vertexParallelism, group);
+            final ResourceProfile profile = group.getResourceProfile();
+            groups.computeIfAbsent(profile, ignored -> new ArrayDeque<>()).addAll(executionGroups);
+            requirements = requirements.add(profile, executionGroups.size());
+        }
 
-        final List<? extends SlotInfo> candidateSlots = new ArrayList<>(freeSlots);
-        candidateSlots.sort(
-                Comparator.comparing(
-                        slot -> slot.getResourceProfile().equals(ResourceProfile.ANY)));
-        Collection<SlotAssignment> assignments = new ArrayList<>();
-        Set<AllocationID> used = new HashSet<>();
-        for (ExecutionSlotSharingGroup group : allGroups) {
-            for (SlotInfo slotInfo : candidateSlots) {
-                if (used.contains(slotInfo.getAllocationId())) {
-                    continue;
-                }
-                JobVertexID jobVertexID = group
-                        .getContainedExecutionVertices()
-                        .stream()
-                        .findFirst()
-                        .get()
-                        .getJobVertexId();
-                ResourceProfile resourceProfile = jobInformation
-                        .getVertexInformation(jobVertexID)
-                        .getSlotSharingGroup()
-                        .getResourceProfile();
-                LoggerFactory
-                        .getLogger(JustinSlotAssigner.class)
-                        .debug(jobVertexID + " -> " + resourceProfile);
-                if (slotInfo.getResourceProfile().isMatching(resourceProfile)) {
-                    used.add(slotInfo.getAllocationId());
-                    assignments.add(new SlotAssignment(slotInfo, group));
-                    break;
-                }
+        final JustinSlotMatching.Match match = JustinSlotMatching.match(requirements, freeSlots);
+        if (!match.getMissing().isEmpty()) {
+            LOG.debug("Justin slot assignment is incomplete. Missing: {}", match.getMissing());
+            return Collections.emptyList();
+        }
+
+        final Collection<SlotAssignment> assignments = new ArrayList<>();
+        for (SlotInfo slot : freeSlots) {
+            final ResourceProfile profile = match.getAllocations().remove(slot.getAllocationId());
+            if (profile != null) {
+                assignments.add(new SlotAssignment(slot, groups.get(profile).remove()));
             }
         }
         return assignments;
