@@ -131,8 +131,38 @@ After a run, export metrics, logs, and metadata:
 experiments/1724-kafka-q20-unique/analysis/export-experiment-data.py
 ```
 
-Plot an exported run directory:
+Every experiment has a `plot.py` command that uses the same stacked charts.
+Plot an existing Prometheus export by passing its directory:
 
 ```bash
-experiments/1724-kafka-q20-unique/analysis/plot-experiment.py experiments/1724-kafka-q20-unique/experiment-data/<run-dir>
+experiments/1724-kafka-q20-unique/plot.py \
+  --run-dir experiments/1724-kafka-q20-unique/experiment-data/my-run \
+  --output q20.png
 ```
+
+For an indexed archive, pass the root containing `nexmark/<query>/runs.csv`
+and select a run. Use `--latest` or omit run selection to use the last entry.
+The Kafka experiment commands default to their own query. Supply `--query`
+for indexed checkpoint-aware runs or when using `experiments/plot_run.py`.
+
+```bash
+experiments/1725-kafka-q4-unique/plot.py \
+  --results-root /path/to/archive --run-id first-run \
+  --compare-run-id second-run --compare-results-root /path/to/second-archive \
+  --label Justin --compare-label DS2 \
+  --metrics source_records_per_second task_slots_used \
+  --output q4-comparison.png
+```
+
+Use `--samples` for a standalone CSV with numeric timestamps in seconds and
+one column per metric. `--run-dir` also accepts a directory containing
+`samples.csv`. Use `--compare-samples` or `--compare-run-dir` to overlay another
+file or directory. Run `--list-metrics` with your input arguments to see the
+exact names accepted by `--metrics`. Comparisons default to all metrics shared
+by both inputs. Without `--output`, the image is saved with the first run.
+
+Each subplot starts at zero on both axes. An indexed run uses its own first
+recorded timestamp as zero, while a Prometheus export uses its recorded export
+start when available. Blank and NaN samples remain gaps, with dotted lines
+marking gaps between measured points. Managed memory used and capacity share
+a panel when both are selected.

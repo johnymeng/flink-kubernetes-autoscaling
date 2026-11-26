@@ -188,6 +188,11 @@ resource, and policy decision timelines; `collect-evidence.sh` adds the
 rendered manifest, run/storage identity, checkpoint transaction, and raw
 reconciliation evidence under `results/${RUN_ID}`.
 
+Plot the metrics with `experiments/1729-checkpoint-aware-rescaling/plot.py
+--run-dir <export-directory>`. For indexed archives, pass the experiment's query
+with `--query`. See [plotting results](../../docs/experiment-flow.md#export-and-plot-results)
+for comparison inputs and metric selection.
+
 ## Stop
 
 Stop the producer, delete the FlinkDeployment, and then stop Kafka. Do not run
