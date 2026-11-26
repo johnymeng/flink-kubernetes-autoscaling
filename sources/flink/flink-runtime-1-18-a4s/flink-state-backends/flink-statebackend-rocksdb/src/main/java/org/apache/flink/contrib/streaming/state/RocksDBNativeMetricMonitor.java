@@ -28,6 +28,8 @@ import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 
 import org.rocksdb.Cache;
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.HistogramData;
+import org.rocksdb.HistogramType;
 import org.rocksdb.LRUCache;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -71,6 +73,9 @@ public class RocksDBNativeMetricMonitor implements Closeable {
 
     @GuardedBy("lock")
     private long cacheCounterSequence;
+
+    @GuardedBy("lock")
+    private long dbGetTimingSequence;
 
     @Nullable
     @GuardedBy("lock")
@@ -133,7 +138,8 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         final boolean reportLiveState =
                 options.getProperties()
                         .contains(RocksDBProperty.EstimateLiveDataSize.getRocksDBProperty());
-        if (!reportCacheCounters && !reportLiveState) {
+        final boolean reportGetTiming = statistics != null && options.isDbGetTimingEnabled();
+        if (!reportCacheCounters && !reportLiveState && !reportGetTiming) {
             return;
         }
         final String databaseId = UUID.randomUUID().toString();
@@ -145,6 +151,10 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             liveStateSizeView = new LiveStateSizeView(databaseId);
             metricGroup.gauge(MetricNames.A4S_ROCKSDB_STATE_SIZE, liveStateSizeView);
         }
+        if (reportGetTiming) {
+            metricGroup.gauge(
+                    MetricNames.A4S_ROCKSDB_GET_TIMING, () -> sampleDbGetTiming(databaseId));
+        }
     }
 
     private String sampleCacheCounters(String databaseId) {
@@ -155,6 +165,23 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             long hits = statistics.getTickerCount(TickerType.BLOCK_CACHE_HIT);
             long misses = statistics.getTickerCount(TickerType.BLOCK_CACHE_MISS);
             return databaseId + ":" + (++cacheCounterSequence) + ":" + hits + ":" + misses;
+        }
+    }
+
+    private String sampleDbGetTiming(String databaseId) {
+        synchronized (lock) {
+            if (statistics == null || dbGetTimingSequence == Long.MAX_VALUE) {
+                return "";
+            }
+            HistogramData histogram = statistics.getHistogramData(HistogramType.DB_GET);
+            long micros = histogram.getSum();
+            long count = histogram.getCount();
+            if (micros < 0 || micros > Long.MAX_VALUE / 1_000 || count < 0
+                    || count == 0 && micros != 0) {
+                return "";
+            }
+            long nanos = micros * 1_000;
+            return databaseId + ":" + (++dbGetTimingSequence) + ":" + nanos + ":" + count;
         }
     }
 

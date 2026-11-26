@@ -173,6 +173,8 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
                 a4s
                         && conf.getBoolean(
                                 "state.backend.rocksdb.metrics.estimate-live-data-size", false);
+        boolean includeStateAccessTiming =
+                a4s && conf.getBoolean("state.backend.rocksdb.metrics.a4s-db-get-timing", false);
         if (includeBacklog || a4s) {
             var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
             var fields = new ArrayList<String>();
@@ -190,6 +192,9 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
             }
             if (includeStateSize) {
                 fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_SIZE);
+            }
+            if (includeStateAccessTiming) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_ACCESS_TIMING);
             }
             if (a4s) {
                 fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_TASK_TIMES);

@@ -104,7 +104,8 @@ public class ScalingMetricEvaluator {
                 collectedMetrics.getObservedBlockCacheUsage(),
                 collectedMetrics.getObservedBlockCacheCounters(),
                 collectedMetrics.getObservedStateSizes(),
-                Map.copyOf(taskTimeFractions));
+                Map.copyOf(taskTimeFractions),
+                collectedMetrics.getObservedStateAccessTiming());
     }
 
     @VisibleForTesting

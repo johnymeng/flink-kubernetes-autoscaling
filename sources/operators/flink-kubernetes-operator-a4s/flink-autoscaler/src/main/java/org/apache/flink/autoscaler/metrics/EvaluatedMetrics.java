@@ -19,6 +19,7 @@ package org.apache.flink.autoscaler.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import lombok.AllArgsConstructor;
@@ -46,6 +47,7 @@ public class EvaluatedMetrics {
     private Map<JobVertexID, CacheCounters> observedBlockCacheCounters = Map.of();
     private Map<JobVertexID, Long> observedStateSizes = Map.of();
     private Map<JobVertexID, TaskTimeFractions> taskTimeFractions = Map.of();
+    private Map<JobVertexID, StateAccessTiming> observedStateAccessTiming = Map.of();
 
     /** Fractions of the classified task time over the metrics window. */
     @Value
@@ -82,6 +84,7 @@ public class EvaluatedMetrics {
                 windowStart,
                 windowEnd,
                 jobRunningSince,
+                Map.of(),
                 Map.of(),
                 Map.of(),
                 Map.of(),

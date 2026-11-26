@@ -86,6 +86,12 @@ The local Flink fixture checkpointed two RocksDB column families. Their native l
 
 Eleven runtime tests and 108 focused autoscaler tests passed. Coverage includes chained databases, duplicate gauges, retired attempts, a valid zero, decreasing estimates, overflow and exact integers above double precision. A native monitor lifecycle test verified that the gauge starts unavailable, reports zero for an empty database after sampling and clears on close.
 
+### Observed RocksDB point-read timing
+
+A local Flink checkpoint fixture enabled the native `DB_GET` timing option and collected 291,000 ns across 240 calls. The normal REST collector and evaluator carried the pair into both standalone requests for the stateful vertex. The stateless source reported unavailable timing. Both requests replayed exactly after the rescale, which preserved all 200 expected IDs and keyed counts.
+
+All 13 focused runtime handler tests and 55 operator cases passed. The tests covered exact integer transport above double precision, current-attempt attribution, aliases, complete zero observations, and invalid or missing sample pairs. The local smoke used the changed Flink classes over the pinned runtime artifacts and the existing JNI library.
+
 ### Verified task-time windows
 
 A local Flink MiniCluster supplied a complete window to the production metrics collector and evaluator. The stateful vertex’s collected counters advanced by 2 ms busy and 484 ms idle, with zero backpressured milliseconds. The request to the independent runner reported busy and idle fractions of 0.004115 and 0.995885. The source lacked a complete breakdown in this fixture. The measured-window recommendation and two checkpoint fixture recommendations replayed exactly. The checkpoint rescale preserved all 200 expected outputs.

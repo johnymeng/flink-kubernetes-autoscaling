@@ -127,6 +127,7 @@ public class MetricNames {
     public static final String A4S_SLOT_BLOCK_CACHE_USAGE = "a4s-slot-block-cache-usage";
     public static final String A4S_BLOCK_CACHE_COUNTERS = "a4s-block-cache-counters";
     public static final String A4S_ROCKSDB_STATE_SIZE = "a4s-rocksdb-live-state-size";
+    public static final String A4S_ROCKSDB_GET_TIMING = "a4s-rocksdb-get-timing";
 
     public static final String NUM_CACHED_RECORDS = "numCachedRecords";
     public static final String NUM_CACHED_BYTES = "numCachedBytes";

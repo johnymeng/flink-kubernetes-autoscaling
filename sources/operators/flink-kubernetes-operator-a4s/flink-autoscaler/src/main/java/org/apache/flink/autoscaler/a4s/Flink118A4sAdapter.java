@@ -56,6 +56,7 @@ import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.ShipStrategy;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -166,6 +167,7 @@ public final class Flink118A4sAdapter {
                                     evaluated.getObservedBlockCacheCounters().get(id),
                                     evaluated.getObservedStateSizes().get(id),
                                     evaluated.getTaskTimeFractions().get(id),
+                                    evaluated.getObservedStateAccessTiming().get(id),
                                     taskPlacements.getOrDefault(id, Map.of()))));
         }
         double baseMiB = conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
@@ -286,6 +288,7 @@ public final class Flink118A4sAdapter {
             CacheCounters observedBlockCacheCounters,
             Long observedStateSize,
             TaskTimeFractions taskTimes,
+            StateAccessTiming stateAccessTiming,
             Map<String, String> taskPlacement) {
         Double legacyBusy = finite(metrics.get(ScalingMetric.LOAD));
         Double busy =
@@ -309,8 +312,8 @@ public final class Flink118A4sAdapter {
                 observedStateSize,
                 observedBlockCacheCounters == null ? null : observedBlockCacheCounters.hits,
                 observedBlockCacheCounters == null ? null : observedBlockCacheCounters.misses,
-                null,
-                null,
+                stateAccessTiming == null ? null : stateAccessTiming.nanos,
+                stateAccessTiming == null ? null : stateAccessTiming.count,
                 observedSourceBacklog,
                 taskPlacement,
                 observedBlockCacheCapacity);

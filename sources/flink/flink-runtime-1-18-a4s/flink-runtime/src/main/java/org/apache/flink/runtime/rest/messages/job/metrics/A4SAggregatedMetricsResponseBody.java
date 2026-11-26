@@ -44,12 +44,15 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
 
     public static final String FIELD_NAME_TASK_TIMES = "observedTaskTimes";
 
+    public static final String FIELD_NAME_STATE_ACCESS_TIMING = "observedStateAccessTiming";
+
     @Nullable private final Long observedSourceBacklogRecords;
     @Nullable private final Long observedBlockCacheCapacityBytes;
     @Nullable private final Long observedBlockCacheUsageBytes;
     @Nullable private final CacheCounters observedBlockCacheCounters;
     @Nullable private final Long observedStateSizeBytes;
     @Nullable private final TaskTimeTotals observedTaskTimes;
+    @Nullable private final StateAccessTiming observedStateAccessTiming;
 
     public A4SAggregatedMetricsResponseBody(@Nullable MissRateCurve scaledMrc) {
         this(null, scaledMrc);
@@ -131,6 +134,27 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
                 null);
     }
 
+    public A4SAggregatedMetricsResponseBody(
+            @Nullable Status status,
+            @Nullable MissRateCurve scaledMrc,
+            @Nullable Long observedSourceBacklogRecords,
+            @Nullable Long observedBlockCacheCapacityBytes,
+            @Nullable Long observedBlockCacheUsageBytes,
+            @Nullable CacheCounters observedBlockCacheCounters,
+            @Nullable Long observedStateSizeBytes,
+            @Nullable TaskTimeTotals observedTaskTimes) {
+        this(
+                status,
+                scaledMrc,
+                observedSourceBacklogRecords,
+                observedBlockCacheCapacityBytes,
+                observedBlockCacheUsageBytes,
+                observedBlockCacheCounters,
+                observedStateSizeBytes,
+                observedTaskTimes,
+                null);
+    }
+
     @JsonCreator
     public A4SAggregatedMetricsResponseBody(
             @JsonProperty(FIELD_NAME_STATUS) @Nullable Status status,
@@ -141,7 +165,9 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
             @JsonProperty(FIELD_NAME_CACHE_COUNTERS) @Nullable
                     CacheCounters observedBlockCacheCounters,
             @JsonProperty(FIELD_NAME_STATE_SIZE) @Nullable Long observedStateSizeBytes,
-            @JsonProperty(FIELD_NAME_TASK_TIMES) @Nullable TaskTimeTotals observedTaskTimes) {
+            @JsonProperty(FIELD_NAME_TASK_TIMES) @Nullable TaskTimeTotals observedTaskTimes,
+            @JsonProperty(FIELD_NAME_STATE_ACCESS_TIMING) @Nullable
+                    StateAccessTiming observedStateAccessTiming) {
         super(status, scaledMrc);
         this.observedSourceBacklogRecords = observedSourceBacklogRecords;
         this.observedBlockCacheCapacityBytes = observedBlockCacheCapacityBytes;
@@ -149,6 +175,7 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
         this.observedBlockCacheCounters = observedBlockCacheCounters;
         this.observedStateSizeBytes = observedStateSizeBytes;
         this.observedTaskTimes = observedTaskTimes;
+        this.observedStateAccessTiming = observedStateAccessTiming;
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -191,6 +218,27 @@ public class A4SAggregatedMetricsResponseBody extends MissRateCurveObservation
     @Nullable
     public TaskTimeTotals getObservedTaskTimes() {
         return observedTaskTimes;
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    @JsonProperty(FIELD_NAME_STATE_ACCESS_TIMING)
+    @Nullable
+    public StateAccessTiming getObservedStateAccessTiming() {
+        return observedStateAccessTiming;
+    }
+
+    /** Cumulative RocksDB DB_GET time and operation count in the running attempts. */
+    public static final class StateAccessTiming {
+        public final long nanos;
+        public final long count;
+
+        @JsonCreator
+        public StateAccessTiming(
+                @JsonProperty(value = "nanos", required = true) long nanos,
+                @JsonProperty(value = "count", required = true) long count) {
+            this.nanos = nanos;
+            this.count = count;
+        }
     }
 
     /** Cumulative time counters for a complete running task roster. */

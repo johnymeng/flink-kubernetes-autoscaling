@@ -33,6 +33,7 @@ import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.client.program.rest.RestClusterClient;
@@ -182,6 +183,7 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         Map<JobVertexID, Long> observedBlockCacheUsage = new HashMap<>();
         Map<JobVertexID, CacheCounters> observedBlockCacheCounters = new HashMap<>();
         Map<JobVertexID, Long> observedStateSizes = new HashMap<>();
+        Map<JobVertexID, StateAccessTiming> observedStateAccessTiming = new HashMap<>();
         a4sObservations.forEach(
                 (vertex, response) -> {
                     Long capacity = response.getObservedBlockCacheCapacityBytes();
@@ -201,6 +203,14 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                             && !topology.get(vertex).isFinished()) {
                         observedBlockCacheCounters.put(vertex, counters);
                     }
+                    StateAccessTiming timing = response.getObservedStateAccessTiming();
+                    if (timing != null
+                            && timing.nanos >= 0
+                            && timing.count >= 0
+                            && (timing.count != 0 || timing.nanos == 0)
+                            && !topology.get(vertex).isFinished()) {
+                        observedStateAccessTiming.put(vertex, timing);
+                    }
                     Long stateSize = response.getObservedStateSizeBytes();
                     if (stateSize != null && stateSize >= 0 && !topology.get(vertex).isFinished()) {
                         observedStateSizes.put(vertex, stateSize);
@@ -218,6 +228,7 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         collectedMetrics.setObservedBlockCacheUsage(Map.copyOf(observedBlockCacheUsage));
         collectedMetrics.setObservedBlockCacheCounters(Map.copyOf(observedBlockCacheCounters));
         collectedMetrics.setObservedStateSizes(Map.copyOf(observedStateSizes));
+        collectedMetrics.setObservedStateAccessTiming(Map.copyOf(observedStateAccessTiming));
         if (now.isBefore(windowFullTime)) {
             LOG.info("Metric window not full until {}", readable(windowFullTime));
         } else {

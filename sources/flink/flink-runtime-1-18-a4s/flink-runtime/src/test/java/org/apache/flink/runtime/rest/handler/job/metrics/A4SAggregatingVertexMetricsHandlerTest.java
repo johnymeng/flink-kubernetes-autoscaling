@@ -427,6 +427,54 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
     }
 
     @Test
+    public void testStateAccessTimingUsesOnlyCurrentCompleteDatabaseSamples() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(2);
+        ArchivedExecutionVertex[] tasks = {runningTask(0, 1), runningTask(1, 2)};
+        when(vertex.getTaskVertices()).thenReturn(tasks);
+        Map<String, String> paths = new HashMap<>();
+        paths.put(JobIDPathParameter.KEY, jobId.toString());
+        paths.put(JobVertexIdPathParameter.KEY, jobVertexId.toString());
+        HandlerRequest<EmptyRequestBody> request =
+                HandlerRequest.resolveParametersAndCreate(
+                        EmptyRequestBody.getInstance(),
+                        handler.getMessageHeaders().getUnresolvedMessageParameters(),
+                        paths,
+                        Collections.singletonMap("get", Collections.singletonList(
+                                A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_ACCESS_TIMING)),
+                        Collections.emptyList());
+
+        String first = "34d73888-3125-4cdf-9295-5ac3794d77e1";
+        String second = "e6a1ef14-d1e9-4014-bc02-2bd6fa55ab04";
+        putStateAccessTiming(0, 1, "first", first + ":1:1000:1");
+        putStateAccessTiming(0, 1, "alias", first + ":2:9007199254741000:2");
+        putStateAccessTiming(1, 1, "retired", second + ":100:9000:9");
+        assertNull(handler.handleRequest(request, restfulGateway).get().getObservedStateAccessTiming());
+        putStateAccessTiming(1, 2, "current", second + ":1:0:0");
+        A4SAggregatedMetricsResponseBody.StateAccessTiming timing =
+                handler.handleRequest(request, restfulGateway).get().getObservedStateAccessTiming();
+        assertEquals(9007199254741000L, timing.nanos);
+        assertEquals(2, timing.count);
+        assertNull(handler.handleRequest(createRequest(jobId.toString(), jobVertexId.toString()), restfulGateway)
+                .get().getObservedStateAccessTiming());
+        putStateAccessTiming(1, 2, "current", second + ":2:1:0");
+        assertNull(handler.handleRequest(request, restfulGateway).get().getObservedStateAccessTiming());
+    }
+
+    private void putStateAccessTiming(int subtask, int attempt, String scope, String reading) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), subtask, attempt, scope),
+                        MetricNames.A4S_ROCKSDB_GET_TIMING,
+                        reading));
+    }
+
+    @Test
     public void testLiveStateSizeCountsDistinctDatabasesFromCurrentAttempts() throws Exception {
         ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
         ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);

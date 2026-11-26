@@ -34,6 +34,7 @@ import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -256,7 +257,9 @@ public class MetricsCollectionAndEvaluationTest {
                                                 9007199254740993L,
                                                 9007199254740993L,
                                                 new CacheCounters(9007199254740993L, 0L),
-                                                9007199254740995L),
+                                                9007199254740995L,
+                                                null,
+                                                new StateAccessTiming(9007199254741000L, 2L)),
                                 sink,
                                         new A4SAggregatedMetricsResponseBody(
                                                 null, null, null, null, 0L)));
@@ -315,11 +318,20 @@ public class MetricsCollectionAndEvaluationTest {
                             ? Long.valueOf(9007199254740995L)
                             : null,
                     operator.telemetry.stateSizeBytes);
+            assertEquals(
+                    operator.operatorId.equals(map.toHexString())
+                            ? Long.valueOf(9007199254741000L)
+                            : null,
+                    operator.telemetry.stateAccessNanos);
+            assertEquals(
+                    operator.operatorId.equals(map.toHexString()) ? Long.valueOf(2L) : null,
+                    operator.telemetry.stateAccessCount);
             assertNull(operator.current.cachePerTaskBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
 
-        observations.remove(map);
+        observations.put(map, new A4SAggregatedMetricsResponseBody(
+                null, null, null, null, null, null, null, null, new StateAccessTiming(1000L, 0L)));
         observations.remove(sink);
         observations.remove(source1);
         observations.put(source2, new A4SAggregatedMetricsResponseBody(null, null, -1L));
@@ -344,6 +356,8 @@ public class MetricsCollectionAndEvaluationTest {
             assertNull(operator.telemetry.cacheHits);
             assertNull(operator.telemetry.cacheMisses);
             assertNull(operator.telemetry.stateSizeBytes);
+            assertNull(operator.telemetry.stateAccessNanos);
+            assertNull(operator.telemetry.stateAccessCount);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
     }

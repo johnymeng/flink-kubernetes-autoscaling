@@ -23,6 +23,7 @@ import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.AccessExecutionJobVertex;
@@ -40,6 +41,7 @@ import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
 import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.StateAccessTiming;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedVertexMetricsHeaders;
 import org.apache.flink.runtime.rest.messages.job.metrics.AggregatedSubtaskMetricsParameters;
@@ -120,6 +122,9 @@ public class A4SAggregatingVertexMetricsHandler
         boolean includeTaskTimes =
                 request.getQueryParameter(MetricsFilterParameter.class)
                         .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_TASK_TIMES);
+        boolean includeStateAccessTiming =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_ACCESS_TIMING);
 
         return CompletableFuture.supplyAsync(
                         () -> {
@@ -131,6 +136,7 @@ public class A4SAggregatingVertexMetricsHandler
                                                         || includeCacheCounters
                                                         || includeStateSize
                                                         || includeTaskTimes
+                                                        || includeStateAccessTiming
                                                 ? gateway.requestJob(jobId, timeout)
                                                 : null;
                                 CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
@@ -182,6 +188,9 @@ public class A4SAggregatingVertexMetricsHandler
                                                             : null,
                                                     includeTaskTimes
                                                             ? aggregateTaskTimes(observed)
+                                                            : null,
+                                                    includeStateAccessTiming
+                                                            ? aggregateStateAccessTiming(attempts)
                                                             : null);
                                         });
                             } catch (Exception e) {
@@ -438,18 +447,36 @@ public class A4SAggregatingVertexMetricsHandler
     @Nullable
     private static CacheCounters aggregateCacheCounters(
             @Nullable List<Map<String, String>> attempts) {
+        Tuple2<Long, Long> totals = aggregateDatabaseCounters(
+                attempts, MetricNames.A4S_BLOCK_CACHE_COUNTERS, false);
+        return totals == null ? null : new CacheCounters(totals.f0, totals.f1);
+    }
+
+    @Nullable
+    private static StateAccessTiming aggregateStateAccessTiming(
+            @Nullable List<Map<String, String>> attempts) {
+        Tuple2<Long, Long> totals = aggregateDatabaseCounters(
+                attempts, MetricNames.A4S_ROCKSDB_GET_TIMING, true);
+        return totals == null ? null : new StateAccessTiming(totals.f0, totals.f1);
+    }
+
+    @Nullable
+    private static Tuple2<Long, Long> aggregateDatabaseCounters(
+            @Nullable List<Map<String, String>> attempts,
+            String metricName,
+            boolean durationAndCount) {
         if (attempts == null) {
             return null;
         }
-        long hits = 0;
-        long misses = 0;
+        long firstTotal = 0;
+        long secondTotal = 0;
         HashSet<UUID> databases = new HashSet<>();
         for (Map<String, String> attempt : attempts) {
-            Map<UUID, TreeMap<Long, CacheCounters>> samplesByDatabase = new HashMap<>();
+            Map<UUID, TreeMap<Long, Tuple2<Long, Long>>> samplesByDatabase = new HashMap<>();
             for (Map.Entry<String, String> metric : attempt.entrySet()) {
                 String name = metric.getKey();
-                if (!MetricNames.A4S_BLOCK_CACHE_COUNTERS.equals(name)
-                        && !name.endsWith("." + MetricNames.A4S_BLOCK_CACHE_COUNTERS)) {
+                if (!metricName.equals(name)
+                        && !name.endsWith("." + metricName)) {
                     continue;
                 }
                 String value = metric.getValue();
@@ -460,18 +487,19 @@ public class A4SAggregatingVertexMetricsHandler
                 try {
                     UUID database = UUID.fromString(parts[0]);
                     long sequence = Long.parseLong(parts[1]);
-                    long sampleHits = Long.parseLong(parts[2]);
-                    long sampleMisses = Long.parseLong(parts[3]);
-                    if (sequence <= 0 || sampleHits < 0 || sampleMisses < 0) {
+                    long first = Long.parseLong(parts[2]);
+                    long second = Long.parseLong(parts[3]);
+                    if (sequence <= 0 || first < 0 || second < 0
+                            || durationAndCount && second == 0 && first != 0) {
                         return null;
                     }
-                    CacheCounters previous =
+                    Tuple2<Long, Long> previous =
                             samplesByDatabase
                                     .computeIfAbsent(database, ignored -> new TreeMap<>())
                                     .putIfAbsent(
-                                            sequence, new CacheCounters(sampleHits, sampleMisses));
+                                            sequence, Tuple2.of(first, second));
                     if (previous != null
-                            && (previous.hits != sampleHits || previous.misses != sampleMisses)) {
+                            && (previous.f0 != first || previous.f1 != second)) {
                         return null;
                     }
                 } catch (IllegalArgumentException e) {
@@ -481,28 +509,28 @@ public class A4SAggregatingVertexMetricsHandler
             if (samplesByDatabase.isEmpty()) {
                 return null;
             }
-            for (Map.Entry<UUID, TreeMap<Long, CacheCounters>> database :
+            for (Map.Entry<UUID, TreeMap<Long, Tuple2<Long, Long>>> database :
                     samplesByDatabase.entrySet()) {
                 if (!databases.add(database.getKey())) {
                     return null;
                 }
-                CacheCounters latest = null;
-                for (CacheCounters sample : database.getValue().values()) {
+                Tuple2<Long, Long> latest = null;
+                for (Tuple2<Long, Long> sample : database.getValue().values()) {
                     if (latest != null
-                            && (sample.hits < latest.hits || sample.misses < latest.misses)) {
+                            && (sample.f0 < latest.f0 || sample.f1 < latest.f1)) {
                         return null;
                     }
                     latest = sample;
                 }
-                if (latest.hits > Long.MAX_VALUE - hits
-                        || latest.misses > Long.MAX_VALUE - misses) {
+                if (latest.f0 > Long.MAX_VALUE - firstTotal
+                        || latest.f1 > Long.MAX_VALUE - secondTotal) {
                     return null;
                 }
-                hits += latest.hits;
-                misses += latest.misses;
+                firstTotal += latest.f0;
+                secondTotal += latest.f1;
             }
         }
-        return new CacheCounters(hits, misses);
+        return Tuple2.of(firstTotal, secondTotal);
     }
 
     @Nullable
