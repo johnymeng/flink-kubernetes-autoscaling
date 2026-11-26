@@ -377,6 +377,20 @@ python3 scripts/a4s/score-q8-crossover.py "$Q8_RUN_BUNDLE" \
   --counterbalanced-bundle "$Q8_REVERSED_RUN_BUNDLE"
 ```
 
+### Check source backlog in a paced Q8 comparison
+
+The pinned replay job accepts a flat `--q8-input-plan` in `seconds:personRate:auctionRate` form. The rates apply to each source subtask. For a 600-second comparison at 10,000 offered records/s with two subtasks per source, use `600:1111:3889` and set `--person-srcRate 1111` and `--auction-srcRate 3889` in the copied launch configuration. Update the corresponding input-plan assertion in the archived launcher before it seals either bundle. Keep the same release-relative windows, task placement and starting profiles in both deployments. The lower offered rate is a control for latency under lighter load. The saturated runs supply the capacity observations.
+
+Use a backlog limit of 10,000 records to check for no more than one second of the planned input in the combined source backlog at the sampled points. The scorer reads the raw operational series, requires `q8Offered` and `q8Backlog` from all four source subtasks on the measured attempts, and reports the observed offer rate, peak backlog and sample coverage for each window. The limit covers the recorded observations. REST gauge refresh can affect the observed offer rate over short spans.
+
+```bash
+python3 scripts/a4s/score-q8-crossover.py "$Q8_PACED_BUNDLE" \
+  --counterbalanced-bundle "$Q8_REVERSED_PACED_BUNDLE" \
+  --max-source-backlog-records 10000
+```
+
+A local in-memory MiniCluster smoke used the same source split with a 30-second plan. Over 9.97 seconds of warmed input, Flink reported 9,999.6 offered records/s, 9,999.0 emitted records/s and 9,983.7 join inputs/s. Peak observed backlog was 83 records. The short smoke recorded zero joined-result latency samples. Local RocksDB exhausted RAM scratch, so the complete pacing check used in-memory state. The gate independently rejected `live-b85805f4` at its first saturated window with 11,195,976 observed backlogged records, and scoring with the option omitted reproduced the archived comparison byte for byte.
+
 ### Prepare the Q20 follow-up
 
 The [Q20 renderer](../scripts/a4s/prepare-q20-comparison.py) uses the existing [checkpoint experiment template](../experiments/1729-checkpoint-aware-rescaling/instruction.md). It creates three repetitions, rotating original, embedded, and remote through each position. It pins the workload image, replaces the template's `tier` selectors with the requested hostnames, and places the operator and remote runner on the selected JobManager host. Both Flink roles can use one idle worker when capacity permits. Each arm gets a separate namespace and checkpoint path. The renderer keeps the shared 600 MiB A4S limit, periodic checkpoints with a one-minute default, and last-state upgrades. It disables deployment-wide memory tuning so that additional pod memory edits do not force redeployment during a Justin scale, and disables the template's separate checkpoint-gated producer pause. Python 3.9 or later and PyYAML are required.

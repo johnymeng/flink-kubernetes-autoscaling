@@ -3,6 +3,7 @@ import json
 import runpy
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -60,6 +61,72 @@ class TimedLatencyTest(unittest.TestCase):
         result = scorer["score_timed_latency"](frames, 100, 140, latency_tools["sample_times"],
                                                latency_tools["timed_interval"])
         self.assertIsNone(result)
+
+
+class PacedSourceTest(unittest.TestCase):
+    start = 1_700_000_000_000
+
+    def setUp(self):
+        self.spec = {"job_id": "job", "collection_seconds": 600,
+                     "vertices": {role: role for role in ("person", "auction", "join")}}
+        self.roster = {role: [(task, 0, self.start, "tm") for task in range(count)]
+                       for role, count in (("person", 2), ("auction", 2), ("join", 1))}
+
+    def snapshot(self, offset, backlog):
+        responses = {"job": {"jid": "job", "state": "RUNNING"}, "subtask_metrics": {}}
+        for role, tasks in self.roster.items():
+            responses[role] = {"id": role, "subtasks": [
+                {"status": "RUNNING", "subtask": subtask, "attempt": attempt,
+                 "start-time": start, "taskmanager-id": worker}
+                for subtask, attempt, start, worker in tasks
+            ]}
+            if role != "join":
+                rate = 1111 if role == "person" else 3889
+                for subtask, *_ in tasks:
+                    responses["subtask_metrics"][f"{role}/{subtask}"] = {"values": [
+                        {"id": "source.q8Offered", "value": str(offset * rate)},
+                        {"id": "source.q8Backlog", "value": str(backlog)},
+                    ]}
+        return {"started": datetime.fromtimestamp(self.start / 1000 + offset, timezone.utc).isoformat(),
+                "responses": responses}
+
+    def qualify(self, rows):
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = Path(directory)
+            scout = bundle / "scout"
+            scout.mkdir()
+            (scout / "deployment.json").write_text(json.dumps({
+                "spec": {"job": {"args": ["--q8-input-plan", "600:1111:3889"]}},
+            }))
+            (scout / "operational-snapshots.jsonl").write_text("\n".join(map(json.dumps, rows)))
+            return scorer["qualify_paced_input"](bundle, self.spec,
+                                                 [(self.start, self.start + 20_000, "period")],
+                                                 self.roster, 1000)["period"]
+
+    def test_uses_all_four_sources_and_reports_peak_inside_window(self):
+        result = self.qualify([self.snapshot(0, 0), self.snapshot(10, 35), self.snapshot(20, 10)])
+        self.assertEqual(result, {"plannedOfferedRecordsPerSecond": 10_000,
+                                  "observedOfferedRecordsPerSecond": 10_000,
+                                  "peakObservedSourceBacklogRecords": 140,
+                                  "sourceObservations": 3, "observedSeconds": 20})
+
+    def test_rejects_peak_backlog_and_missing_source_gauges(self):
+        with self.assertRaisesRegex(ValueError, "observed 1200 backlogged records"):
+            self.qualify([self.snapshot(0, 0), self.snapshot(10, 300), self.snapshot(20, 0)])
+        incomplete = self.snapshot(10, 0)
+        incomplete["responses"]["subtask_metrics"].pop("person/0")
+        with self.assertRaisesRegex(ValueError, "complete source gauges"):
+            self.qualify([self.snapshot(0, 0), incomplete, self.snapshot(20, 0)])
+
+    def test_rejects_changed_attempt_and_offered_counter_reset(self):
+        changed = self.snapshot(20, 0)
+        changed["responses"]["person"]["subtasks"][0]["attempt"] = 1
+        with self.assertRaisesRegex(ValueError, "complete source gauges"):
+            self.qualify([self.snapshot(0, 0), changed])
+        reset = self.snapshot(20, 0)
+        reset["responses"]["subtask_metrics"]["person/0"]["values"][0]["value"] = "0"
+        with self.assertRaisesRegex(ValueError, "reset offered counter"):
+            self.qualify([self.snapshot(10, 0), reset])
 
 
 class PodResourcesTest(unittest.TestCase):

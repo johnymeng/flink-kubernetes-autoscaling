@@ -159,7 +159,74 @@ def score_timed_latency(frames, start, end, sample_times, timed_interval):
     return timed_interval(eligible[0], eligible[-1])
 
 
-def score(bundle, latency_script):
+def paced_source_sample(responses, spec, roster):
+    job = responses.get("job") or {}
+    if job.get("jid") != spec["job_id"] or job.get("state") != "RUNNING":
+        raise ValueError("Q8 source sample did not come from the measured running job")
+    try:
+        if (running_roster({"vertices": responses}) != roster
+                or any(responses[role]["id"] != spec["vertices"][role] for role in roster)):
+            raise ValueError("Q8 source or join attempts changed during the measurement")
+        offered, backlog = [], 0
+        for role in ("person", "auction"):
+            for subtask, *_ in roster[role]:
+                values = responses["subtask_metrics"][f"{role}/{subtask}"]["values"]
+                counts = []
+                for suffix in (".q8Offered", ".q8Backlog"):
+                    [metric] = [metric for metric in values if metric["id"].endswith(suffix)]
+                    value = integer_gauge(metric, "value")
+                    if value is None:
+                        raise ValueError(f"Invalid Q8 source gauge {suffix}")
+                    counts.append(value)
+                offered.append(counts[0])
+                backlog += counts[1]
+        return offered, backlog
+    except (AssertionError, KeyError, TypeError, ValueError) as error:
+        raise ValueError("Q8 pacing requires complete source gauges on the measured task attempts") from error
+
+
+def qualify_paced_input(bundle, spec, windows, roster, backlog_limit):
+    """Check observed backlog and report offered input for one constant-rate plan."""
+    args = read(bundle / "scout/deployment.json")["spec"]["job"]["args"]
+    try:
+        duration, persons, auctions = map(int, args[args.index("--q8-input-plan") + 1].split(":"))
+    except (IndexError, ValueError) as error:
+        raise ValueError("Paced Q8 requires one input stage: seconds:personRate:auctionRate") from error
+    if duration != spec["collection_seconds"] or min(persons, auctions) <= 0:
+        raise ValueError("Paced Q8 input must cover the run and offer both sources throughout")
+    planned_rate = persons * len(roster["person"]) + auctions * len(roster["auction"])
+    timeline = bundle / "scout/operational-snapshots.jsonl"
+    if not timeline.is_file():
+        raise ValueError("Paced Q8 requires the operational source snapshots")
+    with timeline.open() as stream:
+        observations = [(int(datetime.fromisoformat(row["started"]).timestamp() * 1000), row["responses"])
+                        for row in map(json.loads, stream)]
+
+    result = {}
+    for start, end, period in windows:
+        samples = [(stamp, *paced_source_sample(responses, spec, roster))
+                   for stamp, responses in observations if start <= stamp <= end]
+        if len(samples) < 2:
+            raise ValueError(f"Q8 period {period} needs at least two complete source observations")
+        if any(after[0] <= before[0] or any(new < old for old, new in zip(before[1], after[1]))
+               for before, after in zip(samples, samples[1:])):
+            raise ValueError(f"Q8 period {period} has out-of-order observations or a reset offered counter")
+        peak = max(row[2] for row in samples)
+        if peak > backlog_limit:
+            raise ValueError(f"Q8 period {period} observed {peak} backlogged records, above {backlog_limit}")
+        first, last = samples[0], samples[-1]
+        elapsed = (last[0] - first[0]) / 1000
+        offered_delta = sum(last[1]) - sum(first[1])
+        if offered_delta == 0:
+            raise ValueError(f"Q8 period {period} observed no new offered input")
+        result[period] = {"plannedOfferedRecordsPerSecond": planned_rate,
+                          "observedOfferedRecordsPerSecond": offered_delta / elapsed,
+                          "peakObservedSourceBacklogRecords": peak,
+                          "sourceObservations": len(samples), "observedSeconds": elapsed}
+    return result
+
+
+def score(bundle, latency_script, backlog_limit=None):
     arm = bundle / "scout"
     paths = sorted((arm / "crossover").glob("[0-9][0-9]-*"))
     events = list(read_runner(arm / "runner.log"))
@@ -247,6 +314,10 @@ def score(bundle, latency_script):
         all_periods.append(summary)
 
     assert len(decisions) == 1, "Multiple execution generations in measured periods"
+    if backlog_limit is not None:
+        source_input = qualify_paced_input(bundle, spec, observed_intervals, roster, backlog_limit)
+        for period in all_periods:
+            period["pacedSourceInput"] = source_input[period["period"]]
     relative = []
     for pair in (all_periods[i:i + 2] for i in range(0, len(all_periods), 2)):
         rates = {item["mode"]: item["joinInputRecordsPerSecond"] for item in pair}
@@ -265,7 +336,7 @@ def workload_configuration(bundle, run):
     return json.dumps(deployment, sort_keys=True).replace(f"q8-pr2-{run}", "q8-pr2-<run>")
 
 
-def compare_counterbalanced(first_bundle, second_bundle, latency_script):
+def compare_counterbalanced(first_bundle, second_bundle, latency_script, backlog_limit=None):
     """Compare the same fixed allocation and treatment at opposite positions in time."""
     bundles = [first_bundle, second_bundle]
     specs = [read(bundle / "execution-spec.json") for bundle in bundles]
@@ -289,7 +360,7 @@ def compare_counterbalanced(first_bundle, second_bundle, latency_script):
             != read(second_bundle / "scout/admission/confirmed-applied-profiles.json")):
         raise ValueError("The two startup allocations differ")
 
-    deployments = [score(bundle, latency_script) for bundle in bundles]
+    deployments = [score(bundle, latency_script, backlog_limit) for bundle in bundles]
     for deployment in deployments:
         rates = {}
         for mode in reversed_modes:
@@ -315,10 +386,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--counterbalanced-bundle", type=Path, help="A second deployment with opposite mode order")
+    parser.add_argument("--max-source-backlog-records", type=int,
+                        help="Require a paced input plan and bound the observed combined source backlog")
     args = parser.parse_args()
+    if args.max_source_backlog_records is not None and args.max_source_backlog_records < 0:
+        parser.error("--max-source-backlog-records must be nonnegative")
     latency_script = Path(__file__).with_name("q8-latency.py")
-    if args.counterbalanced_bundle:
-        result = compare_counterbalanced(args.bundle, args.counterbalanced_bundle, latency_script)
-    else:
-        result = score(args.bundle, latency_script)
+    try:
+        if args.counterbalanced_bundle:
+            result = compare_counterbalanced(args.bundle, args.counterbalanced_bundle, latency_script,
+                                             args.max_source_backlog_records)
+        else:
+            result = score(args.bundle, latency_script, args.max_source_backlog_records)
+    except ValueError as error:
+        parser.exit(1, f"{error}\n")
     print(json.dumps(result, indent=2))
