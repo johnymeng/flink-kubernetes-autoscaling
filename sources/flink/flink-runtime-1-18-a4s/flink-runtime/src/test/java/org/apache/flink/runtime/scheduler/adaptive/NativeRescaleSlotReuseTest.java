@@ -54,6 +54,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -62,6 +63,7 @@ import static org.apache.flink.runtime.scheduler.adaptive.AdaptiveScheduler.NATI
 import static org.apache.flink.runtime.scheduler.adaptive.AdaptiveScheduler.NATIVE_RESCALE_PREALLOCATION_TIMEOUT;
 import static org.apache.flink.runtime.scheduler.adaptive.AdaptiveScheduler.NATIVE_RESCALE_PREALLOCATION_TIMEOUT_ACTION;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 /** Tests restart timing and allocation reuse during native scaling. */
 class NativeRescaleSlotReuseTest {
@@ -80,8 +82,17 @@ class NativeRescaleSlotReuseTest {
     private final List<Collection<ResourceRequirement>> declarations = new ArrayList<>();
     private final LocalTaskManagerLocation location = new LocalTaskManagerLocation();
     private final SimpleAckingTaskManagerGateway gateway = new SimpleAckingTaskManagerGateway();
+    private final List<Runnable> preparationCallbacks = new ArrayList<>();
     private final ManuallyTriggeredComponentMainThreadExecutor executor =
-            new ManuallyTriggeredComponentMainThreadExecutor(Thread.currentThread());
+            new ManuallyTriggeredComponentMainThreadExecutor(Thread.currentThread()) {
+                @Override
+                public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
+                    if (unit.toMillis(delay) == PREPARATION_TIMEOUT.toMillis()) {
+                        preparationCallbacks.add(command);
+                    }
+                    return super.schedule(command, delay, unit);
+                }
+            };
 
     private AdaptiveScheduler scheduler;
     private DefaultDeclarativeSlotPool slotPool;
@@ -403,6 +414,21 @@ class NativeRescaleSlotReuseTest {
     }
 
     @Test
+    void invalidTargetDoesNotChangeApplicationOrResourceDemand() throws Exception {
+        startJob(preallocation(AdaptiveScheduler.TimeoutAction.FALLBACK));
+        final State running = scheduler.getState();
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> requestResize(ORIGINAL_PROFILE, Integer.MAX_VALUE));
+
+        assertThat(scheduler.getState()).isSameAs(running);
+        assertThat(slotPool.getResourceRequirements())
+                .containsExactly(ResourceRequirement.create(ORIGINAL_PROFILE, 1));
+        assertThat(preparationCallbacks).isEmpty();
+        assertThat(canceled).isEmpty();
+    }
+
+    @Test
     void knownConfiguredLimitDefersWithoutDeclaringTheTarget() throws Exception {
         startJob(
                 preallocation(AdaptiveScheduler.TimeoutAction.DEFER)
@@ -503,7 +529,8 @@ class NativeRescaleSlotReuseTest {
                 .containsExactly(ResourceRequirement.create(ORIGINAL_PROFILE, 1));
 
         requestResize(ORIGINAL_PROFILE, 2);
-        oldDeadline.execute();
+        // Invoke the previously queued action even though Future.cancel() succeeded.
+        preparationCallbacks.get(0).run();
         assertThat(scheduler.getState()).isInstanceOf(Executing.class);
         assertThat(canceled).isEmpty();
         assertThat(offerSlots(newSlot(ORIGINAL_PROFILE))).hasSize(1);

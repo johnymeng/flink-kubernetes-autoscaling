@@ -18,7 +18,9 @@
 package org.apache.flink.runtime.scheduler.adaptive;
 
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.ResourceManagerOptions;
+import org.apache.flink.runtime.clusterframework.types.AllocationID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobmaster.SlotInfo;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.JustinSlotMatching;
@@ -113,6 +115,29 @@ class NativeRescalePreparationPlannerTest {
                         new Configuration().set(ResourceManagerOptions.MAX_SLOT_NUM, 1));
 
         assertThat(plan.fallback).isEqualTo("configured-resource-limit");
+    }
+
+    @Test
+    void checksConfiguredCpuAndMemoryHeadroomSeparately() {
+        final SlotInfo occupied = slot(SMALL);
+        final ResourceCounter applied = ResourceCounter.withResource(SMALL, 1);
+        final ResourceCounter target = ResourceCounter.withResource(SMALL, 2);
+        final Map<AllocationID, ResourceProfile> occupants =
+                Map.of(occupied.getAllocationId(), SMALL);
+
+        for (Configuration limits :
+                List.of(
+                        new Configuration().set(ResourceManagerOptions.MAX_TOTAL_CPU, 1.5),
+                        new Configuration()
+                                .set(
+                                        ResourceManagerOptions.MAX_TOTAL_MEM,
+                                        MemorySize.ofMebiBytes(511)))) {
+            assertThat(
+                            NativeRescalePreparationPlanner.plan(
+                                            applied, target, occupants, List.of(occupied), limits)
+                                    .fallback)
+                    .isEqualTo("configured-resource-limit");
+        }
     }
 
     private static SlotInfo slot(ResourceProfile profile) {
