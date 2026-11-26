@@ -203,5 +203,9 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
         scalingHistoryStore.remove(jobKey);
         collectedMetricsStore.remove(jobKey);
         parallelismOverridesStore.remove(jobKey);
+        resourceProfileOverridesStore.remove(jobKey);
+        tmConfigOverrides.remove(jobKey);
+        scalingTrackingStore.remove(jobKey);
+        delayedScaleDownStore.remove(jobKey);
     }
 }

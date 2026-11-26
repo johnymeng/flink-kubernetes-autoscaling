@@ -38,6 +38,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.A4S_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.JUSTIN_ENABLED;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.initRecommendedParallelism;
@@ -86,8 +87,12 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
     @Override
     public void scale(Context ctx) throws Exception {
         var autoscalerMetrics = getOrInitAutoscalerFlinkMetrics(ctx);
+        var conf = ctx.getConfiguration();
+        boolean a4sEnabled = false;
+        boolean realizeOverrides = true;
         try {
-            if (!ctx.getConfiguration().getBoolean(AUTOSCALER_ENABLED)) {
+            a4sEnabled = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
+            if (!conf.getBoolean(AUTOSCALER_ENABLED)) {
                 LOG.debug("Autoscaler is disabled");
                 stateStore.clearAll(ctx);
                 stateStore.flush(ctx);
@@ -105,18 +110,26 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         } catch (NotReadyException e) {
             LOG.debug("Not ready for scaling", e);
         } catch (Throwable e) {
+            if (a4sEnabled) {
+                // A failed reconciliation can leave one half of an A4S decision in the
+                // state-store cache. Discard it before any subsequent reconciliation.
+                realizeOverrides = false;
+                stateStore.removeInfoFromCache(ctx.getJobKey());
+            }
             onError(ctx, autoscalerMetrics, e);
         } finally {
-            try {
-                if (ctx.getConfiguration().getBoolean(JUSTIN_ENABLED)) {
-                    applyResourceProfileOverrides(ctx);
-                } else {
-                    applyParallelismOverrides(ctx);
+            if (realizeOverrides) {
+                try {
+                    if (conf.getBoolean(JUSTIN_ENABLED)) {
+                        applyResourceProfileOverrides(ctx);
+                    } else {
+                        applyParallelismOverrides(ctx);
+                    }
+                    applyConfigOverrides(ctx);
+                } catch (Exception e) {
+                    LOG.error("Error applying overrides.", e);
+                    onError(ctx, autoscalerMetrics, e);
                 }
-                applyConfigOverrides(ctx);
-            } catch (Exception e) {
-                LOG.error("Error applying overrides.", e);
-                onError(ctx, autoscalerMetrics, e);
             }
         }
     }
@@ -182,6 +195,10 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         var resourceProfileOverrides = getResourceProfileOverrides(ctx);
         if (parallelismOverrides.isEmpty() && resourceProfileOverrides.isEmpty()) {
             return;
+        }
+        if (ctx.getConfiguration().get(A4S_ENABLED)
+                && !parallelismOverrides.keySet().equals(resourceProfileOverrides.keySet())) {
+            throw new IllegalStateException("Incomplete A4S parallelism and resource-profile overrides");
         }
         LOG.debug("Applying parallelism overrides: {}, {}", parallelismOverrides, resourceProfileOverrides);
 

@@ -22,6 +22,7 @@ import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.exceptions.NotReadyException;
 import org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics;
+import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.metrics.TestMetrics;
@@ -39,6 +40,7 @@ import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.Metric;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.mock.Whitebox;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.metrics.groups.GenericMetricGroup;
 
@@ -55,6 +57,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static java.util.Map.entry;
 import static org.apache.flink.autoscaler.TestingAutoscalerUtils.createDefaultJobAutoScalerContext;
@@ -231,6 +234,74 @@ public class JobAutoScalerImplTest {
         autoscaler.scale(context);
         Assertions.assertEquals(
                 1, autoscaler.flinkMetrics.get(context.getJobKey()).getNumErrorsCount());
+    }
+
+    @Test
+    void a4sRealizesOnlyCompleteOverridesAfterSuccessfulPersistence() throws Exception {
+        var conf = context.getConfiguration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
+
+        var failFlush = new AtomicBoolean(true);
+        var store =
+                new InMemoryAutoScalerStateStore<JobID, JobAutoScalerContext<JobID>>() {
+                    @Override
+                    public void flush(JobAutoScalerContext<JobID> ctx) {
+                        if (failFlush.get()) {
+                            throw new IllegalStateException("Injected persistence failure");
+                        }
+                    }
+                };
+        var vertex = new JobVertexID();
+        var parallelism = Map.of(vertex.toHexString(), "2");
+        var profiles =
+                Map.of(
+                        vertex.toHexString(),
+                        ResourceProfile.newBuilder().setManagedMemoryMB(116).build().toString());
+        var realizedProfiles = new HashMap<String, String>();
+        var realizer =
+                new TestingScalingRealizer<JobID, JobAutoScalerContext<JobID>>() {
+                    @Override
+                    public void realizeParallelismOverrides(
+                            JobAutoScalerContext<JobID> ctx,
+                            Map<String, String> requested,
+                            Map<String, String> requestedProfiles) {
+                        super.realizeParallelismOverrides(ctx, requested);
+                        realizedProfiles.putAll(requestedProfiles);
+                    }
+                };
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 20));
+        var metricsCollector =
+                new TestingMetricsCollector<JobID, JobAutoScalerContext<JobID>>(topology) {
+                    @Override
+                    public CollectedMetricHistory updateMetrics(
+                            JobAutoScalerContext<JobID> ctx,
+                            AutoScalerStateStore<JobID, JobAutoScalerContext<JobID>> stateStore) {
+                        return new CollectedMetricHistory(topology, new TreeMap<>(), Instant.EPOCH);
+                    }
+                };
+        var autoscaler =
+                new JobAutoScalerImpl<>(
+                        metricsCollector, null, null, eventCollector, realizer, store);
+
+        store.storeParallelismOverrides(context, parallelism);
+        store.storeResourceProfileOverrides(context, profiles);
+        autoscaler.scale(context);
+        assertThat(realizer.events).isEmpty();
+        assertThat(store.getParallelismOverrides(context)).isEmpty();
+        assertThat(store.getResourceProfileOverrides(context)).isEmpty();
+
+        failFlush.set(false);
+        store.storeParallelismOverrides(context, parallelism);
+        autoscaler.scale(context);
+        assertThat(realizer.events).isEmpty();
+
+        store.storeResourceProfileOverrides(context, profiles);
+        autoscaler.scale(context);
+        assertThat(realizer.events).hasSize(1);
+        assertEquals(parallelism, realizer.events.getFirst().getParallelismOverrides());
+        assertEquals(profiles, realizedProfiles);
     }
 
     @Test
