@@ -26,6 +26,7 @@ import org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer.A4sIntentResult;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.autoscaler.utils.CalendarUtils;
@@ -39,6 +40,7 @@ import java.time.Clock;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED;
@@ -94,21 +96,26 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         var autoscalerMetrics = getOrInitAutoscalerFlinkMetrics(ctx);
         var conf = ctx.getConfiguration();
         boolean a4sEnabled = false;
-        boolean conditionalJustin = false;
-        boolean realizeOverrides = true;
+        boolean reconcileConditional = false;
+        boolean realizeOverrides = false;
         try {
             a4sEnabled = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
-            conditionalJustin = a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
-            realizeOverrides = !conditionalJustin;
-            if (!conf.getBoolean(AUTOSCALER_ENABLED)) {
-                LOG.debug("Autoscaler is disabled");
-                stateStore.clearAll(ctx);
-                stateStore.flush(ctx);
+            boolean autoscalerEnabled = conf.getBoolean(AUTOSCALER_ENABLED);
+            boolean allowNewIntent =
+                    autoscalerEnabled && a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
+            reconcileConditional = allowNewIntent;
+            var pending = stateStore.getA4sScalingIntent(ctx);
+            reconcileConditional |= pending.isPresent();
+            realizeOverrides = !reconcileConditional;
+            if (reconcileConditional) {
+                scaleConditionally(ctx, autoscalerMetrics, pending, allowNewIntent);
                 return;
             }
 
-            if (conditionalJustin) {
-                scaleConditionally(ctx, autoscalerMetrics);
+            if (!autoscalerEnabled) {
+                LOG.debug("Autoscaler is disabled");
+                stateStore.clearAll(ctx);
+                stateStore.flush(ctx);
                 return;
             }
 
@@ -123,14 +130,14 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         } catch (NotReadyException e) {
             LOG.debug("Not ready for scaling", e);
         } catch (Throwable e) {
-            if (a4sEnabled) {
+            if (a4sEnabled || reconcileConditional) {
                 // A failed reconciliation can leave one half of an A4S decision in the
                 // state-store cache. Discard it before any subsequent reconciliation.
                 realizeOverrides = false;
                 stateStore.removeInfoFromCache(ctx.getJobKey());
             }
             onError(ctx, autoscalerMetrics, e);
-            if (conditionalJustin) {
+            if (reconcileConditional) {
                 // Let the controller retry without interpreting an incomplete status overlay
                 // as a user-initiated spec change.
                 throw e;
@@ -152,10 +159,13 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         }
     }
 
-    private void scaleConditionally(Context ctx, AutoscalerFlinkMetrics autoscalerMetrics)
+    private void scaleConditionally(
+            Context ctx,
+            AutoscalerFlinkMetrics autoscalerMetrics,
+            Optional<A4sScalingIntent> pending,
+            boolean allowNewIntent)
             throws Exception {
         var jobId = Objects.toString(ctx.getJobID(), "");
-        var pending = stateStore.getA4sScalingIntent(ctx);
         if (pending.isPresent() && pending.get().getJobId().equals(jobId)) {
             scalingRealizer.restoreA4sOverrides(
                     ctx, pending.get().getParallelism(), pending.get().getResourceProfiles());
@@ -178,7 +188,9 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         var intent = pending.get();
         var conf = ctx.getConfiguration();
         boolean allowSubmission =
-                conf.get(SCALING_ENABLED)
+                allowNewIntent
+                        && conf.get(SCALING_ENABLED)
+                        && intent.matchesConfiguration(conf)
                         && !CalendarUtils.inExcludedPeriods(conf, clock.instant());
         var result =
                 intent.getJobId().equals(jobId)

@@ -17,13 +17,23 @@
 
 package org.apache.flink.autoscaler.state;
 
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.util.StringUtils;
+
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 
 import lombok.Value;
 
+import javax.annotation.Nullable;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeMap;
 
 /** A Flink target validated against one running execution and ready for conditional submission. */
 @Value
@@ -31,6 +41,7 @@ public class A4sScalingIntent {
     String jobId;
     String executionToken;
     long expiresAtMillis;
+    @Nullable String configurationFingerprint;
     Map<String, String> parallelism;
     Map<String, String> resourceProfiles;
     Map<String, Integer> lowerBounds;
@@ -40,12 +51,14 @@ public class A4sScalingIntent {
             @JsonProperty("jobId") String jobId,
             @JsonProperty("executionToken") String executionToken,
             @JsonProperty("expiresAtMillis") long expiresAtMillis,
+            @JsonProperty("configurationFingerprint") @Nullable String configurationFingerprint,
             @JsonProperty("parallelism") Map<String, String> parallelism,
             @JsonProperty("resourceProfiles") Map<String, String> resourceProfiles,
             @JsonProperty("lowerBounds") Map<String, Integer> lowerBounds) {
         this.jobId = Objects.requireNonNull(jobId);
         this.executionToken = Objects.requireNonNull(executionToken);
         this.expiresAtMillis = expiresAtMillis;
+        this.configurationFingerprint = configurationFingerprint;
         this.parallelism = Map.copyOf(parallelism);
         this.resourceProfiles = Map.copyOf(resourceProfiles);
         this.lowerBounds = Map.copyOf(lowerBounds);
@@ -54,6 +67,38 @@ public class A4sScalingIntent {
                 || !this.parallelism.keySet().equals(this.resourceProfiles.keySet())
                 || !this.parallelism.keySet().equals(this.lowerBounds.keySet())) {
             throw new IllegalArgumentException("Incomplete conditional A4S target");
+        }
+    }
+
+    /** Intents persisted by an earlier operator can be observed but cannot be submitted. */
+    public boolean matchesConfiguration(Configuration configuration) {
+        return configurationFingerprint != null
+                && configurationFingerprint.equals(fingerprint(configuration));
+    }
+
+    /** Hash the autoscaling settings that can change without a Flink deployment update. */
+    public static String fingerprint(Configuration configuration) {
+        String prefix = AutoScalerOptions.AUTOSCALER_CONF_PREFIX;
+        String legacyPrefix = AutoScalerOptions.OLD_K8S_OP_CONF_PREFIX + prefix;
+        var settings = new StringBuilder();
+        new TreeMap<>(configuration.toMap())
+                .forEach(
+                        (key, value) -> {
+                            if (key.startsWith(prefix) || key.startsWith(legacyPrefix)) {
+                                settings.append(key.length())
+                                        .append(':')
+                                        .append(key)
+                                        .append(value.length())
+                                        .append(':')
+                                        .append(value);
+                            }
+                        });
+        try {
+            var digest = MessageDigest.getInstance("SHA-256");
+            return StringUtils.byteToHexString(
+                    digest.digest(settings.toString().getBytes(StandardCharsets.UTF_8)));
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 is unavailable", e);
         }
     }
 }

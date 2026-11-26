@@ -126,6 +126,7 @@ class NativeMemoryScalingTest {
                         jobId.toString(),
                         "before",
                         Long.MAX_VALUE,
+                        null,
                         Map.of(vertex.toString(), "2"),
                         Map.of(vertex.toString(), after.toString()),
                         Map.of(vertex.toString(), 1));

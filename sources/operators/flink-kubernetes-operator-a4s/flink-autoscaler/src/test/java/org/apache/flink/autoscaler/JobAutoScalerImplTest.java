@@ -48,6 +48,8 @@ import org.apache.flink.runtime.metrics.groups.GenericMetricGroup;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.annotation.Nullable;
 
@@ -322,6 +324,7 @@ public class JobAutoScalerImplTest {
                         context.getJobID().toString(),
                         "observed-token",
                         Long.MAX_VALUE,
+                        A4sScalingIntent.fingerprint(conf),
                         Map.of(vertex.toString(), "2"),
                         Map.of(vertex.toString(), ResourceProfile.ZERO.toString()),
                         Map.of(vertex.toString(), 1));
@@ -384,6 +387,76 @@ public class JobAutoScalerImplTest {
         assertThat(store.getA4sScalingIntent(context)).isEmpty();
         assertThat(store.getParallelismOverrides(context)).isEqualTo(intent.getParallelism());
         assertThat(store.getResourceProfileOverrides(context))
+                .isEqualTo(intent.getResourceProfiles());
+        assertThat(realizer.events).isEmpty();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"quota", "policy", "guard", "disabled", "legacy-intent"})
+    void changedSettingsPreventResubmissionButAllowConfirmation(String change) throws Exception {
+        var conf = context.getConfiguration();
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.CPU_QUOTA, 4.0);
+        String fingerprint =
+                change.equals("legacy-intent") ? null : A4sScalingIntent.fingerprint(conf);
+        var vertex = new JobVertexID().toString();
+        var intent =
+                new A4sScalingIntent(
+                        context.getJobID().toString(),
+                        "observed-token",
+                        Long.MAX_VALUE,
+                        fingerprint,
+                        Map.of(vertex, "2"),
+                        Map.of(vertex, ResourceProfile.ZERO.toString()),
+                        Map.of(vertex, 1));
+        stateStore.storeA4sScalingIntent(context, intent);
+        stateStore.flush(context);
+
+        switch (change) {
+            case "quota":
+                conf.set(AutoScalerOptions.CPU_QUOTA, 1.0);
+                break;
+            case "policy":
+                conf.set(AutoScalerOptions.JUSTIN_ENABLED, false);
+                break;
+            case "guard":
+                conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, false);
+                break;
+            case "disabled":
+                conf.set(AUTOSCALER_ENABLED, false);
+                break;
+            default:
+                assertThat(change).isEqualTo("legacy-intent");
+        }
+        var reconciliations = new AtomicInteger();
+        var realizer =
+                new TestingScalingRealizer<JobID, JobAutoScalerContext<JobID>>() {
+                    @Override
+                    public A4sIntentResult reconcileA4sIntent(
+                            JobAutoScalerContext<JobID> ctx,
+                            A4sScalingIntent pending,
+                            Clock clock,
+                            boolean allowSubmission) {
+                        assertThat(allowSubmission).isFalse();
+                        assertThat(pending).isEqualTo(intent);
+                        return reconciliations.incrementAndGet() == 1
+                                ? A4sIntentResult.PENDING
+                                : A4sIntentResult.APPLIED;
+                    }
+                };
+        var autoscaler =
+                new JobAutoScalerImpl<>(null, null, null, eventCollector, realizer, stateStore);
+
+        autoscaler.scale(context);
+        assertThat(stateStore.getA4sScalingIntent(context)).contains(intent);
+        assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+        autoscaler.scale(context);
+        assertThat(reconciliations.get()).isEqualTo(2);
+        assertThat(stateStore.getA4sScalingIntent(context)).isEmpty();
+        assertThat(stateStore.getParallelismOverrides(context)).isEqualTo(intent.getParallelism());
+        assertThat(stateStore.getResourceProfileOverrides(context))
                 .isEqualTo(intent.getResourceProfiles());
         assertThat(realizer.events).isEmpty();
     }

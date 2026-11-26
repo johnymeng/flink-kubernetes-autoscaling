@@ -37,6 +37,8 @@ import org.apache.flink.kubernetes.operator.service.NativeFlinkService;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
+import io.fabric8.kubernetes.client.KubernetesClient;
+import io.fabric8.kubernetes.client.dsl.NamespaceableResource;
 import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
@@ -45,6 +47,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /** Tests for KubernetesScalingRealizer. */
@@ -107,6 +110,8 @@ public class KubernetesScalingRealizerTest {
     @SuppressWarnings("unchecked")
     void changesDeploymentStatusOnlyAfterTheRuntimeConfirmsTheTarget() throws Exception {
         var deployment = TestUtils.buildApplicationCluster();
+        deployment.getMetadata().setUid("evaluated-uid");
+        deployment.getMetadata().setGeneration(1L);
         var jobId = new JobID();
         var vertex = new JobVertexID().toString();
         var clock = Clock.systemUTC();
@@ -121,6 +126,10 @@ public class KubernetesScalingRealizerTest {
         when(context.getResource()).thenReturn(deployment);
         when(context.getDeploymentMode()).thenReturn(KubernetesDeploymentMode.NATIVE);
         when(context.getFlinkService()).thenReturn(service);
+        var client = mock(KubernetesClient.class);
+        var latest = (NamespaceableResource<FlinkDeployment>) mock(NamespaceableResource.class);
+        when(context.getKubernetesClient()).thenReturn(client);
+        when(client.resource(deployment)).thenReturn(latest);
         when(context.getObserveConfig()).thenReturn(initialConfig);
         when(context.getDeployConfig(deployment.getSpec()))
                 .thenAnswer(
@@ -140,10 +149,20 @@ public class KubernetesScalingRealizerTest {
                         jobId.toString(),
                         "token",
                         Long.MAX_VALUE,
+                        null,
                         Map.of(vertex, "2"),
                         Map.of(vertex, "profile"),
                         Map.of(vertex, 1));
 
+        var edited = TestUtils.buildApplicationCluster();
+        edited.getMetadata().setUid("evaluated-uid");
+        edited.getMetadata().setGeneration(2L);
+        when(latest.get()).thenReturn(edited);
+        assertThat(realizer.reconcileA4sIntent(autoscalerContext, intent, clock, true))
+                .isEqualTo(A4sIntentResult.PENDING);
+        verifyNoInteractions(service);
+
+        when(latest.get()).thenReturn(deployment);
         when(service.reconcileA4sIntent(context, intent, clock, true))
                 .thenReturn(
                         A4sIntentResult.DISCARDED,

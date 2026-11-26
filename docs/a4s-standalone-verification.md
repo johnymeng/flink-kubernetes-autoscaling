@@ -44,6 +44,12 @@ A local MiniCluster ran the checkpoint fixture with the periodic interval set be
 
 Eight runtime and nine Kubernetes operator tests passed. The autoscaler batch passed 90 of 91 cases. The remaining `MetricsCollectionAndEvaluationTest.testEndToEnd` metric-set assertion also failed on the recorded original baseline.
 
+### Pending targets after a configuration change
+
+A local Flink MiniCluster with a separate runner produced a valid conditional target and then received a lower CPU quota before submission. The real autoscaler discarded the stale target, and the native service sent zero PUTs. The Flink execution token and allocation stayed the same. After a fresh evaluation, the test discarded the reply to one accepted PUT, then switched away from Justin. The autoscaler confirmed the already accepted allocation, preserved all 200 expected outputs across checkpoint recovery and kept the write count at one. All three recorded recommendations replayed exactly.
+
+Focused tests covered changed quotas, switched policies, disabled autoscaling, and pending records written before the settings fingerprint existed. A Kubernetes reconciliation test supplied a newer deployment generation and verified that the stale reconcile stopped before contacting Flink.
+
 ## Local packaging check
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.

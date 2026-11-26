@@ -32,6 +32,8 @@ import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.Collections;
@@ -81,18 +83,29 @@ public class KubernetesAutoScalerStateStoreTest
         configMapStore = new ConfigMapStore(kubernetesClient);
     }
 
-    @Test
-    void pendingA4sTargetSurvivesStateStoreRecreation() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void pendingA4sTargetSurvivesStateStoreRecreation(boolean hasFingerprint) throws Exception {
         var vertex = new JobVertexID().toHexString();
         var intent =
                 new A4sScalingIntent(
-                        ctx.getJobID().toString(), "execution-token", 1234,
-                        Map.of(vertex, "2"), Map.of(vertex, "profile"), Map.of(vertex, 1));
+                        ctx.getJobID().toString(),
+                        "execution-token",
+                        1234,
+                        hasFingerprint
+                                ? A4sScalingIntent.fingerprint(ctx.getConfiguration())
+                                : null,
+                        Map.of(vertex, "2"),
+                        Map.of(vertex, "profile"),
+                        Map.of(vertex, 1));
         stateStore.storeA4sScalingIntent(ctx, intent);
         stateStore.flush(ctx);
 
         var recovered = createPhysicalAutoScalerStateStore();
-        assertThat(recovered.getA4sScalingIntent(ctx)).contains(intent);
+        var persistedIntent = recovered.getA4sScalingIntent(ctx).orElseThrow();
+        assertThat(persistedIntent).isEqualTo(intent);
+        assertThat(persistedIntent.matchesConfiguration(ctx.getConfiguration()))
+                .isEqualTo(hasFingerprint);
         assertThat(recovered.getParallelismOverrides(ctx)).isEmpty();
         assertThat(recovered.getResourceProfileOverrides(ctx)).isEmpty();
 

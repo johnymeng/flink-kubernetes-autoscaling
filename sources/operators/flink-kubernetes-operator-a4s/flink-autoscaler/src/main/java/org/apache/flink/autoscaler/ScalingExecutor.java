@@ -138,6 +138,12 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             return false;
         }
 
+        boolean justinEnabled = conf.get(JUSTIN_ENABLED);
+        boolean a4sEnabled = justinEnabled && conf.get(A4S_ENABLED);
+        boolean conditionalJustin = a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
+        String configurationFingerprint =
+                conditionalJustin ? A4sScalingIntent.fingerprint(conf) : null;
+
         var restartTime = scalingTracking.getMaxRestartTimeOrDefault(conf);
         var scalingSummaries =
                 new HashMap<>(
@@ -151,9 +157,6 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
         Map<JobVertexID, ResourceProfile> a4sProfiles = new HashMap<>();
         boolean memoryChanged = false;
-        boolean justinEnabled = conf.get(JUSTIN_ENABLED);
-        boolean a4sEnabled = justinEnabled && conf.get(A4S_ENABLED);
-        boolean conditionalJustin = a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
         boolean statefulRescaleAvailable = !conditionalJustin;
         String executionToken = null;
         String generation = null;
@@ -348,6 +351,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                             context.getJobID().toString(),
                             executionToken,
                             plan.expiresAtMillis,
+                            configurationFingerprint,
                             parallelismOverrides,
                             profileOverrides,
                             lowerBounds));

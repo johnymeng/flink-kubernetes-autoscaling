@@ -481,6 +481,7 @@ public class ScalingExecutorTest {
         if (conditional) {
             var intent = stateStore.getA4sScalingIntent(context).orElseThrow();
             assertThat(intent.getExecutionToken()).isEqualTo("stable");
+            assertThat(intent.matchesConfiguration(conf)).isTrue();
             assertThat(intent.getParallelism())
                     .isEqualTo(Map.of(source.toString(), "1", stateful.toString(), "1"));
             assertThat(intent.getLowerBounds())

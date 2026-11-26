@@ -40,6 +40,7 @@ import javax.annotation.Nullable;
 import java.time.Clock;
 import java.util.Collections;
 import java.util.Map;
+import java.util.Objects;
 
 /** The Kubernetes implementation for applying parallelism overrides. */
 public class KubernetesScalingRealizer
@@ -128,6 +129,17 @@ public class KubernetesScalingRealizer
         }
         if (!reconciliation.isLastReconciledSpecStable()) {
             return A4sIntentResult.PENDING;
+        }
+        if (allowSubmission) {
+            var current = resourceContext.getKubernetesClient().resource(deployment).get();
+            var evaluated = deployment.getMetadata();
+            if (current == null
+                    || current.getMetadata().getDeletionTimestamp() != null
+                    || !Objects.equals(current.getMetadata().getUid(), evaluated.getUid())
+                    || !Objects.equals(
+                            current.getMetadata().getGeneration(), evaluated.getGeneration())) {
+                return A4sIntentResult.PENDING;
+            }
         }
         var service = (NativeFlinkService) resourceContext.getFlinkService();
         var result = service.reconcileA4sIntent(resourceContext, intent, clock, allowSubmission);
