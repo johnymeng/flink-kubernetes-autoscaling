@@ -1,0 +1,771 @@
+{
+  "pairs": [
+    {
+      "disabled_run": "live-a38eff47",
+      "enabled_run": "live-bb56a5bc",
+      "disabled_resource_time": {
+        "covered_seconds": 597.84,
+        "cpu_core_seconds": 7905.44,
+        "memory_gib_seconds": 5156.342109375001
+      },
+      "enabled_resource_time": {
+        "covered_seconds": 598.1980000000003,
+        "cpu_core_seconds": 7910.470000000005,
+        "memory_gib_seconds": 5159.590296874999
+      },
+      "decisions": [
+        {
+          "offset_seconds": 120,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 1.125689697265625,
+            "execution_interruption_upper_seconds": 4.81668310546875,
+            "observed_positive_progress_gap_seconds": 9.00174755859375,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.271,
+            "replacement_graph_creation_seconds": 0.009,
+            "checkpoint_restore_seconds": 0.046,
+            "wait_after_termination_seconds": 0.005,
+            "task_initialization_after_restore_seconds": 0.59,
+            "peak_datastream_pending_records": 16134412
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 1.796667236328125,
+            "execution_interruption_upper_seconds": 6.69465283203125,
+            "observed_positive_progress_gap_seconds": 6.7049892578125,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.219,
+            "replacement_graph_creation_seconds": 0.011,
+            "checkpoint_restore_seconds": 0.038,
+            "wait_after_termination_seconds": 0.007,
+            "task_initialization_after_restore_seconds": 1.195,
+            "peak_datastream_pending_records": 14460138
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": 0.6709775390625001,
+            "execution_interruption_upper_seconds": 1.8779697265625002,
+            "observed_positive_progress_gap_seconds": -2.296758300781251,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": -0.05200000000000002,
+            "replacement_graph_creation_seconds": 0.002,
+            "checkpoint_restore_seconds": -0.008,
+            "wait_after_termination_seconds": 0.002,
+            "task_initialization_after_restore_seconds": 0.6050000000000001,
+            "peak_datastream_pending_records": -1674274
+          },
+          "enabled_preparation_requests": {
+            "covered_seconds": 0.087,
+            "cpu_core_seconds": 0.0,
+            "memory_gib_seconds": 0.0
+          }
+        },
+        {
+          "offset_seconds": 280,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 155.635654296875,
+            "execution_interruption_upper_seconds": 157.87603442382812,
+            "observed_positive_progress_gap_seconds": 160.00121948242187,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 1.25,
+            "replacement_graph_creation_seconds": 0.046,
+            "checkpoint_restore_seconds": 0.005,
+            "wait_after_termination_seconds": 8.74,
+            "task_initialization_after_restore_seconds": 145.448,
+            "peak_datastream_pending_records": 30588062
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 80.66467041015625,
+            "execution_interruption_upper_seconds": 78.02229345703125,
+            "observed_positive_progress_gap_seconds": 79.00202026367188,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.876,
+            "replacement_graph_creation_seconds": 0.007,
+            "checkpoint_restore_seconds": 0.003,
+            "wait_after_termination_seconds": 0.003,
+            "task_initialization_after_restore_seconds": 69.777,
+            "peak_datastream_pending_records": 25419485
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": -74.97098388671876,
+            "execution_interruption_upper_seconds": -79.85374096679686,
+            "observed_positive_progress_gap_seconds": -80.99919921875,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": -0.374,
+            "replacement_graph_creation_seconds": -0.039,
+            "checkpoint_restore_seconds": -0.002,
+            "wait_after_termination_seconds": -8.737,
+            "task_initialization_after_restore_seconds": -75.671,
+            "peak_datastream_pending_records": -5168577
+          },
+          "enabled_preparation_requests": {
+            "covered_seconds": 9.857,
+            "cpu_core_seconds": 53.056,
+            "memory_gib_seconds": 28.7559375
+          }
+        },
+        {
+          "offset_seconds": 460,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 65.9185322265625,
+            "execution_interruption_upper_seconds": 70.78276025390625,
+            "observed_positive_progress_gap_seconds": 72.002560546875,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 14.124,
+            "replacement_graph_creation_seconds": 0.007,
+            "checkpoint_restore_seconds": 0.002,
+            "wait_after_termination_seconds": 0.005,
+            "task_initialization_after_restore_seconds": 51.54,
+            "peak_datastream_pending_records": 40640503
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 68.40869287109375,
+            "execution_interruption_upper_seconds": 70.846216796875,
+            "observed_positive_progress_gap_seconds": 72.00104077148437,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 4.937,
+            "replacement_graph_creation_seconds": 0.008,
+            "checkpoint_restore_seconds": 0.003,
+            "wait_after_termination_seconds": 0.008,
+            "task_initialization_after_restore_seconds": 63.277,
+            "peak_datastream_pending_records": 34972287
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": 2.490160644531244,
+            "execution_interruption_upper_seconds": 0.06345654296875125,
+            "observed_positive_progress_gap_seconds": -0.0015197753906335265,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": -9.187000000000001,
+            "replacement_graph_creation_seconds": 0.001,
+            "checkpoint_restore_seconds": 0.001,
+            "wait_after_termination_seconds": 0.003,
+            "task_initialization_after_restore_seconds": 11.737000000000002,
+            "peak_datastream_pending_records": -5668216
+          },
+          "enabled_preparation_requests": null
+        }
+      ]
+    },
+    {
+      "disabled_run": "live-b8028252",
+      "enabled_run": "live-44b52b00",
+      "disabled_resource_time": {
+        "covered_seconds": 597.481,
+        "cpu_core_seconds": 7900.105000000006,
+        "memory_gib_seconds": 5152.927156249997
+      },
+      "enabled_resource_time": {
+        "covered_seconds": 597.4570000000003,
+        "cpu_core_seconds": 7621.984999999997,
+        "memory_gib_seconds": 5002.153296874998
+      },
+      "decisions": [
+        {
+          "offset_seconds": 120,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 9.384685546875,
+            "execution_interruption_upper_seconds": 14.815653564453125,
+            "observed_positive_progress_gap_seconds": 16.005484619140624,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 1.501,
+            "replacement_graph_creation_seconds": 0.012,
+            "checkpoint_restore_seconds": 0.09,
+            "wait_after_termination_seconds": 0.005,
+            "task_initialization_after_restore_seconds": 7.566,
+            "peak_datastream_pending_records": 16526051
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 5.42862451171875,
+            "execution_interruption_upper_seconds": 17.7544970703125,
+            "observed_positive_progress_gap_seconds": 17.80905078125,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.632,
+            "replacement_graph_creation_seconds": 0.012,
+            "checkpoint_restore_seconds": 0.006,
+            "wait_after_termination_seconds": 0.005,
+            "task_initialization_after_restore_seconds": 4.506,
+            "peak_datastream_pending_records": 16475368
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": -3.9560610351562495,
+            "execution_interruption_upper_seconds": 2.9388435058593743,
+            "observed_positive_progress_gap_seconds": 1.8035661621093766,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": -0.8689999999999999,
+            "replacement_graph_creation_seconds": 0.0,
+            "checkpoint_restore_seconds": -0.08399999999999999,
+            "wait_after_termination_seconds": 0.0,
+            "task_initialization_after_restore_seconds": -3.0599999999999996,
+            "peak_datastream_pending_records": -50683
+          },
+          "enabled_preparation_requests": {
+            "covered_seconds": 0.08,
+            "cpu_core_seconds": 0.0,
+            "memory_gib_seconds": 0.0
+          }
+        },
+        {
+          "offset_seconds": 280,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 146.09071459960938,
+            "execution_interruption_upper_seconds": 150.89354028320312,
+            "observed_positive_progress_gap_seconds": 151.99633837890624,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 1.728,
+            "replacement_graph_creation_seconds": 0.008,
+            "checkpoint_restore_seconds": 0.003,
+            "wait_after_termination_seconds": 8.136,
+            "task_initialization_after_restore_seconds": 136.088,
+            "peak_datastream_pending_records": 31317714
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 154.56861889648437,
+            "execution_interruption_upper_seconds": 147.78823193359375,
+            "observed_positive_progress_gap_seconds": 148.99771484375,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 2.45,
+            "replacement_graph_creation_seconds": 0.01,
+            "checkpoint_restore_seconds": 0.005,
+            "wait_after_termination_seconds": 0.004,
+            "task_initialization_after_restore_seconds": 141.866,
+            "peak_datastream_pending_records": 31123940
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": 8.477904296874982,
+            "execution_interruption_upper_seconds": -3.1053083496093734,
+            "observed_positive_progress_gap_seconds": -2.9986235351562414,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.7220000000000002,
+            "replacement_graph_creation_seconds": 0.002,
+            "checkpoint_restore_seconds": 0.002,
+            "wait_after_termination_seconds": -8.132,
+            "task_initialization_after_restore_seconds": 5.77800000000002,
+            "peak_datastream_pending_records": -193774
+          },
+          "enabled_preparation_requests": {
+            "covered_seconds": 10.097999999999999,
+            "cpu_core_seconds": 56.616,
+            "memory_gib_seconds": 30.685429687499997
+          }
+        },
+        {
+          "offset_seconds": 460,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 42.10562768554688,
+            "execution_interruption_upper_seconds": 44.781770751953125,
+            "observed_positive_progress_gap_seconds": 46.01553076171875,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 4.918,
+            "replacement_graph_creation_seconds": 0.009,
+            "checkpoint_restore_seconds": 0.003,
+            "wait_after_termination_seconds": 0.037,
+            "task_initialization_after_restore_seconds": 36.886,
+            "peak_datastream_pending_records": 40530204
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 46.138591552734376,
+            "execution_interruption_upper_seconds": 47.8819560546875,
+            "observed_positive_progress_gap_seconds": 48.99559228515625,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 17.633,
+            "replacement_graph_creation_seconds": 0.009,
+            "checkpoint_restore_seconds": 0.003,
+            "wait_after_termination_seconds": 0.008,
+            "task_initialization_after_restore_seconds": 28.348,
+            "peak_datastream_pending_records": 40961762
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": 4.032963867187497,
+            "execution_interruption_upper_seconds": 3.100185302734374,
+            "observed_positive_progress_gap_seconds": 2.9800615234374987,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 12.715,
+            "replacement_graph_creation_seconds": 0.0,
+            "checkpoint_restore_seconds": 0.0,
+            "wait_after_termination_seconds": -0.028999999999999998,
+            "task_initialization_after_restore_seconds": -8.538000000000004,
+            "peak_datastream_pending_records": 431558
+          },
+          "enabled_preparation_requests": null
+        }
+      ]
+    },
+    {
+      "disabled_run": "live-fa4ba39e",
+      "enabled_run": "live-622c40fa",
+      "disabled_resource_time": {
+        "covered_seconds": 597.7510000000002,
+        "cpu_core_seconds": 7904.127000000001,
+        "memory_gib_seconds": 5155.5007109375
+      },
+      "enabled_resource_time": {
+        "covered_seconds": 597.7210000000001,
+        "cpu_core_seconds": 7902.896999999998,
+        "memory_gib_seconds": 5154.790320312499
+      },
+      "decisions": [
+        {
+          "offset_seconds": 120,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 10.788614501953125,
+            "execution_interruption_upper_seconds": 12.788837890625,
+            "observed_positive_progress_gap_seconds": 15.00062646484375,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.383,
+            "replacement_graph_creation_seconds": 0.013,
+            "checkpoint_restore_seconds": 0.063,
+            "wait_after_termination_seconds": 0.008,
+            "task_initialization_after_restore_seconds": 10.086,
+            "peak_datastream_pending_records": 17220465
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 9.774693603515624,
+            "execution_interruption_upper_seconds": 10.695786865234375,
+            "observed_positive_progress_gap_seconds": 10.775042236328124,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.748,
+            "replacement_graph_creation_seconds": 0.011,
+            "checkpoint_restore_seconds": 0.043,
+            "wait_after_termination_seconds": 0.008,
+            "task_initialization_after_restore_seconds": 8.638,
+            "peak_datastream_pending_records": 17165504
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": -1.013920898437501,
+            "execution_interruption_upper_seconds": -2.0930510253906256,
+            "observed_positive_progress_gap_seconds": -4.2255842285156255,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.365,
+            "replacement_graph_creation_seconds": -0.002,
+            "checkpoint_restore_seconds": -0.020000000000000004,
+            "wait_after_termination_seconds": 0.0,
+            "task_initialization_after_restore_seconds": -1.4480000000000004,
+            "peak_datastream_pending_records": -54961
+          },
+          "enabled_preparation_requests": {
+            "covered_seconds": 0.107,
+            "cpu_core_seconds": 0.0,
+            "memory_gib_seconds": 0.0
+          }
+        },
+        {
+          "offset_seconds": 280,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 63.78665869140625,
+            "execution_interruption_upper_seconds": 65.881470703125,
+            "observed_positive_progress_gap_seconds": 66.99629150390625,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.587,
+            "replacement_graph_creation_seconds": 0.051,
+            "checkpoint_restore_seconds": 0.045,
+            "wait_after_termination_seconds": 9.38,
+            "task_initialization_after_restore_seconds": 53.588,
+            "peak_datastream_pending_records": 31232771
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 128.8136970214844,
+            "execution_interruption_upper_seconds": 120.73304248046875,
+            "observed_positive_progress_gap_seconds": 122.00971606445313,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 0.52,
+            "replacement_graph_creation_seconds": 0.011,
+            "checkpoint_restore_seconds": 0.005,
+            "wait_after_termination_seconds": 0.004,
+            "task_initialization_after_restore_seconds": 117.98,
+            "peak_datastream_pending_records": 31346835
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": 65.02703833007814,
+            "execution_interruption_upper_seconds": 54.85157177734375,
+            "observed_positive_progress_gap_seconds": 55.01342456054688,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": -0.06699999999999995,
+            "replacement_graph_creation_seconds": -0.039999999999999994,
+            "checkpoint_restore_seconds": -0.04,
+            "wait_after_termination_seconds": -9.376000000000001,
+            "task_initialization_after_restore_seconds": 64.392,
+            "peak_datastream_pending_records": 114064
+          },
+          "enabled_preparation_requests": {
+            "covered_seconds": 10.034,
+            "cpu_core_seconds": 55.856,
+            "memory_gib_seconds": 30.273515625
+          }
+        },
+        {
+          "offset_seconds": 460,
+          "disabled_result": "applied",
+          "enabled_result": "applied",
+          "disabled": {
+            "decision_to_all_running_seconds": 90.9565126953125,
+            "execution_interruption_upper_seconds": 94.79584912109375,
+            "observed_positive_progress_gap_seconds": 97.00928491210938,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 6.712,
+            "replacement_graph_creation_seconds": 0.046,
+            "checkpoint_restore_seconds": 0.004,
+            "wait_after_termination_seconds": 0.009,
+            "task_initialization_after_restore_seconds": 83.952,
+            "peak_datastream_pending_records": 41503783
+          },
+          "enabled": {
+            "decision_to_all_running_seconds": 124.97665161132812,
+            "execution_interruption_upper_seconds": 128.80528979492186,
+            "observed_positive_progress_gap_seconds": 131.0003720703125,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": 1.69,
+            "replacement_graph_creation_seconds": 0.01,
+            "checkpoint_restore_seconds": 0.003,
+            "wait_after_termination_seconds": 0.01,
+            "task_initialization_after_restore_seconds": 123.046,
+            "peak_datastream_pending_records": 42157485
+          },
+          "enabled_minus_disabled": {
+            "decision_to_all_running_seconds": 34.020138916015625,
+            "execution_interruption_upper_seconds": 34.00944067382811,
+            "observed_positive_progress_gap_seconds": 33.991087158203115,
+            "sustained_throughput_recovery_seconds": null,
+            "old_task_termination_seconds": -5.022,
+            "replacement_graph_creation_seconds": -0.036,
+            "checkpoint_restore_seconds": -0.001,
+            "wait_after_termination_seconds": 0.0010000000000000009,
+            "task_initialization_after_restore_seconds": 39.09400000000001,
+            "peak_datastream_pending_records": 653702
+          },
+          "enabled_preparation_requests": null
+        }
+      ]
+    }
+  ],
+  "summary": [
+    {
+      "offset_seconds": 120,
+      "matched_pairs": 3,
+      "enabled_applied": 3,
+      "disabled_applied": 3,
+      "paired_observations": {
+        "decision_to_all_running_seconds": {
+          "median_disabled": 9.384685546875,
+          "median_enabled": 5.42862451171875,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -1.013920898437501,
+          "range": [
+            -3.9560610351562495,
+            0.6709775390625001
+          ]
+        },
+        "execution_interruption_upper_seconds": {
+          "median_disabled": 12.788837890625,
+          "median_enabled": 10.695786865234375,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 1.8779697265625002,
+          "range": [
+            -2.0930510253906256,
+            2.9388435058593743
+          ]
+        },
+        "observed_positive_progress_gap_seconds": {
+          "median_disabled": 15.00062646484375,
+          "median_enabled": 10.775042236328124,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -2.296758300781251,
+          "range": [
+            -4.2255842285156255,
+            1.8035661621093766
+          ]
+        },
+        "sustained_throughput_recovery_seconds": {
+          "median_disabled": null,
+          "median_enabled": null,
+          "pairs_with_timings": 0,
+          "median_enabled_minus_disabled": null,
+          "range": null
+        },
+        "old_task_termination_seconds": {
+          "median_disabled": 0.383,
+          "median_enabled": 0.632,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -0.05200000000000002,
+          "range": [
+            -0.8689999999999999,
+            0.365
+          ]
+        },
+        "replacement_graph_creation_seconds": {
+          "median_disabled": 0.012,
+          "median_enabled": 0.011,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 0.0,
+          "range": [
+            -0.002,
+            0.002
+          ]
+        },
+        "checkpoint_restore_seconds": {
+          "median_disabled": 0.063,
+          "median_enabled": 0.038,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -0.020000000000000004,
+          "range": [
+            -0.08399999999999999,
+            -0.008
+          ]
+        },
+        "wait_after_termination_seconds": {
+          "median_disabled": 0.005,
+          "median_enabled": 0.007,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 0.0,
+          "range": [
+            0.0,
+            0.002
+          ]
+        },
+        "task_initialization_after_restore_seconds": {
+          "median_disabled": 7.566,
+          "median_enabled": 4.506,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -1.4480000000000004,
+          "range": [
+            -3.0599999999999996,
+            0.6050000000000001
+          ]
+        },
+        "peak_datastream_pending_records": {
+          "median_disabled": 16526051,
+          "median_enabled": 16475368,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -54961,
+          "range": [
+            -1674274,
+            -50683
+          ]
+        }
+      }
+    },
+    {
+      "offset_seconds": 280,
+      "matched_pairs": 3,
+      "enabled_applied": 3,
+      "disabled_applied": 3,
+      "paired_observations": {
+        "decision_to_all_running_seconds": {
+          "median_disabled": 146.09071459960938,
+          "median_enabled": 128.8136970214844,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 8.477904296874982,
+          "range": [
+            -74.97098388671876,
+            65.02703833007814
+          ]
+        },
+        "execution_interruption_upper_seconds": {
+          "median_disabled": 150.89354028320312,
+          "median_enabled": 120.73304248046875,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -3.1053083496093734,
+          "range": [
+            -79.85374096679686,
+            54.85157177734375
+          ]
+        },
+        "observed_positive_progress_gap_seconds": {
+          "median_disabled": 151.99633837890624,
+          "median_enabled": 122.00971606445313,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -2.9986235351562414,
+          "range": [
+            -80.99919921875,
+            55.01342456054688
+          ]
+        },
+        "sustained_throughput_recovery_seconds": {
+          "median_disabled": null,
+          "median_enabled": null,
+          "pairs_with_timings": 0,
+          "median_enabled_minus_disabled": null,
+          "range": null
+        },
+        "old_task_termination_seconds": {
+          "median_disabled": 1.25,
+          "median_enabled": 0.876,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -0.06699999999999995,
+          "range": [
+            -0.374,
+            0.7220000000000002
+          ]
+        },
+        "replacement_graph_creation_seconds": {
+          "median_disabled": 0.046,
+          "median_enabled": 0.01,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -0.039,
+          "range": [
+            -0.039999999999999994,
+            0.002
+          ]
+        },
+        "checkpoint_restore_seconds": {
+          "median_disabled": 0.005,
+          "median_enabled": 0.005,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -0.002,
+          "range": [
+            -0.04,
+            0.002
+          ]
+        },
+        "wait_after_termination_seconds": {
+          "median_disabled": 8.74,
+          "median_enabled": 0.004,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -8.737,
+          "range": [
+            -9.376000000000001,
+            -8.132
+          ]
+        },
+        "task_initialization_after_restore_seconds": {
+          "median_disabled": 136.088,
+          "median_enabled": 117.98,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 5.77800000000002,
+          "range": [
+            -75.671,
+            64.392
+          ]
+        },
+        "peak_datastream_pending_records": {
+          "median_disabled": 31232771,
+          "median_enabled": 31123940,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -193774,
+          "range": [
+            -5168577,
+            114064
+          ]
+        }
+      }
+    },
+    {
+      "offset_seconds": 460,
+      "matched_pairs": 3,
+      "enabled_applied": 3,
+      "disabled_applied": 3,
+      "paired_observations": {
+        "decision_to_all_running_seconds": {
+          "median_disabled": 65.9185322265625,
+          "median_enabled": 68.40869287109375,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 4.032963867187497,
+          "range": [
+            2.490160644531244,
+            34.020138916015625
+          ]
+        },
+        "execution_interruption_upper_seconds": {
+          "median_disabled": 70.78276025390625,
+          "median_enabled": 70.846216796875,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 3.100185302734374,
+          "range": [
+            0.06345654296875125,
+            34.00944067382811
+          ]
+        },
+        "observed_positive_progress_gap_seconds": {
+          "median_disabled": 72.002560546875,
+          "median_enabled": 72.00104077148437,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 2.9800615234374987,
+          "range": [
+            -0.0015197753906335265,
+            33.991087158203115
+          ]
+        },
+        "sustained_throughput_recovery_seconds": {
+          "median_disabled": null,
+          "median_enabled": null,
+          "pairs_with_timings": 0,
+          "median_enabled_minus_disabled": null,
+          "range": null
+        },
+        "old_task_termination_seconds": {
+          "median_disabled": 6.712,
+          "median_enabled": 4.937,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": -5.022,
+          "range": [
+            -9.187000000000001,
+            12.715
+          ]
+        },
+        "replacement_graph_creation_seconds": {
+          "median_disabled": 0.009,
+          "median_enabled": 0.009,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 0.0,
+          "range": [
+            -0.036,
+            0.001
+          ]
+        },
+        "checkpoint_restore_seconds": {
+          "median_disabled": 0.003,
+          "median_enabled": 0.003,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 0.0,
+          "range": [
+            -0.001,
+            0.001
+          ]
+        },
+        "wait_after_termination_seconds": {
+          "median_disabled": 0.009,
+          "median_enabled": 0.008,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 0.0010000000000000009,
+          "range": [
+            -0.028999999999999998,
+            0.003
+          ]
+        },
+        "task_initialization_after_restore_seconds": {
+          "median_disabled": 51.54,
+          "median_enabled": 63.277,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 11.737000000000002,
+          "range": [
+            -8.538000000000004,
+            39.09400000000001
+          ]
+        },
+        "peak_datastream_pending_records": {
+          "median_disabled": 40640503,
+          "median_enabled": 40961762,
+          "pairs_with_timings": 3,
+          "median_enabled_minus_disabled": 431558,
+          "range": [
+            -5668216,
+            653702
+          ]
+        }
+      }
+    }
+  ]
+}
