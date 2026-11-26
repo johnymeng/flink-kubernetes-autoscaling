@@ -125,6 +125,23 @@ scripts/a4s/smoke-local-flink-rescale.sh \
 
 The script owns a fresh, local Kafka broker and stops it on exit. It writes 100 inputs across two partitions before rescaling and 100 afterward. The check reads the source group's committed offsets in Kafka and scans the transactional sink with a separate `read_committed` consumer after the job stops. `committed-output.csv` records the broker offset, input ID and keyed count for every committed result.
 
+## Compare legacy, embedded and remote decisions
+
+Build the original operator at the [pinned baseline revision](a4s-standalone-baseline.md) and start the standalone runner on loopback. Set `BASELINE_CLASSPATH` to the original autoscaler classes and their matching patched Flink runtime dependencies, including `flink-a4s`. The comparison tool loads the original implementation from those classes. Supply legacy-mode requests in JSONL with the original 600 MiB slot bound, contiguous parallelism ranges, supplied MRCs and no reservation override or extra resource budgets. The following runs the two included examples with the shared bounds.
+
+```bash
+baseline_check=$(mktemp -d)
+runner=sources/a4s/a4s-runner/target/a4s-runner.jar
+jq -c '.constraints.cpuBudgetCores = null' \
+  sources/a4s/examples/{legacy-retry,q8-archived-curve}.json > "$baseline_check/requests.jsonl"
+java --class-path "$BASELINE_CLASSPATH:$runner" scripts/a4s/CompareLegacyA4s.java \
+  http://127.0.0.1:8080 "$baseline_check/requests.jsonl" "$baseline_check"
+java -jar "$runner" replay --verify \
+  --input "$baseline_check/recordings.jsonl" --output "$baseline_check/replay.jsonl"
+```
+
+The tool requires identical embedded and HTTP recommendations. It records the MPC comparison for each parallelism and checks the original and extracted allocations where the original selection has measured support for its target. The output labels the original plateau fallback separately.
+
 ## Native instrumentation and future adapters
 
 The C++11 [SHARDS estimator](../sources/libs/frocksdb/util/shards/) builds independently with CMake. FRocksDB still supplies its original seeded hash, scoped cache keys, charge and admission semantics. The RocksDB wrapper retains the JNI snapshot layout and cumulative counters. Flink's existing histogram aggregation and `scaledMrc` endpoint still publish aggregate observations. The network service receives no individual cache access.
