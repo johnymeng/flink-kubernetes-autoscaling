@@ -123,6 +123,7 @@ public class MetricNames {
     public static final String NUM_LOAD_FAILURES = "numLoadFailures";
     public static final String LATEST_LOAD_TIME = "latestLoadTime";
     public static final String A4S_SLOT_BLOCK_CACHE = "a4s-slot-block-cache";
+    public static final String A4S_SLOT_BLOCK_CACHE_USAGE = "a4s-slot-block-cache-usage";
 
     public static final String NUM_CACHED_RECORDS = "numCachedRecords";
     public static final String NUM_CACHED_BYTES = "numCachedBytes";

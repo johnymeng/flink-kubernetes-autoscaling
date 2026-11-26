@@ -93,7 +93,8 @@ public class ScalingMetricEvaluator {
                 metricsHistory.lastKey(),
                 collectedMetrics.getJobRunningTs(),
                 collectedMetrics.getObservedSourceBacklogs(),
-                collectedMetrics.getObservedBlockCacheCapacities());
+                collectedMetrics.getObservedBlockCacheCapacities(),
+                collectedMetrics.getObservedBlockCacheUsage());
     }
 
     @VisibleForTesting

@@ -261,6 +261,87 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
     }
 
     @Test
+    public void testSlotCacheUsageUsesNewestSampleOncePerCurrentCache() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(2);
+        ArchivedExecutionVertex[] tasks = {runningTask(0, 1), runningTask(1, 2)};
+        when(vertex.getTaskVertices()).thenReturn(tasks);
+        Map<String, String> paths = new HashMap<>();
+        paths.put(JobIDPathParameter.KEY, jobId.toString());
+        paths.put(JobVertexIdPathParameter.KEY, jobVertexId.toString());
+        HandlerRequest<EmptyRequestBody> request =
+                HandlerRequest.resolveParametersAndCreate(
+                        EmptyRequestBody.getInstance(),
+                        handler.getMessageHeaders().getUnresolvedMessageParameters(),
+                        paths,
+                        Collections.singletonMap(
+                                "get",
+                                Collections.singletonList(
+                                        A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_USAGE)),
+                        Collections.emptyList());
+
+        String cache0 = "34d73888-3125-4cdf-9295-5ac3794d77e1";
+        String cache1 = "e6a1ef14-d1e9-4014-bc02-2bd6fa55ab04";
+        putSlotUsage(0, 1, "first", cache0 + ":1:20");
+        putSlotUsage(0, 1, "alias", cache0 + ":3:9007199254740993");
+        putSlotUsage(1, 1, "first", cache1 + ":100:100");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheUsageBytes());
+
+        putSlotUsage(1, 2, "first", cache1 + ":2:0");
+        assertEquals(
+                Long.valueOf(9007199254740993L),
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheUsageBytes());
+        assertNull(
+                handler.handleRequest(
+                                createRequest(jobId.toString(), jobVertexId.toString()),
+                                restfulGateway)
+                        .get()
+                        .getObservedBlockCacheUsageBytes());
+
+        putSlotUsage(0, 1, "first", cache0 + ":3:20");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheUsageBytes());
+
+        putSlotUsage(0, 1, "first", cache0 + ":3:9007199254740993");
+        putSlotUsage(1, 2, "first", cache0 + ":4:0");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheUsageBytes());
+
+        putSlotUsage(1, 2, "first", cache1 + ":4:-1");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheUsageBytes());
+        putSlotUsage(1, 2, "first", cache1 + ":5:" + Long.MAX_VALUE);
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheUsageBytes());
+    }
+
+    private void putSlotUsage(int subtask, int attempt, String scope, String reading) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), subtask, attempt, scope),
+                        MetricNames.A4S_SLOT_BLOCK_CACHE_USAGE,
+                        reading));
+    }
+
+    @Test
     public void testSourceBacklogRequiresEveryCurrentAttempt() throws Exception {
         ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
         ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);

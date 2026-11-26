@@ -239,7 +239,7 @@ public class MetricsCollectionAndEvaluationTest {
     }
 
     @Test
-    public void publishesOnlyLatestVerifiedSourceBacklogsWithoutRounding() throws Exception {
+    public void publishesOnlyLatestVerifiedBacklogAndCacheObservations() throws Exception {
         var observations =
                 new HashMap<>(
                         Map.of(
@@ -249,7 +249,14 @@ public class MetricsCollectionAndEvaluationTest {
                                                 null, null, Long.MAX_VALUE),
                                 map,
                                         new A4SAggregatedMetricsResponseBody(
-                                                null, null, 27L, 9007199254740993L)));
+                                                null,
+                                                null,
+                                                27L,
+                                                9007199254740993L,
+                                                9007199254740993L),
+                                sink,
+                                        new A4SAggregatedMetricsResponseBody(
+                                                null, null, null, null, 0L)));
         metricsCollector = new TestingMetricsCollector<>(topology) {
             @Override
             protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
@@ -283,6 +290,7 @@ public class MetricsCollectionAndEvaluationTest {
         var decoded = Wire.decode(Wire.encode(request), EvaluationRequest.class);
 
         var expected = Map.of(source1.toHexString(), 0L, source2.toHexString(), Long.MAX_VALUE);
+        var expectedUsage = Map.of(map.toHexString(), 9007199254740993L, sink.toHexString(), 0L);
         for (var operator : decoded.snapshot.operators) {
             assertEquals(expected.get(operator.operatorId), operator.telemetry.sourceBacklogRecords);
             assertEquals(
@@ -290,11 +298,13 @@ public class MetricsCollectionAndEvaluationTest {
                             ? Long.valueOf(9007199254740993L)
                             : null,
                     operator.telemetry.observedBlockCacheCapacityBytes);
+            assertEquals(expectedUsage.get(operator.operatorId), operator.telemetry.cacheUsedBytes);
             assertNull(operator.current.cachePerTaskBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
 
         observations.remove(map);
+        observations.remove(sink);
         observations.remove(source1);
         observations.put(source2, new A4SAggregatedMetricsResponseBody(null, null, -1L));
         metricsCollector.setClock(Clock.offset(clock, Duration.ofSeconds(3)));
@@ -314,6 +324,7 @@ public class MetricsCollectionAndEvaluationTest {
         for (var operator : request.snapshot.operators) {
             assertNull(operator.telemetry.sourceBacklogRecords);
             assertNull(operator.telemetry.observedBlockCacheCapacityBytes);
+            assertNull(operator.telemetry.cacheUsedBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
     }

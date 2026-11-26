@@ -40,6 +40,7 @@ public class EvaluatedMetrics {
     private Instant jobRunningSince;
     private Map<JobVertexID, Long> observedSourceBacklogs = Map.of();
     private Map<JobVertexID, Long> observedBlockCacheCapacities = Map.of();
+    private Map<JobVertexID, Long> observedBlockCacheUsage = Map.of();
 
     public EvaluatedMetrics(
             Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
@@ -68,6 +69,7 @@ public class EvaluatedMetrics {
                 windowStart,
                 windowEnd,
                 jobRunningSince,
+                Map.of(),
                 Map.of(),
                 Map.of());
     }

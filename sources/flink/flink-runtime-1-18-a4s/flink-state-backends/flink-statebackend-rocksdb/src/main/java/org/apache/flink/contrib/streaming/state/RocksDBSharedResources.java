@@ -34,6 +34,7 @@ final class RocksDBSharedResources implements AutoCloseable {
 
     private final Cache cache;
     private final String cacheId = UUID.randomUUID().toString();
+    private long usageSequence;
 
     private final WriteBufferManager writeBufferManager;
     private final long writeBufferManagerCapacity;
@@ -55,6 +56,15 @@ final class RocksDBSharedResources implements AutoCloseable {
         return cacheId;
     }
 
+    /** A cache-wide sample ordered across all backend aliases of this resource. */
+    synchronized String sampleCacheUsage() {
+        if (!cache.isOwningHandle() || usageSequence == Long.MAX_VALUE) {
+            return "";
+        }
+        long usedBytes = cache.getUsage();
+        return cacheId + ":" + (++usageSequence) + ":" + usedBytes;
+    }
+
     public Cache getCache() {
         return cache;
     }
@@ -72,7 +82,7 @@ final class RocksDBSharedResources implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         LOG.debug("Closing RocksDBSharedResources");
         writeBufferManager.close();
         cache.close();

@@ -54,6 +54,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
@@ -103,12 +104,15 @@ public class A4SAggregatingVertexMetricsHandler
         boolean includeCacheCapacity =
                 request.getQueryParameter(MetricsFilterParameter.class)
                         .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_CAPACITY);
+        boolean includeCacheUsage =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_USAGE);
 
         return CompletableFuture.supplyAsync(
                         () -> {
                             try {
                                 CompletableFuture<ArchivedExecutionGraph> graph =
-                                        includeBacklog || includeCacheCapacity
+                                        includeBacklog || includeCacheCapacity || includeCacheUsage
                                                 ? gateway.requestJob(jobId, timeout)
                                                 : null;
                                 CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
@@ -135,7 +139,16 @@ public class A4SAggregatingVertexMetricsHandler
                                                             ? aggregateBacklog(attempts)
                                                             : null,
                                                     includeCacheCapacity
-                                                            ? aggregateSlotCacheCapacity(attempts)
+                                                            ? aggregateSlotCacheBytes(
+                                                                    attempts,
+                                                                    MetricNames
+                                                                            .A4S_SLOT_BLOCK_CACHE)
+                                                            : null,
+                                                    includeCacheUsage
+                                                            ? aggregateSlotCacheBytes(
+                                                                    attempts,
+                                                                    MetricNames
+                                                                            .A4S_SLOT_BLOCK_CACHE_USAGE)
                                                             : null);
                                         });
                             } catch (Exception e) {
@@ -266,39 +279,57 @@ public class A4SAggregatingVertexMetricsHandler
     }
 
     @Nullable
-    private static Long aggregateSlotCacheCapacity(@Nullable List<Map<String, String>> attempts) {
+    private static Long aggregateSlotCacheBytes(
+            @Nullable List<Map<String, String>> attempts, String metricName) {
         if (attempts == null) {
             return null;
         }
+        boolean usage = MetricNames.A4S_SLOT_BLOCK_CACHE_USAGE.equals(metricName);
         long total = 0;
         HashSet<UUID> caches = new HashSet<>();
         for (Map<String, String> attempt : attempts) {
-            String allocation = null;
+            UUID cache = null;
+            TreeMap<Long, Long> samples = new TreeMap<>();
             for (Map.Entry<String, String> entry : attempt.entrySet()) {
-                if (!MetricNames.A4S_SLOT_BLOCK_CACHE.equals(entry.getKey())
-                        && !entry.getKey().endsWith("." + MetricNames.A4S_SLOT_BLOCK_CACHE)) {
+                if (!metricName.equals(entry.getKey())
+                        && !entry.getKey().endsWith("." + metricName)) {
                     continue;
                 }
-                if (allocation != null && !allocation.equals(entry.getValue())) {
+                String value = entry.getValue();
+                if (value == null) {
                     return null;
                 }
-                allocation = entry.getValue();
-            }
-            if (allocation == null || allocation.indexOf(':') != 36) {
-                return null;
-            }
-            try {
-                UUID cache = UUID.fromString(allocation.substring(0, 36));
-                long capacity = Long.parseLong(allocation.substring(37));
-                // Aliases within an attempt can describe one cache. Across subtasks they
-                // indicate shared ownership and cannot be used as per-vertex capacity.
-                if (capacity <= 0 || capacity > Long.MAX_VALUE - total || !caches.add(cache)) {
+                String[] parts = value.split(":", -1);
+                if (parts.length != (usage ? 3 : 2) || parts[0].length() != 36) {
                     return null;
                 }
-                total += capacity;
-            } catch (IllegalArgumentException e) {
+                try {
+                    UUID id = UUID.fromString(parts[0]);
+                    long sequence = usage ? Long.parseLong(parts[1]) : 0;
+                    long bytes = Long.parseLong(parts[parts.length - 1]);
+                    if ((cache != null && !cache.equals(id))
+                            || (usage ? sequence <= 0 || bytes < 0 : bytes <= 0)) {
+                        return null;
+                    }
+                    Long previous = samples.putIfAbsent(sequence, bytes);
+                    if (previous != null && previous != bytes) {
+                        return null;
+                    }
+                    cache = id;
+                } catch (IllegalArgumentException e) {
+                    return null;
+                }
+            }
+            // Backend aliases can share a cache within an attempt. Sharing across
+            // subtasks prevents attribution to distinct per-task allocations.
+            if (cache == null || !caches.add(cache)) {
                 return null;
             }
+            long bytes = samples.lastEntry().getValue();
+            if (bytes > Long.MAX_VALUE - total) {
+                return null;
+            }
+            total += bytes;
         }
         return total;
     }

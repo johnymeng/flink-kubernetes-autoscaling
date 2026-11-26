@@ -37,5 +37,6 @@ public class CollectedMetricHistory {
     @Setter private Map<JobVertexID, Long> observedSourceBacklogs = Map.of();
 
     @Setter private Map<JobVertexID, Long> observedBlockCacheCapacities = Map.of();
+    @Setter private Map<JobVertexID, Long> observedBlockCacheUsage = Map.of();
     @Setter private boolean fullyCollected;
 }

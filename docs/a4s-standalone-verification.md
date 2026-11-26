@@ -62,6 +62,12 @@ A local Flink job with two RocksDB column families reported four native capacity
 
 Runtime tests reject duplicate cache identities across subtasks, conflicting aliases, retired attempts, partial coverage and arithmetic overflow. All eight runtime tests, 16 standalone tests and 95 focused autoscaler tests passed. The contract tests verified exact integer transport above the precision of a Java double and omission when capacity is unavailable.
 
+### Measured slot cache usage
+
+In a local Flink run, the normal operator collector and evaluator reported 16,524,648 bytes used in a 55,924,053-byte slot cache. Four native column-family usage gauges reported the same occupancy. Both requests to the separate runner contained the single native usage value. Both decisions replayed exactly, and the checkpoint rescale preserved the keyed counts and all 200 expected outputs.
+
+The live fixture enabled capacity and usage gauges while leaving hit and miss counters disabled. The collector now leaves the hit rate unavailable when either counter is missing. Nine runtime tests and 108 focused autoscaler tests passed. They cover the newest sample across duplicate gauges, zero usage, retired attempts, conflicting or shared identities, missing counters and exact integer transport.
+
 ## Local packaging check
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.

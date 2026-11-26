@@ -158,19 +158,24 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
         ((JobIDPathParameter) pathIt.next()).resolve(jobId);
         ((JobVertexIdPathParameter) pathIt.next()).resolve(jobVertexID);
         var conf = ctx.getConfiguration();
-        boolean includeCache =
+        boolean a4s =
                 conf.get(AutoScalerOptions.JUSTIN_ENABLED)
-                        && conf.get(AutoScalerOptions.A4S_ENABLED)
-                        && conf.getBoolean(
-                                "state.backend.rocksdb.metrics.block-cache-capacity", false);
-        if (includeBacklog || includeCache) {
+                        && conf.get(AutoScalerOptions.A4S_ENABLED);
+        boolean includeCacheCapacity =
+                a4s && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-capacity", false);
+        boolean includeCacheUsage =
+                a4s && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-usage", false);
+        if (includeBacklog || includeCacheCapacity || includeCacheUsage) {
             var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
             var fields = new ArrayList<String>();
             if (includeBacklog) {
                 fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG);
             }
-            if (includeCache) {
+            if (includeCacheCapacity) {
                 fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_CAPACITY);
+            }
+            if (includeCacheUsage) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_USAGE);
             }
             filter.resolve(fields);
         }
