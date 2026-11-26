@@ -15,14 +15,8 @@ jobs:
           cache-dependency-path: sources/a4s/**/pom.xml
       - run: mvn -B -ntp -f sources/a4s/pom.xml verify
       - run: python3 -m unittest discover -s scripts/a4s -p 'test_*.py'
-      - name: Verify the core bytecode is local and platform independent
-        run: |
-          core=sources/a4s/a4s-core/target/a4s-core-0.1.0.jar
-          api=sources/a4s/a4s-api/target/a4s-api-0.1.0.jar
-          jdeps --class-path "$api" -verbose:class "$core" > "${RUNNER_TEMP}/a4s-dependencies.txt"
-          if rg -- '-> (java\.net\.|javax\.net\.|java\.nio\.channels\.|org\.apache\.flink\.|org\.rocksdb\.|io\.kubernetes\.|io\.fabric8\.)' "${RUNNER_TEMP}/a4s-dependencies.txt"; then
-            exit 1
-          fi
+      - name: Check the API and core bytecode dependencies
+        run: bash scripts/a4s/check-architecture.sh
       - name: Run the packaged service without Flink
         run: |
           java -jar sources/a4s/a4s-runner/target/a4s-runner.jar > "${RUNNER_TEMP}/runner.log" &

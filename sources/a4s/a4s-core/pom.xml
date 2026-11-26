@@ -13,4 +13,24 @@
       <version>${project.version}</version>
     </dependency>
   </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions><execution>
+          <id>core-production-dependencies</id>
+          <goals><goal>enforce</goal></goals>
+          <configuration><rules><bannedDependencies>
+            <excludes><exclude>*:*</exclude></excludes>
+            <includes>
+              <include>*:*:*:*:test</include>
+              <include>io.a4s:a4s-api</include>
+            </includes>
+            <message>A4S Core may depend only on A4S API in production.</message>
+          </bannedDependencies></rules></configuration>
+        </execution></executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>

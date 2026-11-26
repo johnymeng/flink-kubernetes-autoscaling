@@ -30,6 +30,8 @@ mvn -B -f sources/a4s/pom.xml clean verify
 java -jar sources/a4s/a4s-runner/target/a4s-runner.jar
 ```
 
+Maven enforces the API and core dependency boundaries. After building, `bash scripts/a4s/check-architecture.sh` also checks both JARs for unresolved references and direct references to network, file, process and platform APIs. CI runs this check and starts the packaged runner from the independent `sources/a4s` Docker build context.
+
 `A4S_BIND` defaults to `127.0.0.1`, and `A4S_PORT` defaults to `8080`. The runner accepts at most 2 MiB per request and allows 2 seconds for queued evaluation and response generation. The runner uses bounded HTTP and evaluation pools and serves structured logs with request status and duration. SIGTERM starts graceful shutdown.
 
 ```bash

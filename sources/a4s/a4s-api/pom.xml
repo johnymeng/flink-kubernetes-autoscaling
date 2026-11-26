@@ -6,4 +6,21 @@
     <version>0.1.0</version>
   </parent>
   <artifactId>a4s-api</artifactId>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions><execution>
+          <id>api-production-dependencies</id>
+          <goals><goal>enforce</goal></goals>
+          <configuration><rules><bannedDependencies>
+            <excludes><exclude>*:*</exclude></excludes>
+            <includes><include>*:*:*:*:test</include></includes>
+            <message>A4S API must have no production dependencies.</message>
+          </bannedDependencies></rules></configuration>
+        </execution></executions>
+      </plugin>
+    </plugins>
+  </build>
 </project>
