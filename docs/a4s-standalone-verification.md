@@ -67,7 +67,7 @@ scripts/a4s/prepare-q20-comparison.py "$OUTPUT_DIR" --prefix "$SERIES_ID" \
 
 Each image argument takes a digest-pinned reference. Before live runs, verify the built artifacts against their receipts and verify both node selectors against the isolated lab scope. Use `run-order.json` and the existing Q20 producer setup with the same input generator build, seed, starting offsets, rate schedule, and observation window for each arm. Leave the input topics intact during each arm's rescaling. Collect equally long observations for both rescale and hold outcomes.
 
-The offline preflight rendered and checked all nine job configurations. The local Helm render confirmed each operator's watched namespace, digest and recording settings. It used historical image receipts as fixture inputs. Fresh deployable artifacts and live measurements are pending while the grid is paused.
+The offline preflight rendered and checked all nine job configurations. The local Helm render confirmed each operator's watched namespace, digest and recording settings. It used historical image receipts as fixture inputs. Use a common runtime built with support for the renderer's `pipeline.exclusive-vertex-slots` setting. The exact Q20 SQL workload produced one shared slot group and returned zero applied profiles with the setting disabled. With it enabled, all three vertices returned confirmed profiles in a local Flink run against an empty Kafka broker. The setting leaves default submissions alone and rejects a shared group with an explicit resource budget before modifying the graph. The live Q20 comparison remains pending.
 
 ## Remaining work
 

@@ -45,6 +45,7 @@ import org.apache.flink.runtime.client.DuplicateJobSubmissionException;
 import org.apache.flink.runtime.client.JobSubmissionException;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.dispatcher.cleanup.CleanupRunnerFactory;
 import org.apache.flink.runtime.dispatcher.cleanup.DispatcherResourceCleanerFactory;
 import org.apache.flink.runtime.dispatcher.cleanup.ResourceCleaner;
@@ -64,6 +65,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.jobmanager.JobGraphWriter;
+import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.runtime.jobmaster.JobManagerRunner;
 import org.apache.flink.runtime.jobmaster.JobManagerRunnerResult;
 import org.apache.flink.runtime.jobmaster.JobManagerSharedServices;
@@ -147,6 +149,11 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
     public static final String DISPATCHER_NAME = "dispatcher";
 
     private static final int INITIAL_JOB_MANAGER_RUNNER_REGISTRY_CAPACITY = 16;
+
+    private static final ConfigOption<Boolean> EXCLUSIVE_VERTEX_SLOTS =
+            ConfigOptions.key("pipeline.exclusive-vertex-slots")
+                    .booleanType()
+                    .defaultValue(false);
 
     private final Configuration configuration;
 
@@ -539,11 +546,38 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
                                 "Currently jobs is not supported if parts of the vertices have "
                                         + "resources configured. The limitation will be removed in future versions."));
             } else {
+                isolateDefaultSlotGroups(jobGraph, configuration);
                 return internalSubmitJob(jobGraph);
             }
         } catch (FlinkException e) {
             return FutureUtils.completedExceptionally(e);
         }
+    }
+
+    @VisibleForTesting
+    static void isolateDefaultSlotGroups(JobGraph graph, Configuration clusterConfiguration)
+            throws JobSubmissionException {
+        if (!graph.getJobConfiguration()
+                .getOptional(EXCLUSIVE_VERTEX_SLOTS)
+                .orElseGet(() -> clusterConfiguration.get(EXCLUSIVE_VERTEX_SLOTS))) {
+            return;
+        }
+
+        final List<JobVertex> sharedVertices = new ArrayList<>();
+        for (JobVertex vertex : graph.getVertices()) {
+            final SlotSharingGroup group = vertex.getSlotSharingGroup();
+            if (group != null && group.getJobVertexIds().size() > 1) {
+                if (!ResourceProfile.UNKNOWN.equals(group.getResourceProfile())) {
+                    throw new JobSubmissionException(
+                            graph.getJobID(),
+                            "Exclusive startup slots cannot duplicate the shared resource budget for "
+                                    + vertex.getName());
+                }
+                sharedVertices.add(vertex);
+            }
+        }
+
+        sharedVertices.forEach(vertex -> vertex.setSlotSharingGroup(new SlotSharingGroup()));
     }
 
     @Override
