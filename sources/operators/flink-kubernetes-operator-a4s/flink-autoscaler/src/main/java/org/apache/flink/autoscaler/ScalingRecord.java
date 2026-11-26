@@ -17,7 +17,6 @@
 
 package org.apache.flink.autoscaler;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
@@ -29,7 +28,11 @@ import java.time.Duration;
  */
 @Data
 @NoArgsConstructor
-@AllArgsConstructor
 public class ScalingRecord {
     private Duration restartDuration;
+    private String nativeRescaleStatus;
+
+    public ScalingRecord(Duration restartDuration) {
+        this.restartDuration = restartDuration;
+    }
 }

@@ -259,6 +259,14 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         addToScalingHistoryAndStore(
                 autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
         scalingTracking.addScalingRecord(now, new ScalingRecord());
+        if (justinEnabled && conf.get(AutoScalerOptions.NATIVE_RESCALE_PREALLOCATION_ENABLED)) {
+            LOG.info(
+                    "NATIVE_RESCALE_DECISION jobId={} timestampMs={} parallelism={} profiles={}",
+                    context.getJobID(),
+                    now.toEpochMilli(),
+                    parallelismOverrides,
+                    profileOverrides);
+        }
         autoScalerStateStore.storeScalingTracking(context, scalingTracking);
         autoScalerStateStore.storeParallelismOverrides(context, parallelismOverrides);
         if (justinEnabled) {
