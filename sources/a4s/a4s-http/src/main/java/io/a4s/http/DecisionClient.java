@@ -34,6 +34,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Consumer;
 
 public final class DecisionClient {
     private final HttpClient http =
@@ -44,6 +45,16 @@ public final class DecisionClient {
 
     public ScalingPlan evaluate(URI base, Duration timeout, EvaluationRequest request)
             throws IOException, InterruptedException {
+        return evaluate(base, timeout, request, null);
+    }
+
+    /** Report the timing of a successful evaluation to an optional benchmark observer. */
+    public ScalingPlan evaluate(
+            URI base,
+            Duration timeout,
+            EvaluationRequest request,
+            Consumer<Timings> observer)
+            throws IOException, InterruptedException {
         if (!("http".equals(base.getScheme()) || "https".equals(base.getScheme()))
                 || base.getHost() == null
                 || base.getUserInfo() != null
@@ -52,25 +63,61 @@ public final class DecisionClient {
                 || !(base.getPath().isEmpty() || base.getPath().equals("/"))) {
             throw new IllegalArgumentException("Expected the HTTP(S) origin of the A4S runner");
         }
-        var outgoing =
+        var builder =
                 HttpRequest.newBuilder(base.resolve("/v1/evaluate"))
                         .timeout(timeout)
-                        .header("Content-Type", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofByteArray(Wire.encode(request)))
-                        .build();
+                        .header("Content-Type", "application/json");
+        long started = observer == null ? 0 : System.nanoTime();
+        byte[] requestBody = Wire.encode(request);
+        long encoded = observer == null ? 0 : System.nanoTime();
+        var outgoing = builder.POST(HttpRequest.BodyPublishers.ofByteArray(requestBody)).build();
         var inFlight = http.sendAsync(outgoing, response -> new BoundedBody());
         try {
             var response = inFlight.get(timeout.toMillis(), TimeUnit.MILLISECONDS);
             if (response.statusCode() != 200) {
                 throw new IOException("A4S runner returned HTTP " + response.statusCode());
             }
-            return Wire.decode(response.body(), ScalingPlan.class);
+            long received = observer == null ? 0 : System.nanoTime();
+            byte[] responseBody = response.body();
+            var plan = Wire.decode(responseBody, ScalingPlan.class);
+            if (observer != null) {
+                observer.accept(
+                        new Timings(
+                                requestBody.length,
+                                responseBody.length,
+                                encoded - started,
+                                received - encoded,
+                                System.nanoTime() - received));
+            }
+            return plan;
         } catch (ExecutionException | TimeoutException e) {
             throw new IOException("A4S request failed or timed out", e);
         } finally {
             if (!inFlight.isDone()) {
                 inFlight.cancel(true);
             }
+        }
+    }
+
+    /** Payload sizes and elapsed wall-clock time in the HTTP client's three phases. */
+    public static final class Timings {
+        public final int requestBytes;
+        public final int responseBytes;
+        public final long encodeNanos;
+        public final long exchangeNanos;
+        public final long decodeNanos;
+
+        private Timings(
+                int requestBytes,
+                int responseBytes,
+                long encodeNanos,
+                long exchangeNanos,
+                long decodeNanos) {
+            this.requestBytes = requestBytes;
+            this.responseBytes = responseBytes;
+            this.encodeNanos = encodeNanos;
+            this.exchangeNanos = exchangeNanos;
+            this.decodeNanos = decodeNanos;
         }
     }
 

@@ -42,6 +42,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
@@ -100,8 +101,15 @@ class DecisionServerTest {
             try (var server = new DecisionServer(new InetSocketAddress("127.0.0.1", 0), policy)) {
                 server.start();
                 var endpoint = endpoint(server);
-                var remote = client.evaluate(endpoint, Duration.ofSeconds(2), request);
+                var observed = new ArrayList<DecisionClient.Timings>();
+                var remote = client.evaluate(endpoint, Duration.ofSeconds(2), request, observed::add);
                 assertArrayEquals(Wire.encode(embedded), Wire.encode(remote));
+                assertEquals(1, observed.size());
+                var timing = observed.get(0);
+                assertEquals(Wire.encode(request).length, timing.requestBytes);
+                assertEquals(Wire.encode(embedded).length, timing.responseBytes);
+                assertTrue(
+                        timing.encodeNanos >= 0 && timing.exchangeNanos >= 0 && timing.decodeNanos >= 0);
                 assertArrayEquals(
                         Wire.encode(embedded),
                         Wire.encode(client.evaluate(endpoint, Duration.ofSeconds(2), request)));
@@ -486,6 +494,7 @@ class DecisionServerTest {
     void evaluationAndNetworkTimeoutFailWithoutProducingAPlan() throws Exception {
         var request = Wire.decode(EXAMPLE, EvaluationRequest.class);
         var client = new DecisionClient();
+        var observed = new ArrayList<DecisionClient.Timings>();
         URI endpoint;
         try (var server =
                 new DecisionServer(
@@ -505,11 +514,12 @@ class DecisionServerTest {
             assertEquals(504, post(endpoint, EXAMPLE_JSON));
             assertThrows(
                     IOException.class,
-                    () -> client.evaluate(endpoint, Duration.ofMillis(10), request));
+                    () -> client.evaluate(endpoint, Duration.ofMillis(10), request, observed::add));
         }
         assertThrows(
                 IOException.class,
-                () -> client.evaluate(endpoint, Duration.ofMillis(150), request));
+                () -> client.evaluate(endpoint, Duration.ofMillis(150), request, observed::add));
+        assertTrue(observed.isEmpty());
     }
 
     @Test

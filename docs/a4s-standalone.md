@@ -99,6 +99,8 @@ V1 keeps the original fixed-latency equation and bounded greedy retry on support
 
 Set `A4S_SNAPSHOT_DIR` to a writable benchmark-only mount in the operator. Set `job.autoscaler.a4s.snapshot.record-file` to a fresh basename such as `q8-remote-1.jsonl`. Recording writes a versioned JSONL row after each evaluation attempt. It captures the exact request and the returned recommendation, including its model version and rationale. An evaluation that returns no response has a null recommendation. Recording is capped at 256 MiB per file. The experiment archives actual runtime results separately.
 
+With snapshot recording configured, the adapter also logs `A4S runner timing` for each successful remote response. The line includes the snapshot and job IDs, request and response bytes, and elapsed nanoseconds for JSON encoding, HTTP exchange, and JSON decoding. The HTTP phase covers the client and runner through complete response receipt. The runner's own request log measures server handling from its side.
+
 ```bash
 java -jar sources/a4s/a4s-runner/target/a4s-runner.jar replay \
   --input snapshots.jsonl --policy a4s --output decisions.jsonl

@@ -72,6 +72,23 @@ A loopback replay also timed requests captured during the live Q8 and Q20 compar
 | Q20 embedded | 100 | 0.228 | 41.640 / 42.535 / 42.576 | 0.145 | 1.107 |
 | Q20 remote | 100 | 0.286 | 41.642 / 42.510 / 42.643 | 0.155 | 1.193 |
 
+The production `DecisionClient` replayed all 69 fixed-allocation Q8 recordings over loopback. After one warmup pass, three measured passes verified 207 responses byte for byte. Encoded request bodies were 43,628–81,525 bytes, and response bodies were 978–1,780 bytes. The client includes the same bounded response subscriber and request timeout used by the Flink adapter.
+
+| Phase | p50 (ms) | p95 (ms) | p99 (ms) |
+| --- | ---: | ---: | ---: |
+| Request encoding | 0.296 | 0.439 | 0.471 |
+| HTTP exchange | 41.928 | 42.774 | 43.395 |
+| Response decoding | 0.052 | 0.093 | 0.123 |
+| Total client phases | 42.265 | 43.185 | 44.262 |
+| Server handling within the exchange | 1.067 | 1.431 | 2.164 |
+
+With the built runner listening locally, reproduce the timing CSV with Java 11 or later. The measurement script verifies the recorded recommendation before publishing each row.
+
+```bash
+java --class-path "$A4S_RUNNER_JAR" scripts/a4s/MeasureA4sClient.java \
+  "$RUNNER_ORIGIN" "$RECORDED_EVALUATIONS" 3 > client-timing.csv
+```
+
 ## Live experiment
 
 The first matched comparison uses the existing isolated Q8 DataStream harness. It keeps the workload JAR, runtime image, initial profiles, input schedule, checkpointing, and physical worker fixed across original, embedded and remote modes. The original and extracted operators are built independently from the recorded source revisions against the same installed Flink snapshot artifacts. Scoped layer publication is used on c165 because the lab account cannot access the Docker daemon.
@@ -143,9 +160,11 @@ Latency bins are 10 ms wide and measure from the source chain's timestamp to the
 
 For the three adjacent pairs, remote join-input throughput changed by +3.5%, +3.1%, and −24.3% relative to embedded. In the last remote period, estimated live window state grew from about 760 to 909 MiB, with a 44.3% miss fraction compared with 30.7% in the preceding embedded period. Remote server handling in that late period took 4.0–5.0 ms per request, within the earlier remote timing range. The run has one deployment, a growing backlog, and uneven latency sample counts. The observed differences leave the 5% transport-only steady-state throughput criterion and steady-state latency regression unverified.
 
+The separate ten-second REST trace places the slowest measured interval at 550–560 seconds. It processed 4,873 join-input records/s and ended with 630 MiB of estimated pending compaction data, the highest observed value for `window-contents`. RocksDB reported compaction pending at that boundary. The next interval reached 24,564 records/s with the compaction estimate back at zero and remote mode still active. The runner handled one evaluation in the slow interval and two in the recovery interval. The join reported 1,000 ms/s busy at both boundaries. Compaction is a plausible contributor. The end-of-interval gauges leave causation and time spent waiting for storage unverified.
+
 Across all 23 in-window remote evaluations, server handling took 5.8 ms p50, 13.2 ms p95, and 15.0 ms p99. Runner RSS grew from 58,260 to 77,704 KiB and process CPU increased by 451 ticks across the scoped samples. Flink completed 45 checkpoints and reported zero restores. The owned namespace was removed and the worker lock was released. The latest branch also passed 47 focused `ScalingExecutorTest` cases, including a successful remote recommendation blocked from actuation by observe-only configuration.
 
-Recompute the period summaries from the captured run directory, which contains `execution-spec.json` and `scout/crossover`. [Scorer](../scripts/a4s/score-q8-crossover.py)
+Recompute the period summaries from the captured run directory, which contains `execution-spec.json` and `scout/crossover`. When `scout/operational-snapshots.jsonl` is available, the scorer also emits same-attempt join rates, end-of-interval compaction gauges, and runner call counts for the ten-second observations. [Scorer](../scripts/a4s/score-q8-crossover.py)
 
 ```bash
 python3 scripts/a4s/score-q8-crossover.py "$Q8_RUN_BUNDLE"

@@ -57,9 +57,12 @@ import org.apache.flink.autoscaler.topology.ShipStrategy;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /** Converts the operator's execution context and aggregate telemetry to the A4S v1 contract. */
 public final class Flink118A4sAdapter {
+    private static final Logger LOG = LoggerFactory.getLogger(Flink118A4sAdapter.class);
     private static final long BYTES_PER_MIB = 1024L * 1024L;
 
     private final A4sPolicy embedded = new A4sPolicy();
@@ -318,8 +321,25 @@ public final class Flink118A4sAdapter {
         if (remote == null) {
             return embedded.evaluate(request);
         }
+        var endpoint = URI.create(remote);
+        var timeout = conf.get(AutoScalerOptions.A4S_RUNNER_TIMEOUT);
+        if (conf.get(AutoScalerOptions.A4S_SNAPSHOT_RECORD_FILE) == null) {
+            return Remote.CLIENT.evaluate(endpoint, timeout, request);
+        }
         return Remote.CLIENT.evaluate(
-                URI.create(remote), conf.get(AutoScalerOptions.A4S_RUNNER_TIMEOUT), request);
+                endpoint,
+                timeout,
+                request,
+                timing -> LOG.info(
+                        "A4S runner timing job={} snapshot={} requestBytes={} responseBytes={} "
+                                + "encodeNanos={} exchangeNanos={} decodeNanos={}",
+                        request.snapshot.jobId,
+                        request.snapshot.snapshotId,
+                        timing.requestBytes,
+                        timing.responseBytes,
+                        timing.encodeNanos,
+                        timing.exchangeNanos,
+                        timing.decodeNanos));
     }
 
     public boolean accepts(EvaluationRequest request, ScalingPlan plan, Instant now) {
