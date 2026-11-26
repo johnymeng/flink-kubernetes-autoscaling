@@ -81,6 +81,7 @@ final class Query8Latency {
 
         synchronized String snapshot() {
             var json = new StringBuilder().append("{\"attempt\":").append(attempt)
+                    .append(",\"sampledAtMs\":").append(System.currentTimeMillis())
                     .append(",\"binMs\":").append(BIN_MILLIS)
                     .append(",\"overflowAtMs\":").append(OVERFLOW_MILLIS)
                     .append(",\"invalid\":").append(invalid).append(",\"counts\":{");

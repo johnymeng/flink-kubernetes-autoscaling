@@ -230,6 +230,15 @@ python3 scripts/a4s/q8-latency.py summarize before.json after.json
 
 The tool rejects partial coverage, a changed roster, and reset counters. It merges bucket deltas before taking p50, p95 and p99. A percentile is an inclusive 10 ms bin, with a lower bound only if it lands in the overflow bucket at 120 seconds. Use a common clock for the source and sink, such as a single lab worker. Negative elapsed times are reported as clock errors. The capture interval is subject to Flink's metric fetch interval, and the measured latency includes event-time window and watermark waiting.
 
+The updated Q8 probe records when each TaskManager samples its histogram. Use `capture-series` to retain those timestamps and skip cached reads. For mode comparisons, use intervals whose sample bounds for every sink task fall inside the measured window. Earlier Q8 captures still work with `summarize`.
+
+```bash
+python3 scripts/a4s/q8-latency.py capture-series "$FLINK_REST" "$JOB_ID" "$SINK_VERTEX_ID" \
+  --metric q8AuctionLatencyV1 --duration-sec 75 --interval-sec 5 > q8-latency-series.jsonl
+```
+
+A local Q8 smoke with in-memory state produced 11 fresh two-task intervals containing 5,200 sampled results, with zero clock errors or overflows. The RocksDB attempt produced two valid intervals before exhausting local scratch space. Three archived lab scorecards produced identical output before and after the collector change.
+
 Two local Flink 1.18 MiniCluster startup smokes ran Q8 with two joined-result subtasks, the default 10-second event-time window and a sample stride of 16. With the probe disabled, the three original vertex IDs and parallelisms matched the archived workload. With it enabled, the original three chains still fit in the exclusive-slot layout. Both sink gauges contributed to each capture and both reported zero negative or overflow samples.
 
 | Startup capture | Sampled results | p50 (ms) | p95 (ms) | p99 (ms) |

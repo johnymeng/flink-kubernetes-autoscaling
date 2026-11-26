@@ -126,6 +126,18 @@ class LatencySummaryTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 timed_interval(self.before, window)
 
+    def test_q8_timed_interval_uses_default_gauge_and_keeps_legacy_summaries(self):
+        with self.assertRaisesRegex(ValueError, "TaskManager sample times"):
+            timed_interval(self.before, self.after)
+        for task in self.before["roster"]:
+            self.before["histograms"][task]["sampledAtMs"] = 100
+            self.after["histograms"][task]["sampledAtMs"] = 150
+        self.after["histograms"]["0"]["counts"]["1"] += 2
+        result = timed_interval(self.before, self.after)
+        self.assertEqual(result["metric"], "q8AuctionLatencyV1")
+        self.assertEqual(result["subtaskIntervalsMs"], {"0": [100, 150], "1": [100, 150]})
+        self.assertEqual(result["latency"]["p99"], {"lowerMs": 10, "upperMs": 19})
+
     def test_failed_poll_starts_new_baseline(self):
         self.make_timed()
         later = copy.deepcopy(self.after)

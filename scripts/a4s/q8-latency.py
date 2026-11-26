@@ -161,7 +161,9 @@ def sample_times(snapshot):
 
 def timed_interval(before, after):
     """Describe an interval only when every sink gauge has advanced."""
-    if any(before[key] != after[key] for key in ("job", "vertex", "roster", "metric")):
+    gauge = before.get("metric", METRIC)
+    if (gauge != after.get("metric", METRIC)
+            or any(before[key] != after[key] for key in ("job", "vertex", "roster"))):
         raise ValueError("The latency capture changed identity or task attempts")
     starts, ends = sample_times(before), sample_times(after)
     if starts.keys() != ends.keys() or starts.keys() != before["roster"].keys():
@@ -174,23 +176,23 @@ def timed_interval(before, after):
     if any(starts[task] == ends[task] for task in starts):
         return None
     return {
-        "event": "interval", "job": after["job"], "vertex": after["vertex"], "metric": after["metric"],
+        "event": "interval", "job": after["job"], "vertex": after["vertex"], "metric": gauge,
         "roster": after["roster"], "subtaskIntervalsMs": {task: [start, ends[task]] for task, start in starts.items()},
         "observedAtMs": after["observedAtMs"], "latency": summarize(before, after),
     }
 
 
-def capture_series(rest_url, job, vertex, duration_sec, interval_sec):
+def capture_series(rest_url, job, vertex, duration_sec, interval_sec, gauge=Q20_METRIC):
     deadline = time.monotonic() + duration_sec
     baseline = None
     while (started := time.monotonic()) < deadline:
         try:
-            current = capture(rest_url, job, vertex, Q20_METRIC)
+            current = capture(rest_url, job, vertex, gauge)
             times = sample_times(current)
             if baseline is None or current["roster"] != baseline["roster"]:
                 baseline = current
                 yield {
-                    "event": "baseline", "job": job, "vertex": vertex, "metric": Q20_METRIC,
+                    "event": "baseline", "job": job, "vertex": vertex, "metric": gauge,
                     "roster": current["roster"], "sampledAtMs": times, "observedAtMs": current["observedAtMs"],
                 }
             elif (interval := timed_interval(baseline, current)) is not None:
@@ -198,7 +200,7 @@ def capture_series(rest_url, job, vertex, duration_sec, interval_sec):
                 yield interval
         except (KeyError, OSError, TypeError, ValueError) as error:
             baseline = None
-            yield {"event": "gap", "job": job, "vertex": vertex, "metric": Q20_METRIC,
+            yield {"event": "gap", "job": job, "vertex": vertex, "metric": gauge,
                    "observedAtMs": time.time_ns() // 1_000_000, "error": str(error)}
         time.sleep(max(0, min(deadline, started + interval_sec) - time.monotonic()))
 
@@ -211,10 +213,11 @@ def main():
     capture_command.add_argument("job_id")
     capture_command.add_argument("vertex_id")
     capture_command.add_argument("--metric", choices=BUCKET_LAYOUTS, default=METRIC)
-    series_command = commands.add_parser("capture-series", help="record time-bounded Q20 latency intervals")
+    series_command = commands.add_parser("capture-series", help="record time-bounded Q8 or Q20 latency intervals")
     series_command.add_argument("rest_url")
     series_command.add_argument("job_id")
     series_command.add_argument("vertex_id")
+    series_command.add_argument("--metric", choices=(METRIC, Q20_METRIC), default=Q20_METRIC)
     series_command.add_argument("--duration-sec", required=True, type=int)
     series_command.add_argument("--interval-sec", default=5, type=int)
     summarize_command = commands.add_parser("summarize")
@@ -227,7 +230,8 @@ def main():
         if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in (args.job_id, args.vertex_id)):
             parser.error("job and vertex IDs must be 32 lowercase hexadecimal digits")
         has_interval = False
-        for event in capture_series(args.rest_url, args.job_id, args.vertex_id, args.duration_sec, args.interval_sec):
+        for event in capture_series(args.rest_url, args.job_id, args.vertex_id,
+                                    args.duration_sec, args.interval_sec, args.metric):
             print(json.dumps(event, sort_keys=True), flush=True)
             has_interval |= event["event"] == "interval"
         if not has_interval:
