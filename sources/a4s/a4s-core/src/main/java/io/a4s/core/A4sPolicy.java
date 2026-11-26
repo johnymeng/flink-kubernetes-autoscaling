@@ -565,13 +565,11 @@ public final class A4sPolicy implements ScalingPolicy {
         private final EvaluationRequest request;
         private final OperatorMetrics operator;
         private final MemoryParallelismCurve curve;
-        private final PerformanceModel model;
 
         private Frontier(
                 EvaluationRequest request, OperatorMetrics operator, PerformanceModel model) {
             this.request = request;
             this.operator = operator;
-            this.model = model;
             this.curve =
                     operator.cacheSensitive ? new MemoryParallelismCurve(operator, model) : null;
         }
@@ -613,7 +611,7 @@ public final class A4sPolicy implements ScalingPolicy {
             Long managed = current.managedMemoryPerTaskBytes;
             if (curve != null) {
                 var required = curve.minimumCacheBytes(parallelism);
-                if (required.isEmpty()) {
+                if (required.isEmpty() || required.getAsLong() < 0) {
                     return null;
                 }
                 minimum = required.getAsLong();
@@ -635,8 +633,15 @@ public final class A4sPolicy implements ScalingPolicy {
             var target =
                     new OperatorConfiguration(parallelism, cache, managed, current.cpuCoresPerTask);
             if (curve != null && request.policy.mode == Mode.CACHE) {
-                var prediction = model.predict(operator, target);
-                throughput = prediction.isPresent() ? prediction.getAsDouble() : null;
+                var prediction = curve.predict(target);
+                if (prediction.isEmpty()) {
+                    return null;
+                }
+                double rate = prediction.getAsDouble();
+                if (!Double.isFinite(rate) || rate < operator.targetRecordsPerSecond) {
+                    return null;
+                }
+                throughput = rate;
             }
             return new OperatorDecision(
                     target, target.totalCacheBytes(), minimum, throughput, null);

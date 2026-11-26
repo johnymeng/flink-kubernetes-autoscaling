@@ -19,11 +19,15 @@ package io.a4s.runner;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+import io.a4s.api.CachePoint;
 import io.a4s.api.EvaluationRequest;
 import io.a4s.api.MigrationEstimate;
+import io.a4s.api.OperatorConfiguration;
+import io.a4s.api.OperatorMetrics;
 import io.a4s.api.ScalingPlan;
 import io.a4s.api.Worker;
 import io.a4s.core.A4sPolicy;
+import io.a4s.core.PerformanceModel;
 import io.a4s.http.DecisionClient;
 import io.a4s.http.SnapshotRecorder;
 import io.a4s.http.Wire;
@@ -40,6 +44,8 @@ import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
@@ -213,6 +219,74 @@ class DecisionServerTest {
         var historical = decode(Files.readString(Path.of("../examples/q8-archived-curve.json")));
         assertEquals(
                 ScalingPlan.Action.INFEASIBLE_CONFIGURATION, policy.evaluate(historical).action);
+    }
+
+    @Test
+    void verifiesMeasuredSupportAfterApplyingCacheBoundsAndTaskRounding() throws Exception {
+        var policy = new A4sPolicy();
+        var largerBudget =
+                EXAMPLE_JSON
+                        .replace(
+                                "\"maxCachePerTaskBytes\": 134217728",
+                                "\"maxCachePerTaskBytes\": 536870912")
+                        .replace(
+                                "\"totalCacheBudgetBytes\": 1073741824",
+                                "\"totalCacheBudgetBytes\": 4294967296");
+        var floorOutsideTheCurve =
+                decode(
+                        largerBudget.replace(
+                                "\"minCachePerTaskBytes\": 0",
+                                "\"minCachePerTaskBytes\": 536870912"));
+        assertEquals(
+                ScalingPlan.Action.INFEASIBLE_CONFIGURATION,
+                policy.evaluate(floorOutsideTheCurve).action);
+
+        int start = largerBudget.indexOf("\"missRateCurve\": [");
+        int end = largerBudget.indexOf(']', start);
+        var rounded =
+                decode(
+                        largerBudget.substring(0, start)
+                                + "\"missRateCurve\": [{\"capacityBytes\":1610612730,\"missRate\":0.55}]"
+                                + largerBudget.substring(end + 1));
+        // Four subtasks round the minimum above the measured endpoint. Six divide it exactly.
+        var plan = policy.evaluate(rounded);
+        assertEquals(ScalingPlan.Action.RESCALE, plan.action);
+        var join = plan.operators.get("join");
+        assertEquals(6, join.target.parallelism);
+        assertEquals(1_610_612_730L, join.targetTotalCacheBytes);
+        assertTrue(join.predictedRecordsPerSecond >= 60_000);
+        assertTrue(policy.isApplicable(rounded, plan, 10_002));
+    }
+
+    @Test
+    void holdsWhenThePerformanceModelCannotVerifyTheTargetRate() throws Exception {
+        var request = decode(EXAMPLE_JSON);
+        for (double forecast : new double[] {59_999, Double.NaN, Double.POSITIVE_INFINITY}) {
+            var policy =
+                    new A4sPolicy(
+                            (snapshot, decisions) -> Optional.empty(),
+                            "test-model",
+                            options ->
+                                    new PerformanceModel() {
+                                        @Override
+                                        public OptionalDouble predict(
+                                                OperatorMetrics current,
+                                                OperatorConfiguration candidate) {
+                                            return OptionalDouble.of(forecast);
+                                        }
+
+                                        @Override
+                                        public OptionalLong minimumCacheBytes(
+                                                OperatorMetrics current,
+                                                int parallelism,
+                                                List<CachePoint> measuredCurve) {
+                                            return OptionalLong.of(
+                                                    measuredCurve.get(0).capacityBytes);
+                                        }
+                                    });
+            assertEquals(
+                    ScalingPlan.Action.INFEASIBLE_CONFIGURATION, policy.evaluate(request).action);
+        }
     }
 
     @Test

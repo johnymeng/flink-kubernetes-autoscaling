@@ -18,8 +18,10 @@
 package io.a4s.core;
 
 import io.a4s.api.CachePoint;
+import io.a4s.api.OperatorConfiguration;
 import io.a4s.api.OperatorMetrics;
 import java.util.List;
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
 
 /** Lazily evaluates the minimum measured operator-wide cache required at each parallelism. */
@@ -43,5 +45,17 @@ public final class MemoryParallelismCurve {
 
     public OptionalLong minimumCacheBytes(int parallelism) {
         return model.minimumCacheBytes(metrics, parallelism, points);
+    }
+
+    /** Forecast the final cache allocation within the observed operator-wide capacity range. */
+    public OptionalDouble predict(OperatorConfiguration candidate) {
+        Long capacity = candidate.totalCacheBytes();
+        if (capacity == null
+                || !hasMeasurements()
+                || capacity < points.get(0).capacityBytes
+                || capacity > points.get(points.size() - 1).capacityBytes) {
+            return OptionalDouble.empty();
+        }
+        return model.predict(metrics, candidate);
     }
 }
