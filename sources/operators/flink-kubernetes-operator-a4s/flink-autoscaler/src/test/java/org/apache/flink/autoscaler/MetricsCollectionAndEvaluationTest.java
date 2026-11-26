@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.exceptions.NotReadyException;
@@ -31,6 +32,8 @@ import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.job.JobDetailsInfo;
@@ -38,6 +41,8 @@ import org.apache.flink.runtime.rest.messages.job.JobDetailsInfo;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.core.JsonProcessingException;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.a4s.api.EvaluationRequest;
+import io.a4s.http.Wire;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -45,6 +50,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -230,6 +236,52 @@ public class MetricsCollectionAndEvaluationTest {
                 map, TestMetrics.builder().numRecordsIn(0).maxBusyTimePerSec(500).build());
         metricsCollector.updateMetrics(
                 sink, TestMetrics.builder().numRecordsIn(0).maxBusyTimePerSec(500).build());
+    }
+
+    @Test
+    public void publishesOnlyLatestVerifiedSourceBacklogsWithoutRounding() throws Exception {
+        var observations = new HashMap<>(Map.of(
+                source1, new A4SAggregatedMetricsResponseBody(null, null, 0L),
+                source2, new A4SAggregatedMetricsResponseBody(null, null, Long.MAX_VALUE),
+                map, new A4SAggregatedMetricsResponseBody(null, null, 27L)));
+        metricsCollector = new TestingMetricsCollector<>(topology) {
+            @Override
+            protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
+                    JobAutoScalerContext<JobID> ctx,
+                    JobTopology liveTopology,
+                    Collection<JobVertexID> vertices) {
+                return observations;
+            }
+        };
+        metricsCollector.setJobUpdateTs(startTime);
+        setDefaultMetrics(metricsCollector);
+        metricsCollector.updateMetrics(source2, tm -> tm.setPendingRecords(1234L));
+
+        var profile = ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(192).build();
+        var profiles = Map.of(source1, profile, source2, profile, map, profile, sink, profile);
+        var conf = context.getConfiguration();
+        var adapter = new Flink118A4sAdapter();
+        var evaluation = evaluator.evaluate(conf, collectMetrics(), restartTime);
+        var request = adapter.request(context.getJobID().toString(), "test-generation",
+                evaluation.getWindowEnd(), topology, evaluation, Map.of(), profiles, conf);
+        var decoded = Wire.decode(Wire.encode(request), EvaluationRequest.class);
+
+        var expected = Map.of(source1.toHexString(), 0L, source2.toHexString(), Long.MAX_VALUE);
+        for (var operator : decoded.snapshot.operators) {
+            assertEquals(expected.get(operator.operatorId), operator.telemetry.sourceBacklogRecords);
+        }
+        assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
+
+        observations.remove(source1);
+        observations.put(source2, new A4SAggregatedMetricsResponseBody(null, null, -1L));
+        metricsCollector.setClock(Clock.offset(clock, Duration.ofSeconds(3)));
+        evaluation = evaluator.evaluate(conf, metricsCollector.updateMetrics(context, stateStore), restartTime);
+        request = adapter.request(context.getJobID().toString(), "test-generation",
+                evaluation.getWindowEnd(), topology, evaluation, Map.of(), profiles, conf);
+        for (var operator : request.snapshot.operators) {
+            assertNull(operator.telemetry.sourceBacklogRecords);
+        }
+        assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
     }
 
     @Test

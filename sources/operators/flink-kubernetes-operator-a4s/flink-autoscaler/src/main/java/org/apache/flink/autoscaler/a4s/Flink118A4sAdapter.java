@@ -152,7 +152,11 @@ public final class Flink118A4sAdapter {
                             useCache ? OperatorMetrics.CapacityAxis.LEGACY_AGGREGATE_BYTES : null,
                             points,
                             null,
-                            telemetry(metrics, profile, current)));
+                            telemetry(
+                                    metrics,
+                                    profile,
+                                    current,
+                                    evaluated.getObservedSourceBacklogs().get(id))));
         }
         double baseMiB = conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
         if (!Double.isFinite(baseMiB) || baseMiB < 0 || baseMiB > 600) {
@@ -260,7 +264,8 @@ public final class Flink118A4sAdapter {
     private static OperatorTelemetry telemetry(
             Map<ScalingMetric, EvaluatedScalingMetric> metrics,
             ResourceProfile profile,
-            int parallelism) {
+            int parallelism,
+            Long observedSourceBacklog) {
         Double busy = finite(metrics.get(ScalingMetric.LOAD));
         long bytesPerSlot = profile.getTotalMemory().getBytes();
         Long totalSlotBytes =
@@ -281,7 +286,7 @@ public final class Flink118A4sAdapter {
                 null,
                 null,
                 null,
-                count(metrics.get(ScalingMetric.OBSERVED_SOURCE_BACKLOG)),
+                observedSourceBacklog,
                 Map.of());
     }
 
@@ -291,14 +296,6 @@ public final class Flink118A4sAdapter {
         }
         double value = metric.getAverage();
         return Double.isFinite(value) && value >= 0 ? value : null;
-    }
-
-    private static Long count(EvaluatedScalingMetric metric) {
-        if (metric == null) {
-            return null;
-        }
-        double value = metric.getCurrent();
-        return Double.isFinite(value) && value >= 0 && value < Long.MAX_VALUE ? (long) value : null;
     }
 
     public void record(Configuration conf, EvaluationRequest request, ScalingPlan recommendation)

@@ -157,7 +157,7 @@ public class ScalingMetricEvaluatorTest {
 
     @ParameterizedTest
     @CsvSource({"0, 0", "27, 27", ","})
-    void normalizesOnlyObservedSourceBacklog(Double observed, Long expected) {
+    void normalizesOnlyObservedSourceBacklog(Long observed, Long expected) {
         var source = new JobVertexID();
         var topology = new JobTopology(new VertexInfo(source, Map.of(), 1, 8));
         var conf = new Configuration();
@@ -168,18 +168,15 @@ public class ScalingMetricEvaluatorTest {
             var metrics = new HashMap<ScalingMetric, Double>();
             metrics.put(ScalingMetric.LAG, 0.0);
             metrics.put(ScalingMetric.NUM_RECORDS_IN, second * 10.0);
-            if (observed != null) {
-                metrics.put(ScalingMetric.OBSERVED_SOURCE_BACKLOG, observed);
-            }
             history.put(
                     Instant.ofEpochSecond(second),
                     new CollectedMetrics(Map.of(source, metrics), Map.of(), Map.of()));
         }
-        var evaluated =
-                evaluator.evaluate(
-                        conf,
-                        new CollectedMetricHistory(topology, history, history.firstKey()),
-                        Duration.ZERO);
+        var collected = new CollectedMetricHistory(topology, history, history.firstKey());
+        if (observed != null) {
+            collected.setObservedSourceBacklogs(Map.of(source, observed));
+        }
+        var evaluated = evaluator.evaluate(conf, collected, Duration.ZERO);
         var profile = ResourceProfile.newBuilder().setManagedMemoryMB(116).build();
         var request =
                 new Flink118A4sAdapter()

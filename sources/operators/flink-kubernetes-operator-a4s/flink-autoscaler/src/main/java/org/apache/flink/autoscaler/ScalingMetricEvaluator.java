@@ -86,8 +86,13 @@ public class ScalingMetricEvaluator {
         }
 
         return new EvaluatedMetrics(
-                scalingOutput, evaluateGlobalMetrics(metricsHistory), collectedMissRateCurves,
-                metricsHistory.firstKey(), metricsHistory.lastKey(), collectedMetrics.getJobRunningTs());
+                scalingOutput,
+                evaluateGlobalMetrics(metricsHistory),
+                collectedMissRateCurves,
+                metricsHistory.firstKey(),
+                metricsHistory.lastKey(),
+                collectedMetrics.getJobRunningTs(),
+                collectedMetrics.getObservedSourceBacklogs());
     }
 
     @VisibleForTesting
@@ -165,10 +170,6 @@ public class ScalingMetricEvaluator {
 
         Optional.ofNullable(latestVertexMetrics.get(LAG))
                 .ifPresent(l -> evaluatedMetrics.put(LAG, EvaluatedScalingMetric.of(l)));
-        Optional.ofNullable(latestVertexMetrics.get(OBSERVED_SOURCE_BACKLOG))
-                .ifPresent(backlog -> evaluatedMetrics.put(
-                        OBSERVED_SOURCE_BACKLOG, EvaluatedScalingMetric.of(backlog)));
-
         evaluatedMetrics.put(PARALLELISM, EvaluatedScalingMetric.of(vertexInfo.getParallelism()));
 
         evaluatedMetrics.put(

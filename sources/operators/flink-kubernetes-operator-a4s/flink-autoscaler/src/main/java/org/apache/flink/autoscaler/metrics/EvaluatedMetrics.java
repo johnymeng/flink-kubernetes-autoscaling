@@ -38,6 +38,7 @@ public class EvaluatedMetrics {
     private Instant windowStart;
     private Instant windowEnd;
     private Instant jobRunningSince;
+    private Map<JobVertexID, Long> observedSourceBacklogs = Map.of();
 
     public EvaluatedMetrics(
             Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
@@ -50,5 +51,16 @@ public class EvaluatedMetrics {
             Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics,
             Map<JobVertexID, MissRateCurve> missRateCurves) {
         this(vertexMetrics, globalMetrics, missRateCurves, null, null, null);
+    }
+
+    public EvaluatedMetrics(
+            Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
+            Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics,
+            Map<JobVertexID, MissRateCurve> missRateCurves,
+            Instant windowStart,
+            Instant windowEnd,
+            Instant jobRunningSince) {
+        this(vertexMetrics, globalMetrics, missRateCurves, windowStart, windowEnd, jobRunningSince,
+                Map.of());
     }
 }
