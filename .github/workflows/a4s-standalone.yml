@@ -14,6 +14,7 @@ jobs:
           cache: maven
           cache-dependency-path: sources/a4s/**/pom.xml
       - run: mvn -B -ntp -f sources/a4s/pom.xml verify
+      - run: python3 -m unittest discover -s scripts/a4s -p test_q8_latency.py
       - name: Verify the core bytecode is local and platform independent
         run: |
           core=sources/a4s/a4s-core/target/a4s-core-0.1.0.jar

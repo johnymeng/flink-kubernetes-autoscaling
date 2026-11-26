@@ -100,6 +100,30 @@ The first complete target rosters were observed about 71, 69 and 69 seconds afte
 
 The operator now keeps deployment-wide memory tuning out of the Justin A4S loop and leaves an unsuccessful in-place scale pending when the configured fallback would be stateless. The packaged operator passed 44 focused tests covering A4S execution, ignored memory tuning, blocked stateless fallback, and successful in-place scaling. The Q20 comparison below uses this package.
 
+### Capture DataStream Q8 record latency
+
+Add `--q8-latency-sample-every 1024` to the Query 8 arguments to sample auction IDs by a deterministic hash. Zero leaves the probe disabled. Start each comparison arm with the same benchmark JAR and stride, and keep those settings across the arm's checkpoints and restores. The probe requires operator chaining so its wall-clock timestamp is assigned in the Auction source chain. The query continues to use its generated event timestamps for watermarking and its original join conditions. Each matched result for a sampled auction contributes one observation when it reaches the sink. The opt-in path carries a timestamp field on the existing stream and publishes one aggregate gauge per sink task.
+
+Read the vertex containing `Q8 latency sink`. If the sink is chained with the join, use the ID of that combined vertex. Capture one histogram per task before and after the interval, using the REST endpoint of the isolated Flink job.
+
+```bash
+python3 scripts/a4s/q8-latency.py capture "$FLINK_REST" "$JOB_ID" "$SINK_VERTEX_ID" > before.json
+# Capture again at the interval's end, while the same attempts are still running.
+python3 scripts/a4s/q8-latency.py capture "$FLINK_REST" "$JOB_ID" "$SINK_VERTEX_ID" > after.json
+python3 scripts/a4s/q8-latency.py summarize before.json after.json
+```
+
+The tool rejects partial coverage, a changed roster, and reset counters. It merges bucket deltas before taking p50, p95 and p99. A percentile is an inclusive 10 ms bin, with a lower bound only if it lands in the overflow bucket at 120 seconds. Use a common clock for the source and sink, such as a single lab worker. Negative elapsed times are reported as clock errors. The capture interval is subject to Flink's metric fetch interval, and the measured latency includes event-time window and watermark waiting.
+
+Two local Flink 1.18 MiniCluster startup smokes ran Q8 with two joined-result subtasks, the default 10-second event-time window and a sample stride of 16. With the probe disabled, the three original vertex IDs and parallelisms matched the archived workload. With it enabled, the original three chains still fit in the exclusive-slot layout. Both sink gauges contributed to each capture and both reported zero negative or overflow samples.
+
+| Startup capture | Sampled results | p50 (ms) | p95 (ms) | p99 (ms) |
+| --- | ---: | ---: | ---: | ---: |
+| First | 15,450 | 4,460–4,469 | 5,400–5,409 | 5,400–5,409 |
+| Second | 45,550 | 4,480–4,489 | 8,410–8,419 | 8,410–8,419 |
+
+These results verify the collection and show variability during startup. Matched embedded and remote latency remains unverified.
+
 ### Prepare the Q20 follow-up
 
 The [Q20 renderer](../scripts/a4s/prepare-q20-comparison.py) uses the existing [checkpoint experiment template](../experiments/1729-checkpoint-aware-rescaling/instruction.md). It creates three repetitions, rotating original, embedded, and remote through each position. It pins the workload image, replaces the template's `tier` selectors with the requested hostnames, and places the operator and remote runner on the selected JobManager host. Both Flink roles can use one idle worker when capacity permits. Each arm gets a separate namespace and checkpoint path. The renderer keeps the shared 600 MiB A4S limit, periodic checkpoints with a one-minute default, and last-state upgrades. It disables deployment-wide memory tuning so that additional pod memory edits do not force redeployment during a Justin scale, and disables the template's separate checkpoint-gated producer pause. Python 3.9 or later and PyYAML are required.
@@ -148,6 +172,6 @@ All 111 embedded and remote recordings replayed byte for byte. Replaying copies 
 | Verified | The independent Maven build, packaged runner, Kubernetes Service smoke, and standalone CI exercise the same v1 evaluation path without Flink. Embedded and HTTP evaluation agree on matched inputs. The live Q8 and Q20 captures reproduce through offline replay. |
 | Verified | Local Flink recovered RocksDB state at a different parallelism and preserved the Kafka transactional output oracle. Live Q20 restored checkpoints during memory-only updates. Runner failure, stale recommendations, and incomplete or uncommitted overrides were tested separately. |
 | Implemented, partially verified | The adapter now includes the verified exclusive-slot CPU quota in the evaluation request. Focused tests and replay cover this change. The lab binaries used the preceding adapter with the final operator-side quota check. The live Kafka workload uses a blackhole sink, so the deterministic committed-output oracle has only been exercised locally. |
-| Observed performance differences | The remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. The Q8 runs chose different parallelism, and the Q20 runs applied different reservations and accumulated backlog. The transport-only steady-state target, end-to-end record latency percentiles and time to recover target throughput remain open. |
+| Observed performance differences | The remote arm measured 16.5% lower eligible join-input throughput in Q8 and 6.3% lower in Q20. The Q8 runs chose different parallelism, and the Q20 runs applied different reservations and accumulated backlog. The transport-only steady-state target, matched end-to-end record latency percentiles and time to recover target throughput remain open. |
 | Platform dependencies | The Flink adapter supplies demand from the existing Flink evaluator and consumes the JobManager's aggregate `scaledMrc`. The operator supplies pending reconciliation and resource information. An atomic execution-generation precondition for Justin writes would close the remaining check-to-use interval. |
 | Unsupported in v1 | Physical placement, a calibrated migration cost model, and a verified Flink 2.x or ForSt integration remain outside the current implementation. The optimizer checks a packing when the snapshot supplies worker capacities. Online cost calibration and learned models have extension points and would need their own data and qualification. See the [future adapter guide](a4s-standalone.md#native-instrumentation-and-future-adapters). |
