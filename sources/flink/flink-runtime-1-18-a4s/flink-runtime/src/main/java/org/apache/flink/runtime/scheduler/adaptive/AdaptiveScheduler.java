@@ -1009,6 +1009,7 @@ public class AdaptiveScheduler
                 runningGraph == null
                         ? Collections.emptyMap()
                         : getExclusiveSlotProfiles(runningGraph);
+        final NativeRescaleStatus requestStatus = preallocationEnabled ? nativeRescaleStatus : null;
         final Map<JobVertexID, JustinVertexResourceRequirements> requirements = new HashMap<>();
         for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
             final JobVertexID vertexId = vertex.getJobVertexID();
@@ -1035,11 +1036,11 @@ public class AdaptiveScheduler
                             requestedParallelism,
                             requestedProfile,
                             appliedProfile,
-                            nativeRescaleStatus == null || runningVertex == null
+                            requestStatus == null || runningVertex == null
                                     ? null
                                     : runningVertex.getParallelism(),
-                            nativeRescaleStatus == null ? null : nativeRescaleStatus.name(),
-                            nativeRescaleStatus == null ? null : nativeRescaleGeneration));
+                            requestStatus == null ? null : requestStatus.name(),
+                            requestStatus == null ? null : nativeRescaleGeneration));
         }
         return new JustinResourceRequirements(requirements);
     }
