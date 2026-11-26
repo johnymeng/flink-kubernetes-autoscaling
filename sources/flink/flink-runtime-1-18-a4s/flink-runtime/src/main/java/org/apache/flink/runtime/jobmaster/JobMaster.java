@@ -798,6 +798,7 @@ public class JobMaster extends FencedRpcEndpoint<JobMasterId>
                                     taskManagerId,
                                     TaskManagerRegistration.create(
                                             taskManagerLocation, taskExecutorGateway, sessionId));
+                            schedulerNG.notifyTaskManagerRegistered(taskManagerId);
 
                             // monitor the task manager as heartbeat target
                             taskManagerHeartbeatManager.monitorTarget(

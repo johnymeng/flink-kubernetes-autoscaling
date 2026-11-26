@@ -31,6 +31,7 @@ import org.apache.flink.runtime.util.ResourceCounter;
 import javax.annotation.Nullable;
 
 import java.util.Collection;
+import java.util.Set;
 
 /**
  * Slot pool interface which uses Flink's declarative resource management protocol to acquire
@@ -193,6 +194,14 @@ public interface DeclarativeSlotPool {
      * @param currentTimeMillis current time
      */
     void releaseIdleSlots(long currentTimeMillis);
+
+    /**
+     * Release excess idle slots while retaining allocations selected for a native rescale. The
+     * retained allocations remain free and may still disappear if a worker disconnects.
+     */
+    default void releaseIdleSlots(long currentTimeMillis, Set<AllocationID> retainedAllocations) {
+        releaseIdleSlots(currentTimeMillis);
+    }
 
     /**
      * Registers a listener which is called whenever new slots become available.
