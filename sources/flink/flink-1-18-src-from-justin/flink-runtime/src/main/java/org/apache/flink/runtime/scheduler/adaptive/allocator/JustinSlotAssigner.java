@@ -28,6 +28,9 @@ import org.apache.flink.runtime.util.ResourceCounter;
 
 import org.slf4j.LoggerFactory;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -42,6 +45,8 @@ import java.util.stream.Collectors;
 
 /** Assigns each Justin execution slot-sharing group to a matching physical allocation. */
 public class JustinSlotAssigner implements SlotAssigner {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JustinSlotAssigner.class);
 
     static List<ExecutionSlotSharingGroup> createExecutionSlotSharingGroups(
             VertexParallelism vertexParallelism, SlotSharingGroup slotSharingGroup) {
