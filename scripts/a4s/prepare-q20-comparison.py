@@ -73,6 +73,7 @@ def render_job(directory, run_id, args):
     for key in OTHER_OPERATOR_SETTINGS | MODE_SETTINGS:
         config.pop(key, None)
     config["job.autoscaler.scaling.enabled"] = "true"
+    config["job.autoscaler.memory.tuning.enabled"] = "false"
     config["pipeline.exclusive-vertex-slots"] = "true"
     return job
 
