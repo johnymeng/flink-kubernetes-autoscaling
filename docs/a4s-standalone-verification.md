@@ -96,6 +96,12 @@ The current branch built the full Flink runtime and RocksDB backend modules, the
 
 A local MiniCluster used the rebuilt runtime and backend JARs with the pinned RocksDB JNI library. The collector and native scaling service loaded from the newly shaded operator JAR, and the runner ran in its own JVM. The collector recorded a live task-time window. The guarded rescale restored the state and produced all 200 expected IDs and keyed counts. All three recorded recommendations replayed exactly with the packaged runner. Checksums and class-loading evidence identified the actual artifacts. The shared-lab throughput and latency criteria remain open.
 
+### Full Flink distribution
+
+The 104-module Maven reactor compiled and shaded the Flink distribution from `14ce6b95` on Linux amd64 with Java 17. The reactor used `-DskipTests` to retain the test JARs required by downstream modules. After the initial `bin` assembly, temporary storage ran out during the optional library copy. A second Maven invocation ran the repository's `opt.xml` and `plugins.xml` descriptors against the compiled module JARs. Checksums covered all 125 assembled files, and the optional libraries and plugins matched their build inputs.
+
+The packaged CLI submitted the bundled WordCount to its own JobManager and TaskManager and observed the job finish. A separate local checkpoint rescale loaded the Flink runtime and RocksDB classes from the assembled distribution JAR. The bundled native library matched the pinned JNI input byte for byte. The separate runner evaluated a live task-time window, the guarded rescale recovered all 200 expected IDs and keyed counts, and all three recorded decisions replayed exactly. The distribution has local startup and recovery evidence. The Java 11 lab image and current-branch throughput and latency still require a matched lab run.
+
 ## Full local RocksDB JNI check
 
 The vendored `rocksdbjava` target built a fresh x86-64 JNI JAR with Snappy on Ubuntu 24.04 using GCC 13. The local build supplied the standard C++ headers required by this compiler and used the Makefile's warning override. The original estimator was also linked using the same compiler, compression libraries and common object files. Both JARs passed all four RocksDB `LRUCacheTest` cases. The standalone SHARDS library passed its C++11 test independently.
