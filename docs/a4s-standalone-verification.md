@@ -42,6 +42,8 @@ A Linux x86-64 VM ran a Java 17 loopback client against the standalone JAR using
 
 Runner RSS increased from 73,884 to 93,572 KiB during the loopback test and the process consumed approximately one CPU second at the precision of the sampled process counter. These are control-plane observations on one VM. The matched throughput regression target, latency and tail latency, recovery time, backend resource consumption, and worker capacity must be evaluated in the lab.
 
+The runner now includes a `route` field beside `durationMicros` in request logs, so `/v1/evaluate` service timings can be counted separately from readiness checks. The value covers server-side handling and response writing. The local HTTP round-trip test above also includes client and transport time.
+
 ## Live experiment
 
 The first matched comparison uses the existing isolated Q8 DataStream harness. It keeps the workload JAR, runtime image, initial profiles, input schedule, checkpointing, and physical worker fixed across original, embedded and remote modes. The original and extracted operators are built independently from the recorded source revisions against the same installed Flink snapshot artifacts. Scoped layer publication is used on c165 because the lab account cannot access the Docker daemon.

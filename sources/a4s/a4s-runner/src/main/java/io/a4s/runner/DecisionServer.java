@@ -73,16 +73,19 @@ final class DecisionServer implements AutoCloseable {
 
     private void dispatch(HttpExchange exchange) throws IOException {
         long start = System.nanoTime();
+        String route = "unknown";
         try {
             String path = exchange.getRequestURI().getRawPath();
             String method = exchange.getRequestMethod();
             switch (path) {
                 case "/health":
+                    route = path;
                     if (requireMethod(exchange, method, "GET")) {
                         send(exchange, 200, Map.of("status", "ready"));
                     }
                     break;
                 case "/v1/version":
+                    route = path;
                     if (requireMethod(exchange, method, "GET")) {
                         send(
                                 exchange,
@@ -99,6 +102,7 @@ final class DecisionServer implements AutoCloseable {
                     }
                     break;
                 case "/v1/evaluate":
+                    route = path;
                     if (requireMethod(exchange, method, "POST")) {
                         evaluate(exchange);
                     }
@@ -109,8 +113,8 @@ final class DecisionServer implements AutoCloseable {
         } finally {
             exchange.close();
             System.out.printf(
-                    "{\"event\":\"request\",\"status\":%d,\"durationMicros\":%d}%n",
-                    exchange.getResponseCode(), (System.nanoTime() - start) / 1_000);
+                    "{\"event\":\"request\",\"route\":\"%s\",\"status\":%d,\"durationMicros\":%d}%n",
+                    route, exchange.getResponseCode(), (System.nanoTime() - start) / 1_000);
         }
     }
 
