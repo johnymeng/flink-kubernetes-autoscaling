@@ -31,7 +31,9 @@ Runner RSS increased from 73,884 to 93,572 KiB during the loopback test and the 
 
 The first matched comparison uses the existing isolated Q8 DataStream harness. It keeps the workload JAR, runtime image, initial profiles, input schedule, checkpointing, and physical worker fixed across original, embedded and remote modes. The original and extracted operators are built independently from the recorded source revisions against the same installed Flink snapshot artifacts. Scoped layer publication is used on c165 because the lab account cannot access the Docker daemon.
 
-The runner image and Q8 triplet are staged for lab verification. Compare run IDs, requested and observed native changes, and controller evidence after the runs finish. Q9 or Q20 and the deterministic Kafka output check remain open. The Dockerfile and Kubernetes service template are provided for deployment from a built image.
+The standalone runner passed an isolated Kubernetes Service smoke on c182. The pinned Java 11 runner returned the sample `RESCALE` plan for six subtasks, its live JAR digest matched the build receipt, and scoped cleanup removed the namespace. The Dockerfile also passed the GitHub Actions container smoke.
+
+The staged Q8 comparison pinned the same runtime at `3015abd8e505569ac914c55e9e795b89d5053d6c` and the same JNI and workload artifacts for every mode. The original arm `live-33543ca8` stopped at the startup guard because its evidence receipt omitted the native binary checksum and its configuration filter missed the slot-limit key. Those harness inputs were corrected. The retry `live-b0feb46b` was stopped during setup at the user's request, before the input release. Both scopes were removed and the shared worker lock was released. Embedded and remote Q8 arms, the follow-up Q9 or Q20 workload, and the deterministic live Kafka output check are pending. There is no matched live throughput or latency result.
 
 ## Remaining work
 
