@@ -342,6 +342,90 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
     }
 
     @Test
+    public void testCacheCountersUseLatestSampleOfEachCurrentDatabase() throws Exception {
+        ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
+        ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);
+        when(restfulGateway.requestJob(jobId, TIMEOUT))
+                .thenReturn(CompletableFuture.completedFuture(graph));
+        when(graph.getJobVertex(jobVertexId)).thenReturn(vertex);
+        when(vertex.getParallelism()).thenReturn(2);
+        ArchivedExecutionVertex[] tasks = {runningTask(0, 1), runningTask(1, 2)};
+        when(vertex.getTaskVertices()).thenReturn(tasks);
+        Map<String, String> paths = new HashMap<>();
+        paths.put(JobIDPathParameter.KEY, jobId.toString());
+        paths.put(JobVertexIdPathParameter.KEY, jobVertexId.toString());
+        HandlerRequest<EmptyRequestBody> request =
+                HandlerRequest.resolveParametersAndCreate(
+                        EmptyRequestBody.getInstance(),
+                        handler.getMessageHeaders().getUnresolvedMessageParameters(),
+                        paths,
+                        Collections.singletonMap(
+                                "get",
+                                Collections.singletonList(
+                                        A4SAggregatedMetricsResponseBody
+                                                .FIELD_NAME_CACHE_COUNTERS)),
+                        Collections.emptyList());
+
+        String first = "34d73888-3125-4cdf-9295-5ac3794d77e1";
+        String second = "e6a1ef14-d1e9-4014-bc02-2bd6fa55ab04";
+        String third = "b191c482-0832-4f2f-b4f9-aac3542b07ae";
+        putCacheCounters(0, 1, "first", first + ":1:14:0");
+        putCacheCounters(0, 1, "alias", first + ":2:9007199254740993:0");
+        putCacheCounters(0, 1, "chained", second + ":1:3:4");
+        putCacheCounters(1, 1, "retired", third + ":100:20:20");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCounters());
+
+        putCacheCounters(1, 2, "current", first + ":3:9007199254740994:0");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCounters());
+
+        putCacheCounters(1, 2, "current", third + ":2:0:5");
+        A4SAggregatedMetricsResponseBody.CacheCounters counters =
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCounters();
+        assertEquals(9007199254740996L, counters.hits);
+        assertEquals(9L, counters.misses);
+        assertNull(
+                handler.handleRequest(
+                                createRequest(jobId.toString(), jobVertexId.toString()),
+                                restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCounters());
+
+        putCacheCounters(0, 1, "alias", first + ":2:2:0");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCounters());
+        putCacheCounters(0, 1, "alias", first + ":1:9007199254740993:0");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCounters());
+
+        putCacheCounters(0, 1, "alias", first + ":2:" + Long.MAX_VALUE + ":0");
+        assertNull(
+                handler.handleRequest(request, restfulGateway)
+                        .get()
+                        .getObservedBlockCacheCounters());
+    }
+
+    private void putCacheCounters(int subtask, int attempt, String scope, String reading) {
+        metricStore.add(
+                new MetricDump.GaugeDump(
+                        new QueryScopeInfo.TaskQueryScopeInfo(
+                                jobId.toString(), jobVertexId.toString(), subtask, attempt, scope),
+                        MetricNames.A4S_BLOCK_CACHE_COUNTERS,
+                        reading));
+    }
+
+    @Test
     public void testSourceBacklogRequiresEveryCurrentAttempt() throws Exception {
         ArchivedExecutionGraph graph = mock(ArchivedExecutionGraph.class);
         ArchivedExecutionJobVertex vertex = mock(ArchivedExecutionJobVertex.class);

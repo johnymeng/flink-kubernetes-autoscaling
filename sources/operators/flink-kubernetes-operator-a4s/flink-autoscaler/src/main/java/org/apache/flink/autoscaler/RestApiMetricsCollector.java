@@ -165,7 +165,11 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
                 a4s && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-capacity", false);
         boolean includeCacheUsage =
                 a4s && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-usage", false);
-        if (includeBacklog || includeCacheCapacity || includeCacheUsage) {
+        boolean includeCacheCounters =
+                a4s
+                        && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-hit", false)
+                        && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-miss", false);
+        if (includeBacklog || includeCacheCapacity || includeCacheUsage || includeCacheCounters) {
             var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
             var fields = new ArrayList<String>();
             if (includeBacklog) {
@@ -176,6 +180,9 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
             }
             if (includeCacheUsage) {
                 fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_USAGE);
+            }
+            if (includeCacheCounters) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COUNTERS);
             }
             filter.resolve(fields);
         }

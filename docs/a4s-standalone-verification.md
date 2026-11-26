@@ -68,6 +68,12 @@ In a local Flink run, the normal operator collector and evaluator reported 16,52
 
 The live fixture enabled capacity and usage gauges while leaving hit and miss counters disabled. The collector now leaves the hit rate unavailable when either counter is missing. Nine runtime tests and 108 focused autoscaler tests passed. They cover the newest sample across duplicate gauges, zero usage, retired attempts, conflicting or shared identities, missing counters and exact integer transport.
 
+### Paired cache hit and miss counters
+
+The local Flink fixture checkpointed the keyed state to SST files, then processed twenty more inputs to exercise block reads. Direct RocksDB statistics gauges reported six hits and two misses for the live database. The production operator collector and evaluator carried the same integer pair. Both requests to the standalone runner recorded that pair for the stateful vertex and unavailable counters for the source. Both decisions replayed exactly, and the checkpoint rescale preserved all 200 expected IDs and keyed counts.
+
+Ten runtime tests and 108 focused autoscaler tests passed. Coverage includes multiple chained databases, stale attempts, repeated aliases, zeros, counter regression, overflow and exact transport above double precision.
+
 ## Local packaging check
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.

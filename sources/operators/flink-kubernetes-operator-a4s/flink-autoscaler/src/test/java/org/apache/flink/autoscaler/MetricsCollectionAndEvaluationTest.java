@@ -33,6 +33,7 @@ import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -253,7 +254,8 @@ public class MetricsCollectionAndEvaluationTest {
                                                 null,
                                                 27L,
                                                 9007199254740993L,
-                                                9007199254740993L),
+                                                9007199254740993L,
+                                                new CacheCounters(9007199254740993L, 0L)),
                                 sink,
                                         new A4SAggregatedMetricsResponseBody(
                                                 null, null, null, null, 0L)));
@@ -299,6 +301,14 @@ public class MetricsCollectionAndEvaluationTest {
                             : null,
                     operator.telemetry.observedBlockCacheCapacityBytes);
             assertEquals(expectedUsage.get(operator.operatorId), operator.telemetry.cacheUsedBytes);
+            assertEquals(
+                    operator.operatorId.equals(map.toHexString())
+                            ? Long.valueOf(9007199254740993L)
+                            : null,
+                    operator.telemetry.cacheHits);
+            assertEquals(
+                    operator.operatorId.equals(map.toHexString()) ? Long.valueOf(0L) : null,
+                    operator.telemetry.cacheMisses);
             assertNull(operator.current.cachePerTaskBytes);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
@@ -325,6 +335,8 @@ public class MetricsCollectionAndEvaluationTest {
             assertNull(operator.telemetry.sourceBacklogRecords);
             assertNull(operator.telemetry.observedBlockCacheCapacityBytes);
             assertNull(operator.telemetry.cacheUsedBytes);
+            assertNull(operator.telemetry.cacheHits);
+            assertNull(operator.telemetry.cacheMisses);
         }
         assertEquals(1234.0, evaluation.getVertexMetrics().get(source2).get(ScalingMetric.LAG).getCurrent());
     }

@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import lombok.AllArgsConstructor;
@@ -41,6 +42,7 @@ public class EvaluatedMetrics {
     private Map<JobVertexID, Long> observedSourceBacklogs = Map.of();
     private Map<JobVertexID, Long> observedBlockCacheCapacities = Map.of();
     private Map<JobVertexID, Long> observedBlockCacheUsage = Map.of();
+    private Map<JobVertexID, CacheCounters> observedBlockCacheCounters = Map.of();
 
     public EvaluatedMetrics(
             Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
@@ -69,6 +71,7 @@ public class EvaluatedMetrics {
                 windowStart,
                 windowEnd,
                 jobRunningSince,
+                Map.of(),
                 Map.of(),
                 Map.of(),
                 Map.of());

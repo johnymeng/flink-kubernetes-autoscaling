@@ -39,6 +39,7 @@ import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
 import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.CacheCounters;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedVertexMetricsHeaders;
 import org.apache.flink.runtime.rest.messages.job.metrics.AggregatedSubtaskMetricsParameters;
 import org.apache.flink.runtime.rest.messages.job.metrics.MetricsFilterParameter;
@@ -51,6 +52,7 @@ import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -107,12 +109,18 @@ public class A4SAggregatingVertexMetricsHandler
         boolean includeCacheUsage =
                 request.getQueryParameter(MetricsFilterParameter.class)
                         .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_USAGE);
+        boolean includeCacheCounters =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COUNTERS);
 
         return CompletableFuture.supplyAsync(
                         () -> {
                             try {
                                 CompletableFuture<ArchivedExecutionGraph> graph =
-                                        includeBacklog || includeCacheCapacity || includeCacheUsage
+                                        includeBacklog
+                                                        || includeCacheCapacity
+                                                        || includeCacheUsage
+                                                        || includeCacheCounters
                                                 ? gateway.requestJob(jobId, timeout)
                                                 : null;
                                 CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
@@ -149,6 +157,9 @@ public class A4SAggregatingVertexMetricsHandler
                                                                     attempts,
                                                                     MetricNames
                                                                             .A4S_SLOT_BLOCK_CACHE_USAGE)
+                                                            : null,
+                                                    includeCacheCounters
+                                                            ? aggregateCacheCounters(attempts)
                                                             : null);
                                         });
                             } catch (Exception e) {
@@ -332,6 +343,76 @@ public class A4SAggregatingVertexMetricsHandler
             total += bytes;
         }
         return total;
+    }
+
+    @Nullable
+    private static CacheCounters aggregateCacheCounters(
+            @Nullable List<Map<String, String>> attempts) {
+        if (attempts == null) {
+            return null;
+        }
+        long hits = 0;
+        long misses = 0;
+        HashSet<UUID> databases = new HashSet<>();
+        for (Map<String, String> attempt : attempts) {
+            Map<UUID, TreeMap<Long, CacheCounters>> samplesByDatabase = new HashMap<>();
+            for (Map.Entry<String, String> metric : attempt.entrySet()) {
+                String name = metric.getKey();
+                if (!MetricNames.A4S_BLOCK_CACHE_COUNTERS.equals(name)
+                        && !name.endsWith("." + MetricNames.A4S_BLOCK_CACHE_COUNTERS)) {
+                    continue;
+                }
+                String value = metric.getValue();
+                String[] parts = value == null ? new String[0] : value.split(":", -1);
+                if (parts.length != 4 || parts[0].length() != 36) {
+                    return null;
+                }
+                try {
+                    UUID database = UUID.fromString(parts[0]);
+                    long sequence = Long.parseLong(parts[1]);
+                    long sampleHits = Long.parseLong(parts[2]);
+                    long sampleMisses = Long.parseLong(parts[3]);
+                    if (sequence <= 0 || sampleHits < 0 || sampleMisses < 0) {
+                        return null;
+                    }
+                    CacheCounters previous =
+                            samplesByDatabase
+                                    .computeIfAbsent(database, ignored -> new TreeMap<>())
+                                    .putIfAbsent(
+                                            sequence, new CacheCounters(sampleHits, sampleMisses));
+                    if (previous != null
+                            && (previous.hits != sampleHits || previous.misses != sampleMisses)) {
+                        return null;
+                    }
+                } catch (IllegalArgumentException e) {
+                    return null;
+                }
+            }
+            if (samplesByDatabase.isEmpty()) {
+                return null;
+            }
+            for (Map.Entry<UUID, TreeMap<Long, CacheCounters>> database :
+                    samplesByDatabase.entrySet()) {
+                if (!databases.add(database.getKey())) {
+                    return null;
+                }
+                CacheCounters latest = null;
+                for (CacheCounters sample : database.getValue().values()) {
+                    if (latest != null
+                            && (sample.hits < latest.hits || sample.misses < latest.misses)) {
+                        return null;
+                    }
+                    latest = sample;
+                }
+                if (latest.hits > Long.MAX_VALUE - hits
+                        || latest.misses > Long.MAX_VALUE - misses) {
+                    return null;
+                }
+                hits += latest.hits;
+                misses += latest.misses;
+            }
+        }
+        return new CacheCounters(hits, misses);
     }
 
     @Nullable

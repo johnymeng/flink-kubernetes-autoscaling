@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler.metrics;
 
 import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import lombok.Data;
@@ -38,5 +39,6 @@ public class CollectedMetricHistory {
 
     @Setter private Map<JobVertexID, Long> observedBlockCacheCapacities = Map.of();
     @Setter private Map<JobVertexID, Long> observedBlockCacheUsage = Map.of();
+    @Setter private Map<JobVertexID, CacheCounters> observedBlockCacheCounters = Map.of();
     @Setter private boolean fullyCollected;
 }

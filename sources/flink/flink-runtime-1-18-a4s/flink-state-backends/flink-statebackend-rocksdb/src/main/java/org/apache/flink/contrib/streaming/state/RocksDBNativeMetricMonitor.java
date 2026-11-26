@@ -22,6 +22,7 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.View;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 
@@ -42,6 +43,7 @@ import javax.annotation.concurrent.GuardedBy;
 import java.io.Closeable;
 import java.math.BigInteger;
 import java.util.Map;
+import java.util.UUID;
 import java.util.WeakHashMap;
 
 /**
@@ -66,6 +68,9 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     @Nullable
     @GuardedBy("lock")
     private Statistics statistics;
+
+    @GuardedBy("lock")
+    private long cacheCounterSequence;
 
     @Nullable private final LRUCache lruCache;
     private final boolean shardsEnabled;
@@ -112,6 +117,24 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                         String.format("rocksdb.%s", tickerType.name().toLowerCase()),
                         new RocksDBNativeStatisticsMetricView(tickerType));
             }
+            if (options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_HIT)
+                    && options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_MISS)) {
+                final String databaseId = UUID.randomUUID().toString();
+                metricGroup.gauge(
+                        MetricNames.A4S_BLOCK_CACHE_COUNTERS,
+                        () -> sampleCacheCounters(databaseId));
+            }
+        }
+    }
+
+    private String sampleCacheCounters(String databaseId) {
+        synchronized (lock) {
+            if (statistics == null || cacheCounterSequence == Long.MAX_VALUE) {
+                return "";
+            }
+            long hits = statistics.getTickerCount(TickerType.BLOCK_CACHE_HIT);
+            long misses = statistics.getTickerCount(TickerType.BLOCK_CACHE_MISS);
+            return databaseId + ":" + (++cacheCounterSequence) + ":" + hits + ":" + misses;
         }
     }
 

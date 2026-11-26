@@ -17,6 +17,7 @@
 
 package org.apache.flink.autoscaler;
 
+import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
@@ -28,10 +29,10 @@ import org.apache.flink.autoscaler.metrics.FlinkMetric;
 import org.apache.flink.autoscaler.metrics.MetricNotFoundException;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetrics;
-import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
@@ -168,6 +169,7 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         Map<JobVertexID, Long> observedSourceBacklogs = new HashMap<>();
         Map<JobVertexID, Long> observedBlockCacheCapacities = new HashMap<>();
         Map<JobVertexID, Long> observedBlockCacheUsage = new HashMap<>();
+        Map<JobVertexID, CacheCounters> observedBlockCacheCounters = new HashMap<>();
         a4sObservations.forEach(
                 (vertex, response) -> {
                     Long capacity = response.getObservedBlockCacheCapacityBytes();
@@ -180,6 +182,13 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                             && !topology.get(vertex).isFinished()) {
                         observedBlockCacheUsage.put(vertex, cacheUsage);
                     }
+                    CacheCounters counters = response.getObservedBlockCacheCounters();
+                    if (counters != null
+                            && counters.hits >= 0
+                            && counters.misses >= 0
+                            && !topology.get(vertex).isFinished()) {
+                        observedBlockCacheCounters.put(vertex, counters);
+                    }
                     Long pending = response.getObservedSourceBacklogRecords();
                     if (pending != null
                             && pending >= 0
@@ -191,6 +200,7 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         collectedMetrics.setObservedSourceBacklogs(Map.copyOf(observedSourceBacklogs));
         collectedMetrics.setObservedBlockCacheCapacities(Map.copyOf(observedBlockCacheCapacities));
         collectedMetrics.setObservedBlockCacheUsage(Map.copyOf(observedBlockCacheUsage));
+        collectedMetrics.setObservedBlockCacheCounters(Map.copyOf(observedBlockCacheCounters));
         if (now.isBefore(windowFullTime)) {
             LOG.info("Metric window not full until {}", readable(windowFullTime));
         } else {

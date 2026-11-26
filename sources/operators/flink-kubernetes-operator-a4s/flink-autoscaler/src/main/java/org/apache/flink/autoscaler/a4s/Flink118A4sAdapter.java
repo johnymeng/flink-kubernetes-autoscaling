@@ -54,6 +54,7 @@ import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.ShipStrategy;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -161,6 +162,7 @@ public final class Flink118A4sAdapter {
                                     evaluated.getObservedSourceBacklogs().get(id),
                                     evaluated.getObservedBlockCacheCapacities().get(id),
                                     evaluated.getObservedBlockCacheUsage().get(id),
+                                    evaluated.getObservedBlockCacheCounters().get(id),
                                     taskPlacements.getOrDefault(id, Map.of()))));
         }
         double baseMiB = conf.get(AutoScalerOptions.A4S_MEMORY_BASE_MB);
@@ -278,6 +280,7 @@ public final class Flink118A4sAdapter {
             Long observedSourceBacklog,
             Long observedBlockCacheCapacity,
             Long observedBlockCacheUsage,
+            CacheCounters observedBlockCacheCounters,
             Map<String, String> taskPlacement) {
         Double busy = finite(metrics.get(ScalingMetric.LOAD));
         long bytesPerSlot = profile.getTotalMemory().getBytes();
@@ -295,8 +298,8 @@ public final class Flink118A4sAdapter {
                 bytesPerSlot,
                 observedBlockCacheUsage,
                 null,
-                null,
-                null,
+                observedBlockCacheCounters == null ? null : observedBlockCacheCounters.hits,
+                observedBlockCacheCounters == null ? null : observedBlockCacheCounters.misses,
                 null,
                 null,
                 observedSourceBacklog,
