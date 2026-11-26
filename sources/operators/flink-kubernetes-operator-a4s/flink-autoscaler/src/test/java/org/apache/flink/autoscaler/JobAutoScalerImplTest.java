@@ -426,6 +426,13 @@ public class JobAutoScalerImplTest {
         stateStore.storeConfigChanges(context, config);
         stateStore.flush(context);
 
+        context.getConfiguration().set(AutoScalerOptions.A4S_ENABLED, true);
+        context.getConfiguration().set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        autoscaler.applyConfigOverrides(context);
+        assertThat(scalingRealizer.events).isEmpty();
+        context.getConfiguration().set(AutoScalerOptions.A4S_ENABLED, false);
+        context.getConfiguration().set(AutoScalerOptions.JUSTIN_ENABLED, false);
+
         autoscaler.applyConfigOverrides(context);
         var event = getEvent();
         assertThat(event.getConfigChanges().getOverrides())

@@ -30,6 +30,7 @@ import org.apache.flink.autoscaler.resources.NoopResourceCheck;
 import org.apache.flink.autoscaler.resources.ResourceCheck;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.autoscaler.tuning.MemoryTuning;
 import org.apache.flink.autoscaler.utils.CalendarUtils;
 import org.apache.flink.autoscaler.utils.ResourceCheckUtils;
@@ -228,15 +229,19 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             return false;
         }
 
+        // A4S changes vertex slot profiles through Justin. Deployment-wide memory tuning
+        // creates an upgrade alongside the slot overrides and can discard job state.
         var configOverrides =
-                MemoryTuning.tuneTaskManagerMemory(
-                        context,
-                        evaluatedMetrics,
-                        jobTopology,
-                        scalingSummaries,
-                        autoScalerEventHandler);
+                a4sEnabled
+                        ? new ConfigChanges()
+                        : MemoryTuning.tuneTaskManagerMemory(
+                                context,
+                                evaluatedMetrics,
+                                jobTopology,
+                                scalingSummaries,
+                                autoScalerEventHandler);
 
-        var memoryTuningEnabled = conf.get(AutoScalerOptions.MEMORY_TUNING_ENABLED);
+        var memoryTuningEnabled = !a4sEnabled && conf.get(AutoScalerOptions.MEMORY_TUNING_ENABLED);
         if (scalingWouldExceedMaxResources(
                 memoryTuningEnabled ? configOverrides.newConfigWithOverrides(conf) : conf,
                 jobTopology,

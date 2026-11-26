@@ -56,6 +56,22 @@ After lab access resumed, freshly built operators ran on `c167` with a common te
 
 The exact timed Q8 workload reproduced zero confirmed profiles with its default shared group in a local MiniCluster. The optional `--a4s-exclusive-slots true` gives the two sources and the join distinct slot-sharing groups. The timed workload then confirmed all three applied profiles with the same vertex IDs and input settings. A matched run must use the same slot-sharing mode in each arm. Check the response from Justin GET with `include-applied-profile=true` using [check-q8-applied-profiles.sh](../scripts/a4s/check-q8-applied-profiles.sh) before releasing input. The gate rejected the live missing-profile response and accepted the local exclusive-slot response.
 
+### Exclusive-slot Q8 comparison on c167
+
+One matched repetition completed with 600 seconds per arm and a configured input cap of 80,000 records/s. Each arm started in isolation with five physical allocations and three confirmed vertex profiles of one CPU core and 192 MiB managed memory per slot. All scoped cleanup receipts passed and the worker lock was released. The recorded measurements are attempt-bound join input counter deltas. Coverage excludes gaps and execution changes.
+
+| Mode | Run | Join input records/s | Valid seconds | Final 120 s join input records/s | Final join parallelism |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Original | `live-8cf40b49` | 40,970 | 449.6 | 78,030 | 8 |
+| Embedded | `live-35ffd3b2` | 41,636 | 524.7 | 33,273 | 8 |
+| Remote | `live-206595dd` | 34,773 | 524.5 | 24,146 | 6 |
+
+Remote scored 16.5% below embedded over the full window. The arms selected different parallelism from different measured inputs. Both recorded recommendations matched the standalone HTTP runner on identical local replay inputs. The embedded join saw a 31-point curve and demand of 4,343.375 records/s. The remote join saw an 18-point curve and demand of 3,848.157 records/s. Substituting the remote curve into the embedded snapshot selected six subtasks. Substituting just the remote demand retained eight. The recorded requests were 5,660 and 4,933 bytes, with 1,776-byte HTTP responses when replayed locally. This single repetition leaves the transport-only throughput regression target and end-to-end record latency unverified.
+
+The first complete target rosters were observed about 71, 69 and 69 seconds after the respective parallelism-changing reports. The corresponding captures already contained processed join inputs. The configured stateless upgrade and deployment memory tuning yielded redeployments, with zero checkpoint restores reported by each final job. Their throughput includes catch-up on replayed input. Physical parallelism was confirmed, and final per-vertex memory recommendations remain unverified. The standalone process grew from 57,916 to 72,640 KiB RSS and consumed 293 CPU ticks between recorded process samples. The results archive retains the raw samples, resource and runner receipts, snapshots, replay results, and Figure 10 inputs. The deployed runner logged health and evaluation durations together, so those logs leave the separate live evaluation latency unverified.
+
+The operator now keeps deployment-wide memory tuning out of the Justin A4S loop and leaves an unsuccessful in-place scale pending when the configured fallback would be stateless. The packaged operator passed 44 focused tests covering A4S execution, ignored memory tuning, blocked stateless fallback, and successful in-place scaling. A live checkpoint recovery validation with this package remains pending.
+
 ### Prepare the Q20 follow-up
 
 The [Q20 renderer](../scripts/a4s/prepare-q20-comparison.py) uses the existing [checkpoint experiment template](../experiments/1729-checkpoint-aware-rescaling/instruction.md). It creates three repetitions, rotating original, embedded, and remote through each position. It pins the workload image, replaces the template's `tier` selectors with the requested hostnames, and places the operator and remote runner on the selected JobManager host. Both Flink roles can use one idle worker when capacity permits. Each arm gets a separate namespace and checkpoint path. The renderer keeps the shared 600 MiB A4S limit, periodic checkpoints with a one-minute default, and last-state upgrades. It disables deployment-wide memory tuning so that additional pod memory edits do not force redeployment during a Justin scale, and disables the template's separate checkpoint-gated producer pause. Python 3.9 or later and PyYAML are required.

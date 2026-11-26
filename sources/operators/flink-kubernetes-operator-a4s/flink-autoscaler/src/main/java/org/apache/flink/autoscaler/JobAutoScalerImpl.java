@@ -207,7 +207,9 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
 
     @VisibleForTesting
     void applyConfigOverrides(Context ctx) throws Exception {
-        if (!ctx.getConfiguration().get(AutoScalerOptions.MEMORY_TUNING_ENABLED)) {
+        var conf = ctx.getConfiguration();
+        if (!conf.get(AutoScalerOptions.MEMORY_TUNING_ENABLED)
+                || (conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED))) {
             return;
         }
 
