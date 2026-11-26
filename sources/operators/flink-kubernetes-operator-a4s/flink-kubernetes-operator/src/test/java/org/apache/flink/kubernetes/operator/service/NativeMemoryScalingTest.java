@@ -152,7 +152,7 @@ class NativeMemoryScalingTest {
                     }
                 };
 
-        var requirements = new AtomicReference<>(observed(vertex, before, before, "before"));
+        var requirements = new AtomicReference<>(observed(vertex, before, before, "before", null));
         var headers = JustinResourceRequirementsHeaders.INSTANCE;
         when(client.sendRequest(
                         eq(headers),
@@ -186,10 +186,19 @@ class NativeMemoryScalingTest {
                                         new RestClientException(
                                                 "stale", HttpResponseStatus.CONFLICT));
                             }
-                            requirements.set(observed(vertex, after, before, "after-request"));
+                            requirements.set(
+                                    observed(vertex, after, before, "after-request", true));
                             return CompletableFuture.failedFuture(new IOException("reply lost"));
                         });
         var clock = Clock.systemUTC();
+        assertEquals(
+                A4sIntentResult.DISCARDED,
+                service.reconcileA4sIntent(context, intent, clock, true));
+        requirements.set(observed(vertex, before, before, "before", false));
+        assertEquals(
+                A4sIntentResult.DISCARDED,
+                service.reconcileA4sIntent(context, intent, clock, true));
+        requirements.set(observed(vertex, before, before, "before", true));
         assertEquals(
                 conflict ? A4sIntentResult.DISCARDED : A4sIntentResult.PENDING,
                 service.reconcileA4sIntent(context, intent, clock, true));
@@ -198,7 +207,7 @@ class NativeMemoryScalingTest {
             assertEquals(
                     A4sIntentResult.PENDING,
                     service.reconcileA4sIntent(context, intent, clock, true));
-            requirements.set(observed(vertex, after, after, "after-rescale"));
+            requirements.set(observed(vertex, after, after, "after-rescale", true));
             var running =
                     new JobDetailsInfo.JobVertexDetailsInfo(
                             vertex,
@@ -241,7 +250,11 @@ class NativeMemoryScalingTest {
     }
 
     private static JustinResourceRequirementsBody observed(
-            JobVertexID vertex, ResourceProfile requested, ResourceProfile applied, String token) {
+            JobVertexID vertex,
+            ResourceProfile requested,
+            ResourceProfile applied,
+            String token,
+            Boolean statefulRescaleAvailable) {
         return new JustinResourceRequirementsBody(
                 new JustinResourceRequirements(
                         Map.of(
@@ -250,7 +263,8 @@ class NativeMemoryScalingTest {
                                         new JustinVertexResourceRequirements.Parallelism(1, 2),
                                         requested,
                                         applied))),
-                token);
+                token,
+                statefulRescaleAvailable);
     }
 
     @Test

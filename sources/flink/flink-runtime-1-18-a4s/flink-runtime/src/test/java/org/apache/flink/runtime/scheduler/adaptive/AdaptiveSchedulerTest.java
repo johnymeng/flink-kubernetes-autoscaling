@@ -71,6 +71,7 @@ import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexResourceRequirements;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.StaleJustinExecutionException;
 import org.apache.flink.runtime.jobgraph.tasks.CheckpointCoordinatorConfiguration;
 import org.apache.flink.runtime.jobgraph.tasks.JobCheckpointingSettings;
 import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
@@ -1127,7 +1128,7 @@ public class AdaptiveSchedulerTest {
                                                     .isTrue();
                                         }
                                     }
-                                    return scheduler.requestJustinResourceRequirements();
+                                    return scheduler.requestJustinResourceRequirements(true);
                                 },
                                 singleThreadMainThreadExecutor)
                         .get();
@@ -1144,6 +1145,39 @@ public class AdaptiveSchedulerTest {
             assertThat(requirement.at("/appliedResourceProfile/managedMemory/bytes").asLong())
                     .isEqualTo(MemorySize.ofMebiBytes(640).getBytes());
         }
+
+        final String token = running.getExecutionToken().get();
+        assertThat(running.getStatefulRescaleAvailable()).contains(false);
+        final JustinResourceRequirements.Builder target = JustinResourceRequirements.newBuilder();
+        running.getJobVertices()
+                .forEach(
+                        id ->
+                                target.setParallelismForJobVertex(
+                                        id,
+                                        1,
+                                        1,
+                                        ResourceProfile.newBuilder()
+                                                .setManagedMemoryMB(512)
+                                                .build()));
+        // A caller-supplied recovery claim cannot replace a checkpoint in the live store.
+        final JustinResourceRequirements update =
+                new JustinResourceRequirements(
+                        target.build().getJobVertexParallelisms(), token, true);
+        CompletableFuture.runAsync(
+                        () -> {
+                            assertThatThrownBy(
+                                            () ->
+                                                    scheduler.updateJustinResourceRequirements(
+                                                            update))
+                                    .isInstanceOf(StaleJustinExecutionException.class)
+                                    .hasMessageContaining("No completed checkpoint");
+                            final JustinResourceRequirements unchanged =
+                                    scheduler.requestJustinResourceRequirements(true);
+                            assertThat(unchanged).isEqualTo(running);
+                            assertThat(unchanged.getExecutionToken()).contains(token);
+                        },
+                        singleThreadMainThreadExecutor)
+                .get();
     }
 
     @Test

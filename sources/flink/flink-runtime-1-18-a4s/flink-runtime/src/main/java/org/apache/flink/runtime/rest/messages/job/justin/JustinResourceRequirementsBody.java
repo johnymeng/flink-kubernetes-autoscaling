@@ -49,6 +49,11 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String executionToken;
 
+    @Nullable
+    @JsonProperty("statefulRescaleAvailable")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean statefulRescaleAvailable;
+
     @JsonAnySetter
     @JsonAnyGetter
     @JsonSerialize(keyUsing = JobVertexIDKeySerializer.class)
@@ -64,6 +69,8 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
         if (jobResourceRequirements != null) {
             this.jobVertexResourceRequirements = jobResourceRequirements.getJobVertexParallelisms();
             this.executionToken = jobResourceRequirements.getExecutionToken().orElse(null);
+            this.statefulRescaleAvailable =
+                    jobResourceRequirements.getStatefulRescaleAvailable().orElse(null);
         } else {
             this.jobVertexResourceRequirements = new HashMap<>();
         }
@@ -74,7 +81,9 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
         if (jobVertexResourceRequirements.isEmpty()) {
             return Optional.empty();
         }
-        return Optional.of(new JustinResourceRequirements(jobVertexResourceRequirements, executionToken));
+        return Optional.of(
+                new JustinResourceRequirements(
+                        jobVertexResourceRequirements, executionToken, statefulRescaleAvailable));
     }
 
     @Override
@@ -87,11 +96,13 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
         }
         final JustinResourceRequirementsBody that = (JustinResourceRequirementsBody) o;
         return Objects.equals(jobVertexResourceRequirements, that.jobVertexResourceRequirements)
-                && Objects.equals(executionToken, that.executionToken);
+                && Objects.equals(executionToken, that.executionToken)
+                && Objects.equals(statefulRescaleAvailable, that.statefulRescaleAvailable);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(jobVertexResourceRequirements, executionToken);
+        return Objects.hash(
+                jobVertexResourceRequirements, executionToken, statefulRescaleAvailable);
     }
 }

@@ -35,6 +35,7 @@ import org.apache.flink.core.failure.FailureEnricher.Context;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.JobException;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
+import org.apache.flink.runtime.checkpoint.CheckpointCoordinator;
 import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointFailureReason;
 import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
@@ -911,13 +912,17 @@ public class AdaptiveScheduler
                             requestedProfile,
                             appliedProfile));
         }
-        return new JustinResourceRequirements(
-                requirements, includeExecutionToken ? currentExecutionToken(runningGraph) : null);
+        final String token = includeExecutionToken ? currentExecutionToken(runningGraph) : null;
+        final Boolean statefulRescaleAvailable =
+                includeExecutionToken ? token != null && hasRecoveryCheckpoint(runningGraph) : null;
+        return new JustinResourceRequirements(requirements, token, statefulRescaleAvailable);
     }
 
     @Nullable
     private String currentExecutionToken(@Nullable ExecutionGraph graph) {
-        if (graph == null || graph.getState() != JobStatus.RUNNING) {
+        if (graph == null
+                || graph.getState() != JobStatus.RUNNING
+                || executionMode == SchedulerExecutionMode.REACTIVE) {
             return null;
         }
         final List<String> attempts = new ArrayList<>();
@@ -987,6 +992,12 @@ public class AdaptiveScheduler
         return appliedProfile;
     }
 
+    private static boolean hasRecoveryCheckpoint(@Nullable ExecutionGraph graph) {
+        final CheckpointCoordinator coordinator =
+                graph == null ? null : graph.getCheckpointCoordinator();
+        return coordinator != null && coordinator.getNumberOfRetainedSuccessfulCheckpoints() > 0;
+    }
+
     @Override
     public void updateJustinResourceRequirements(
             JustinResourceRequirements justinResourceRequirements) {
@@ -997,6 +1008,10 @@ public class AdaptiveScheduler
             // Compare and apply in the same scheduler main-thread call.
             if (!expectedToken.equals(currentExecutionToken(graph))) {
                 throw new StaleJustinExecutionException();
+            }
+            if (!hasRecoveryCheckpoint(graph)) {
+                throw new StaleJustinExecutionException(
+                        "No completed checkpoint is retained for the conditional Justin rescale.");
             }
         } else {
             this.justinRescale = true;

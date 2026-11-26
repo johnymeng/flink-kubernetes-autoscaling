@@ -79,13 +79,17 @@ public class JustinResourceRequirementsUpdateHandler
                                 if (failure == null) {
                                     return EmptyResponseBody.getInstance();
                                 }
-                                final Throwable cause = ExceptionUtils.stripCompletionException(failure);
-                                if (ExceptionUtils.findThrowable(cause, StaleJustinExecutionException.class)
-                                        .isPresent()) {
-                                    throw new CompletionException(new RestHandlerException(
-                                            "The execution or its resource requirements changed before the Justin update.",
-                                            HttpResponseStatus.CONFLICT,
-                                            cause));
+                                final Throwable cause =
+                                        ExceptionUtils.stripCompletionException(failure);
+                                final Optional<StaleJustinExecutionException> rejected =
+                                        ExceptionUtils.findThrowable(
+                                                cause, StaleJustinExecutionException.class);
+                                if (rejected.isPresent()) {
+                                    throw new CompletionException(
+                                            new RestHandlerException(
+                                                    rejected.get().getMessage(),
+                                                    HttpResponseStatus.CONFLICT,
+                                                    cause));
                                 }
                                 throw new CompletionException(cause);
                             });

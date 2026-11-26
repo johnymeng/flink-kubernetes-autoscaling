@@ -353,6 +353,7 @@ public class ScalingExecutorTest {
         live.put(source, new JustinVertexResourceRequirements(parallelism, original, original));
         live.put(stateful, new JustinVertexResourceRequirements(parallelism, original, original));
         var executionToken = new ArrayDeque<String>();
+        var recoveryAvailable = new ArrayDeque<Boolean>();
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
                     @Override
@@ -375,7 +376,8 @@ public class ScalingExecutorTest {
                         String nextToken = executionToken.poll();
                         return new JustinResourceRequirementsBody(
                                 new JustinResourceRequirements(live),
-                                nextToken == null ? "stable" : nextToken);
+                                nextToken == null ? "stable" : nextToken,
+                                recoveryAvailable.isEmpty() || recoveryAvailable.remove());
                     }
                 };
         var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
@@ -431,6 +433,20 @@ public class ScalingExecutorTest {
         metrics.setGlobalMetrics(dummyGlobalMetrics);
 
         if (conditional) {
+            for (var checks : List.of(List.of(false), List.of(true, false))) {
+                recoveryAvailable.addAll(checks);
+                assertFalse(
+                        scalingExecutor.scaleResource(
+                                context,
+                                metrics,
+                                history,
+                                scalingTracking,
+                                now,
+                                topology,
+                                new DelayedScaleDown()));
+                assertThat(stateStore.getA4sScalingIntent(context)).isEmpty();
+            }
+
             executionToken.addAll(List.of("before", "after"));
             assertFalse(
                     scalingExecutor.scaleResource(
@@ -1542,7 +1558,8 @@ public class ScalingExecutorTest {
                                 evaluation,
                                 Map.of(join, new ScalingSummary(1, 18, joinMetrics)),
                                 Map.of(bids, profile, auctions, profile, join, profile),
-                                conf);
+                                conf,
+                                true);
 
         assertThat(request.constraints.cpuBudgetCores)
                 .isEqualTo(publishBudget ? configuredQuota : null);

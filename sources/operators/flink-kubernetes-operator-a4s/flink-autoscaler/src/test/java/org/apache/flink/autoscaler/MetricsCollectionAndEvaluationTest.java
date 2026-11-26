@@ -262,8 +262,17 @@ public class MetricsCollectionAndEvaluationTest {
         var conf = context.getConfiguration();
         var adapter = new Flink118A4sAdapter();
         var evaluation = evaluator.evaluate(conf, collectMetrics(), restartTime);
-        var request = adapter.request(context.getJobID().toString(), "test-generation",
-                evaluation.getWindowEnd(), topology, evaluation, Map.of(), profiles, conf);
+        var request =
+                adapter.request(
+                        context.getJobID().toString(),
+                        "test-generation",
+                        evaluation.getWindowEnd(),
+                        topology,
+                        evaluation,
+                        Map.of(),
+                        profiles,
+                        conf,
+                        true);
         var decoded = Wire.decode(Wire.encode(request), EvaluationRequest.class);
 
         var expected = Map.of(source1.toHexString(), 0L, source2.toHexString(), Long.MAX_VALUE);
@@ -276,8 +285,17 @@ public class MetricsCollectionAndEvaluationTest {
         observations.put(source2, new A4SAggregatedMetricsResponseBody(null, null, -1L));
         metricsCollector.setClock(Clock.offset(clock, Duration.ofSeconds(3)));
         evaluation = evaluator.evaluate(conf, metricsCollector.updateMetrics(context, stateStore), restartTime);
-        request = adapter.request(context.getJobID().toString(), "test-generation",
-                evaluation.getWindowEnd(), topology, evaluation, Map.of(), profiles, conf);
+        request =
+                adapter.request(
+                        context.getJobID().toString(),
+                        "test-generation",
+                        evaluation.getWindowEnd(),
+                        topology,
+                        evaluation,
+                        Map.of(),
+                        profiles,
+                        conf,
+                        true);
         for (var operator : request.snapshot.operators) {
             assertNull(operator.telemetry.sourceBacklogRecords);
         }

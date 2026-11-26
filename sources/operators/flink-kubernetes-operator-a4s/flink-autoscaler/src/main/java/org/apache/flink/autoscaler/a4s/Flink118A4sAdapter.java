@@ -75,7 +75,8 @@ public final class Flink118A4sAdapter {
             EvaluatedMetrics evaluated,
             Map<JobVertexID, ScalingSummary> requested,
             Map<JobVertexID, ResourceProfile> profiles,
-            Configuration conf) {
+            Configuration conf,
+            boolean statefulRescaleAvailable) {
         var operators = new ArrayList<OperatorMetrics>();
         for (var id : topology.getVerticesInTopologicalOrder()) {
             var metrics = evaluated.getVertexMetrics().get(id);
@@ -165,9 +166,14 @@ public final class Flink118A4sAdapter {
         var capabilities =
                 new PlatformCapabilities(
                         Map.of(
-                                Action.PARALLELISM, Support.WITH_RESTART,
-                                Action.MANAGED_MEMORY_PER_TASK, Support.WITH_RESTART,
-                                Action.STATEFUL_RECOVERY, Support.WITH_RESTART));
+                                Action.PARALLELISM,
+                                Support.WITH_RESTART,
+                                Action.MANAGED_MEMORY_PER_TASK,
+                                Support.WITH_RESTART,
+                                Action.STATEFUL_RECOVERY,
+                                statefulRescaleAvailable
+                                        ? Support.WITH_RESTART
+                                        : Support.UNSUPPORTED));
         var snapshot =
                 new ClusterSnapshot(
                         jobId,

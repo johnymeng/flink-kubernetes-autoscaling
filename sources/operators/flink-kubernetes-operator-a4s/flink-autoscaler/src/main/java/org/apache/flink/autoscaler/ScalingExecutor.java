@@ -154,6 +154,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         boolean justinEnabled = conf.get(JUSTIN_ENABLED);
         boolean a4sEnabled = justinEnabled && conf.get(A4S_ENABLED);
         boolean conditionalJustin = a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
+        boolean statefulRescaleAvailable = !conditionalJustin;
         String executionToken = null;
         String generation = null;
         Map<JobVertexID, JustinVertexResourceRequirements> a4sRequirements = null;
@@ -167,6 +168,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
             generation = readRuntimeGeneration(context, evaluatedMetrics, jobTopology);
             if (conditionalJustin) {
                 var requirements = readConditionalRequirements(context);
+                statefulRescaleAvailable = requirements.hasStatefulRescaleSupport();
                 executionToken =
                         requirements
                                 .executionToken()
@@ -193,8 +195,17 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 return false;
             }
             try {
-                var request = a4s.request(context.getJobID().toString(), generation, now, jobTopology,
-                        evaluatedMetrics, scalingSummaries, profiles, conf);
+                var request =
+                        a4s.request(
+                                context.getJobID().toString(),
+                                generation,
+                                now,
+                                jobTopology,
+                                evaluatedMetrics,
+                                scalingSummaries,
+                                profiles,
+                                conf,
+                                statefulRescaleAvailable);
                 try {
                     plan = a4s.evaluate(conf, request);
                 } finally {
@@ -524,7 +535,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         Map<JobVertexID, JustinVertexResourceRequirements> current;
         if (executionToken != null) {
             var response = readConditionalRequirements(context);
-            if (!executionToken.equals(response.executionToken().orElse(null))) {
+            if (!executionToken.equals(response.executionToken().orElse(null))
+                    || !response.hasStatefulRescaleSupport()) {
                 return false;
             }
             current =

@@ -53,9 +53,10 @@ import static org.mockito.Mockito.when;
 class JustinResourceRequirementsHandlerTest {
 
     @ParameterizedTest
-    @CsvSource({"false,false", "true,false", "false,true", "true,true"})
+    @CsvSource({"false,false,false", "true,false,true", "false,true,false", "true,true,true"})
     void appliedProfileAndExecutionTokenAreIndependentOptIns(
-            boolean includeApplied, boolean includeToken) throws Exception {
+            boolean includeApplied, boolean includeToken, boolean statefulRescaleAvailable)
+            throws Exception {
         final JobID jobId = new JobID();
         final JobVertexID vertexId = new JobVertexID();
         final ResourceProfile requested =
@@ -70,7 +71,8 @@ class JustinResourceRequirementsHandlerTest {
                                         new JustinVertexResourceRequirements.Parallelism(1, 1),
                                         requested,
                                         applied)),
-                        "execution-token");
+                        "execution-token",
+                        statefulRescaleAvailable);
         final RestfulGateway gateway = mock(RestfulGateway.class);
         when(gateway.requestJustinResourceRequirements(jobId))
                 .thenReturn(CompletableFuture.completedFuture(requirements));
@@ -105,6 +107,11 @@ class JustinResourceRequirementsHandlerTest {
         final JsonNode root = mapper.readTree(json);
         final JsonNode vertex = root.path(vertexId.toString());
         assertThat(root.has("executionToken")).isEqualTo(includeToken);
+        assertThat(root.has("statefulRescaleAvailable")).isEqualTo(includeToken);
+        if (includeToken) {
+            assertThat(root.path("statefulRescaleAvailable").asBoolean())
+                    .isEqualTo(statefulRescaleAvailable);
+        }
         assertThat(mapper.readValue(json, JustinResourceRequirementsBody.class)
                 .asJobResourceRequirements().get().getExecutionToken())
                 .isEqualTo(includeToken ? Optional.of("execution-token") : Optional.empty());

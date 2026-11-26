@@ -18,11 +18,15 @@ package org.apache.flink.runtime.jobgraph.justin;
 
 import org.apache.flink.util.FlinkRuntimeException;
 
-/** A conditional Justin write no longer matches the executing job. */
+/** The executing job does not satisfy a precondition for a conditional Justin write. */
 public class StaleJustinExecutionException extends FlinkRuntimeException {
     private static final long serialVersionUID = 1L;
 
     public StaleJustinExecutionException() {
-        super("The execution or its resource requirements changed before the Justin update.");
+        this("The execution or its resource requirements changed before the Justin update.");
+    }
+
+    public StaleJustinExecutionException(String message) {
+        super(message);
     }
 }

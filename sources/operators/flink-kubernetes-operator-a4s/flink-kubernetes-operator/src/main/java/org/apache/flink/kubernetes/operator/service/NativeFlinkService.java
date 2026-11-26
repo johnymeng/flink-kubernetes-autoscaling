@@ -384,6 +384,12 @@ public class NativeFlinkService extends AbstractFlinkService {
                 LOG.info("Discarding conditional A4S target for job {}", jobId);
                 return A4sIntentResult.DISCARDED;
             }
+            if (token.isPresent() && !response.hasStatefulRescaleSupport()) {
+                LOG.info(
+                        "No retained recovery checkpoint for conditional A4S target for job {}",
+                        jobId);
+                return A4sIntentResult.DISCARDED;
+            }
             if (token.isPresent()) {
                 try {
                     updateJustinResources(client, jobId, target, intent.getExecutionToken());
@@ -394,7 +400,7 @@ public class NativeFlinkService extends AbstractFlinkService {
                             .filter(HttpResponseStatus.CONFLICT::equals)
                             .isPresent()) {
                         LOG.info(
-                                "Flink rejected the stale conditional A4S target for job {}",
+                                "Flink rejected the conditional A4S preconditions for job {}",
                                 jobId);
                         return A4sIntentResult.DISCARDED;
                     }

@@ -184,6 +184,7 @@ public class JustinResourceRequirements implements Serializable {
 
     private final Map<JobVertexID, JustinVertexResourceRequirements> vertexResources;
     @Nullable private final String executionToken;
+    @Nullable private final Boolean statefulRescaleAvailable;
 
     public JustinResourceRequirements(
             Map<JobVertexID, JustinVertexResourceRequirements> vertexResources) {
@@ -193,13 +194,25 @@ public class JustinResourceRequirements implements Serializable {
     public JustinResourceRequirements(
             Map<JobVertexID, JustinVertexResourceRequirements> vertexResources,
             @Nullable String executionToken) {
+        this(vertexResources, executionToken, null);
+    }
+
+    public JustinResourceRequirements(
+            Map<JobVertexID, JustinVertexResourceRequirements> vertexResources,
+            @Nullable String executionToken,
+            @Nullable Boolean statefulRescaleAvailable) {
         this.vertexResources =
                 Collections.unmodifiableMap(new HashMap<>(checkNotNull(vertexResources)));
         this.executionToken = executionToken;
+        this.statefulRescaleAvailable = statefulRescaleAvailable;
     }
 
     public Optional<String> getExecutionToken() {
         return Optional.ofNullable(executionToken);
+    }
+
+    public Optional<Boolean> getStatefulRescaleAvailable() {
+        return Optional.ofNullable(statefulRescaleAvailable);
     }
 
     public JustinVertexResourceRequirements.Parallelism getParallelism(JobVertexID jobVertexId) {

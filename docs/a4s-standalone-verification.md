@@ -36,6 +36,14 @@ A second local MiniCluster check used the normal Flink adapter and a separate A4
 
 Focused autoscaler tests cover a changed token during evaluation, an unsuccessful state-store flush, and promotion of confirmed overrides. Kubernetes tests cover HTTP 409, ambiguous replies, ConfigMap recovery, and updating deployment status only after confirmation. The Kubernetes reconciliation tests use local fixtures.
 
+### Checkpoint recovery capability
+
+The patched AdaptiveScheduler reports whether a completed checkpoint is retained alongside the opt-in Justin execution token. It checks the retained checkpoint again before a guarded write. The operator confirms the capability during evaluation and before submission. A missing field from an older runtime leaves recovery capability unavailable in guarded mode.
+
+A local MiniCluster ran the checkpoint fixture with the periodic interval set beyond the smoke's duration. Before the first checkpoint, the scheduler rejected a PUT with the correct token and a caller-supplied recovery claim with HTTP 409. The allocation and token stayed the same. The separate runner returned `UNSUPPORTED_ACTION` when the adapter supplied the unavailable capability. After one manually completed checkpoint, the runner returned `RESCALE`. The production operator confirmed the new allocation after a deliberately dropped reply and issued one PUT. Flink restored RocksDB state at parallelism 2 and produced all 200 expected IDs and keyed counts. Both recorded recommendations replayed exactly.
+
+Eight runtime and nine Kubernetes operator tests passed. The autoscaler batch passed 90 of 91 cases. The remaining `MetricsCollectionAndEvaluationTest.testEndToEnd` metric-set assertion also failed on the recorded original baseline.
+
 ## Local packaging check
 
 The 44-module Flink dependency reactor used by the operator image built with its existing Java source target. Replacing local `var` declarations in three runtime test classes fixed test compilation in that build. All 15 tests in those three classes passed. Both the pinned original and refactored operator Maven reactors produced shaded JARs against the same rebuilt Flink dependencies. The packaged runtime served backlog from two real source subtasks, and the packaged refactored executor, runtime and standalone runner passed the local Kafka checkpoint rescale and replay check using the pinned RocksDB JNI artifact. JVM class-load logs identified the JAR used for each of those components.

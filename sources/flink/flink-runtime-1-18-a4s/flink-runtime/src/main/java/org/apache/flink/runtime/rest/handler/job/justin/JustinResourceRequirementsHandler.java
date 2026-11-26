@@ -72,18 +72,22 @@ public class JustinResourceRequirementsHandler
                 includeExecutionToken
                         ? gateway.requestJustinResourceRequirements(jobId, true)
                         : gateway.requestJustinResourceRequirements(jobId);
-        return requested
-                .thenApply(
-                        requirements -> {
-                            final JustinResourceRequirements view =
-                                    includeApplied ? requirements : requestedOnly(requirements);
-                            return new JustinResourceRequirementsBody(
-                                    new JustinResourceRequirements(
-                                            view.getJobVertexParallelisms(),
-                                            includeExecutionToken
-                                                    ? requirements.getExecutionToken().orElse(null)
-                                                    : null));
-                        });
+        return requested.thenApply(
+                requirements -> {
+                    final JustinResourceRequirements view =
+                            includeApplied ? requirements : requestedOnly(requirements);
+                    return new JustinResourceRequirementsBody(
+                            new JustinResourceRequirements(
+                                    view.getJobVertexParallelisms(),
+                                    includeExecutionToken
+                                            ? requirements.getExecutionToken().orElse(null)
+                                            : null,
+                                    includeExecutionToken
+                                            ? requirements
+                                                    .getStatefulRescaleAvailable()
+                                                    .orElse(null)
+                                            : null));
+                });
     }
 
     private static JustinResourceRequirements requestedOnly(

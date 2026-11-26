@@ -32,6 +32,11 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
     @JsonInclude(JsonInclude.Include.NON_NULL)
     private String executionToken;
 
+    @Nullable
+    @JsonProperty("statefulRescaleAvailable")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private Boolean statefulRescaleAvailable;
+
     @JsonAnySetter
     @JsonAnyGetter
     @JsonSerialize(keyUsing = JobVertexIDKeySerializer.class)
@@ -50,7 +55,15 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
     public JustinResourceRequirementsBody(
             @Nullable JustinResourceRequirements justinVertexResourceRequirements,
             @Nullable String executionToken) {
+        this(justinVertexResourceRequirements, executionToken, null);
+    }
+
+    public JustinResourceRequirementsBody(
+            @Nullable JustinResourceRequirements justinVertexResourceRequirements,
+            @Nullable String executionToken,
+            @Nullable Boolean statefulRescaleAvailable) {
         this.executionToken = executionToken;
+        this.statefulRescaleAvailable = statefulRescaleAvailable;
         if (justinVertexResourceRequirements != null) {
             this.justinVertexResourceRequirements = justinVertexResourceRequirements.getJobVertexParallelisms();
         } else {
@@ -71,6 +84,11 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
         return Optional.ofNullable(executionToken);
     }
 
+    @JsonIgnore
+    public boolean hasStatefulRescaleSupport() {
+        return Boolean.TRUE.equals(statefulRescaleAvailable);
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -82,11 +100,13 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
         final JustinResourceRequirementsBody that = (JustinResourceRequirementsBody) o;
         return Objects.equals(
                         justinVertexResourceRequirements, that.justinVertexResourceRequirements)
-                && Objects.equals(executionToken, that.executionToken);
+                && Objects.equals(executionToken, that.executionToken)
+                && Objects.equals(statefulRescaleAvailable, that.statefulRescaleAvailable);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(justinVertexResourceRequirements, executionToken);
+        return Objects.hash(
+                justinVertexResourceRequirements, executionToken, statefulRescaleAvailable);
     }
 }
