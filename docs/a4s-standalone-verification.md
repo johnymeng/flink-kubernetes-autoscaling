@@ -187,6 +187,23 @@ java --class-path "$A4S_RUNNER_JAR" scripts/a4s/MeasureA4sClient.java \
   "$RUNNER_ORIGIN" "$RECORDED_EVALUATIONS" 3 > client-timing.csv
 ```
 
+### Live controller overhead
+
+Archived operator logs record actual encoded byte sizes and client timings from the two timestamped Q8 deployments and the paced Q20 deployment. The scorer joins each timing to its recorded job and snapshot ID and selects remote evaluations started during the measured windows. Every selected evaluation returned a recommendation and had one matching timing. The Q20 count includes one evaluation that completed 13 ms after the observation endpoint. The server-only count elsewhere uses response completion time.
+
+| Deployment | Remote calls | Actual request / response bytes | Encode p95 (ms) | HTTP p50 / p95 / p99 (ms) | Decode p95 (ms) | Total client p99 (ms) |
+| --- | ---: | --- | ---: | --- | ---: | ---: |
+| Q8 `live-b85805f4` | 23 | 50,214–91,215 / 967–978 | 1.74 | 11.42 / 19.38 / 23.39 | 0.85 | 26.73 |
+| Q8 `live-d2911435` | 25 | 9,522–55,246 / 967–978 | 2.06 | 10.20 / 24.39 / 25.62 | 0.84 | 27.23 |
+| Paced Q20 `live-4ee9a97c` | 26 | 38,653–104,664 / 1,776–1,779 | 2.13 | 11.96 / 25.56 / 27.06 | 0.83 | 28.64 |
+
+Each operator used a five-second reconciliation interval. Total client p99 across sampled remote evaluations stayed below 0.6% of that interval. The first logged remote call took 0.83–1.00 seconds in each deployment, outside the observation windows. The HTTP phase includes server handling and network transfer. These log timings cover remote evaluation and leave total reconciliation duration and streaming throughput effects to the separate workload measurements.
+
+```bash
+python3 scripts/a4s/score-live-a4s-client.py \
+  "$Q8_RUN_BUNDLE" "$Q8_REVERSED_RUN_BUNDLE" "$Q20_PACED_RUN_BUNDLE"
+```
+
 ### Histogram-backed evaluation
 
 For requests that carry a histogram, the core now builds the miss-rate curve once per operator and reuses it for candidate sizing and forecasting. The fixed-latency implementation shares that prepared curve. Models implementing the original forecast method continue to receive the original operator metrics and candidate allocation.
