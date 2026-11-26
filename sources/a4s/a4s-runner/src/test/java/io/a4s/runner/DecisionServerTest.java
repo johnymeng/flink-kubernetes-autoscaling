@@ -52,6 +52,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -279,6 +280,45 @@ class DecisionServerTest {
             assertEquals(400, post(endpoint, EXAMPLE_JSON + " {}"));
             assertEquals(413, post(endpoint, " ".repeat(Wire.MAX_BODY_BYTES + 1)));
         }
+    }
+
+    @Test
+    void rejectsForecastMetadataDifferencesFromTheLocalModel() throws Exception {
+        var request =
+                decode(EXAMPLE_JSON.replace(
+                        "\"cooldownMillis\": 0", "\"cooldownMillis\": 0, \"maxDowntimeMillis\": 20"));
+        var policy =
+                new A4sPolicy((snapshot, decisions) -> Optional.of(
+                        new MigrationEstimate(10L, 8L, null, null, null, null, null, 8L)));
+        try (var server = new DecisionServer(new InetSocketAddress("127.0.0.1", 0), policy)) {
+            server.start();
+            var plan = new DecisionClient().evaluate(endpoint(server), Duration.ofSeconds(2), request);
+            assertEquals(8L, plan.migration.downtimeMillis);
+            assertTrue(policy.isApplicable(request, plan, 10_002));
+            var body = new String(Wire.encode(plan), StandardCharsets.UTF_8);
+            for (String changed : List.of(
+                    body.replace("\"downtimeMillis\":8", "\"downtimeMillis\":30"),
+                    body.replace("\"stateBytes\":10", "\"stateBytes\":11"),
+                    body.replace("\"predictionUncertainty\":null", "\"predictionUncertainty\":0.5"))) {
+                assertNotEquals(body, changed);
+                var inconsistent = Wire.decode(changed.getBytes(StandardCharsets.UTF_8), ScalingPlan.class);
+                assertFalse(policy.isApplicable(request, inconsistent, 10_002));
+            }
+        }
+    }
+
+    @Test
+    void rejectsAnOverBudgetAllocationBeforeEstimatingMigration() throws Exception {
+        var estimates = new AtomicInteger();
+        var policy = new A4sPolicy((snapshot, decisions) -> {
+            estimates.incrementAndGet();
+            return Optional.empty();
+        });
+        var plan = policy.evaluate(decode(EXAMPLE_JSON));
+        assertEquals(ScalingPlan.Action.RESCALE, plan.action);
+        var constrained = decode(EXAMPLE_JSON.replace("\"cpuBudgetCores\": 6", "\"cpuBudgetCores\": 4"));
+        assertFalse(policy.isApplicable(constrained, plan, 10_002));
+        assertEquals(1, estimates.get());
     }
 
     @Test

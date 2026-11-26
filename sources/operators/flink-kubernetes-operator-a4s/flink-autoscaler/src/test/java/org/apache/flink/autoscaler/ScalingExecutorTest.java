@@ -513,7 +513,10 @@ public class ScalingExecutorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"embedded", "remote", "remote-observe-only", "stale", "unavailable", "timeout"})
+    @ValueSource(strings = {
+        "embedded", "remote", "remote-observe-only", "stale", "unavailable", "timeout",
+        "unverified-migration"
+    })
     void storesA4sRecommendationsOnlyWhenValidAndScalingIsEnabled(String mode) throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
@@ -615,6 +618,11 @@ public class ScalingExecutorTest {
                                                         "\"executionGeneration\":\"generation\"",
                                                         "\"executionGeneration\":\"previous-generation\"")
                                                 .getBytes(StandardCharsets.UTF_8);
+                            } else if (mode.equals("unverified-migration")) {
+                                body =
+                                        new String(body, StandardCharsets.UTF_8)
+                                                .replace("\"migration\":null", "\"migration\":{\"downtimeMillis\":1}")
+                                                .getBytes(StandardCharsets.UTF_8);
                             }
                             exchange.getResponseHeaders().set("Content-Type", "application/json");
                             exchange.sendResponseHeaders(200, body.length);
@@ -665,7 +673,8 @@ public class ScalingExecutorTest {
             }
         }
 
-        if (Set.of("remote-observe-only", "stale", "unavailable", "timeout").contains(mode)) {
+        if (Set.of("remote-observe-only", "stale", "unavailable", "timeout", "unverified-migration")
+                .contains(mode)) {
             assertFalse(scaled);
             assertThat(validated).isEmpty();
             assertThat(history).isEmpty();

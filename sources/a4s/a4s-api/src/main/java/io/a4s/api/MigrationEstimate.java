@@ -18,6 +18,7 @@
 package io.a4s.api;
 
 import java.beans.ConstructorProperties;
+import java.util.Objects;
 
 /** Optional migration costs; unknown costs are represented by absent fields. */
 public final class MigrationEstimate {
@@ -65,5 +66,34 @@ public final class MigrationEstimate {
         this.networkBytes = networkBytes;
         this.backlogRecords = backlogRecords;
         this.downtimeMillis = downtimeMillis;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+        if (!(other instanceof MigrationEstimate)) {
+            return false;
+        }
+        var estimate = (MigrationEstimate) other;
+        return Objects.equals(stateBytes, estimate.stateBytes)
+                && Objects.equals(restoreMillis, estimate.restoreMillis)
+                && Objects.equals(checkpointMillis, estimate.checkpointMillis)
+                && Objects.equals(initializationMillis, estimate.initializationMillis)
+                && Objects.equals(cacheWarmupMillis, estimate.cacheWarmupMillis)
+                && Objects.equals(networkBytes, estimate.networkBytes)
+                && Objects.equals(backlogRecords, estimate.backlogRecords)
+                && Objects.equals(downtimeMillis, estimate.downtimeMillis);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(
+                stateBytes,
+                restoreMillis,
+                checkpointMillis,
+                initializationMillis,
+                cacheWarmupMillis,
+                networkBytes,
+                backlogRecords,
+                downtimeMillis);
     }
 }

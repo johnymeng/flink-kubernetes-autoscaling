@@ -104,11 +104,7 @@ public final class A4sPolicy implements ScalingPolicy {
 
         for (int attempt = 1; attempt <= request.policy.maxAttempts; attempt++) {
             if (withinBudgets(request, selected)) {
-                var decisions = new LinkedHashMap<String, OperatorDecision>();
-                for (int i = 0; i < selected.size(); i++) {
-                    decisions.put(snapshot.operators.get(i).operatorId, selected.get(i));
-                }
-                return recommend(request, decisions, attempt);
+                return recommend(request, selected, attempt);
             }
             if (attempt == request.policy.maxAttempts || !advance(frontiers, selected)) {
                 return hold(
@@ -176,13 +172,17 @@ public final class A4sPolicy implements ScalingPolicy {
     }
 
     private ScalingPlan recommend(
-            EvaluationRequest request, Map<String, OperatorDecision> decisions, int attempts) {
+            EvaluationRequest request, List<OperatorDecision> selected, int attempts) {
         var capabilities = request.snapshot.capabilities;
+        var decisions = new LinkedHashMap<String, OperatorDecision>();
         boolean changes = false;
         boolean preserveState = false;
-        for (var operator : request.snapshot.operators) {
+        for (int i = 0; i < request.snapshot.operators.size(); i++) {
+            var operator = request.snapshot.operators.get(i);
+            var decision = selected.get(i);
+            decisions.put(operator.operatorId, decision);
             var current = operator.current;
-            var target = decisions.get(operator.operatorId).target;
+            var target = decision.target;
             boolean horizontal = current.parallelism != target.parallelism;
             boolean cache = !Objects.equals(current.cachePerTaskBytes, target.cachePerTaskBytes);
             boolean managed =
@@ -489,15 +489,20 @@ public final class A4sPolicy implements ScalingPolicy {
                             decision.modeledMinimumTotalCacheBytes)
                     || !Objects.equals(
                             expected.predictedRecordsPerSecond,
-                            decision.predictedRecordsPerSecond)) {
+                            decision.predictedRecordsPerSecond)
+                    || !Objects.equals(
+                            expected.predictionUncertainty, decision.predictionUncertainty)) {
                 return false;
             }
-            selected.add(decision);
+            selected.add(expected);
         }
-        var checked = recommend(request, plan.operators, plan.attempts);
-        return withinBudgets(request, selected)
-                && checked.action == Action.RESCALE
-                && plan.requiresStatePreservation == checked.requiresStatePreservation;
+        if (!withinBudgets(request, selected)) {
+            return false;
+        }
+        var checked = recommend(request, selected, plan.attempts);
+        return checked.action == Action.RESCALE
+                && plan.requiresStatePreservation == checked.requiresStatePreservation
+                && Objects.equals(plan.migration, checked.migration);
     }
 
     private static boolean sameAllocation(
