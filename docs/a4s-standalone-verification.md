@@ -18,6 +18,18 @@ The second fixture carries an unchanged 38-point nominal `scaledMrc` from the fi
 
 The [three-way decision check](a4s-standalone.md#compare-legacy-embedded-and-remote-decisions) compared 41 identical requests using the compiled original policy, embedded core and packaged runner over loopback. It used all six nonempty curve observations in `checkpoint-and-native.jsonl` from `live-b4273691`, five synthetic demand levels per curve, nine single-operator cases, and two chained-operator retry cases. All embedded and remote plans matched byte for byte, and all 41 recorded responses passed replay verification. The original and extracted policies agreed to the byte on 598 supported MPC points and agreed on the selected allocations or exhausted retry outcome in 26 requests. The original produced 226 additional MPC points from its plateau fallback. It selected a configuration based on that fallback in 15 requests. V1 found a higher supported parallelism in nine and held the current allocation in six. The archived curves use nominal bytes, so the check verifies legacy slot reservations and model support for the supplied targets. Physical placement and throughput require measurement on the deployment.
 
+### Compare MPCs on the recorded benchmark requests
+
+The original MPC implementation and standalone core evaluated the supplied MRCs and recorded demands from both timestamped Q8 deployments and paced Q20. The check preserved each request's CPU budget, snapshot and permitted parallelism list. Embedded and HTTP recommendations matched byte for byte for all 211 requests, and offline replay reproduced all 211 archived recommendations. The original MPC was compared at the permitted parallelisms, with memory compared in bytes using the same sub-byte tolerance as the shared legacy fixture.
+
+| Deployment | Requests | Matching supported MPC points | Legacy plateau points outside measured support |
+| --- | ---: | ---: | ---: |
+| Q8 `live-b85805f4` | 69 | 6 | 546 |
+| Q8 `live-d2911435` | 69 | 9 | 543 |
+| Paced Q20 `live-4ee9a97c` | 73 | 1,004 | 18 |
+
+These counts describe the curve calculation for the supplied targets. Full original-plan comparison uses the separate shared-constraints fixture above, since the deployed v1 requests include stricter CPU and key-group constraints. The original 41-request candidate report reproduced byte for byte.
+
 ### Revalidate forecast metadata before scaling
 
 Two local regressions reproduced acceptance of inconsistent forecast metadata and a call to the migration estimator for an over-budget candidate. The validator now builds the candidate from the local forecasts, checks budgets before estimating migration, and compares the reported prediction uncertainty and migration estimate with the local values.

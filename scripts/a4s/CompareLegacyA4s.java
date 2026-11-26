@@ -56,6 +56,13 @@ public final class CompareLegacyA4s {
     private static final DecisionClient CLIENT = new DecisionClient();
 
     public static void main(String[] args) throws Exception {
+        if (args.length < 3
+                || args.length > 4
+                || (args.length == 4 && !args[3].equals("--frontiers-only"))) {
+            throw new IllegalArgumentException(
+                    "Usage: CompareLegacyA4s <runner origin> <requests> <output dir> [--frontiers-only]");
+        }
+        boolean frontiersOnly = args.length == 4;
         var endpoint = URI.create(args[0]);
         var out = Path.of(args[2]);
         int cases = 0;
@@ -75,8 +82,21 @@ public final class CompareLegacyA4s {
                         Arrays.equals(Wire.encode(embedded), Wire.encode(remote)),
                         request,
                         "Embedded and remote recommendations differ");
-                var original = compareFrontiers(request, candidates);
-                comparePlan(request, original, embedded);
+                if (frontiersOnly) {
+                    require(
+                            request.policy.mode == PolicyConfiguration.Mode.LEGACY_SLOT_RESERVATION,
+                            request,
+                            "Use legacy slot reservation mode to compare MPCs");
+                    var fixed = new FixedLatencyModel(request.policy);
+                    for (var operator : request.snapshot.operators) {
+                        if (operator.cacheSensitive) {
+                            compareCurve(request, operator, fixed, candidates);
+                        }
+                    }
+                } else {
+                    var original = compareFrontiers(request, candidates);
+                    comparePlan(request, original, embedded);
+                }
                 recordings.write(
                         Wire.encodeRecording(
                                 new RecordedEvaluation(
@@ -135,52 +155,7 @@ public final class CompareLegacyA4s {
                     request,
                     "Use supplied MRCs and contiguous parallelism ranges for legacy comparisons");
             if (operator.cacheSensitive) {
-                var baseline =
-                        new MissRateCurve(
-                                operator.missRateCurve.stream()
-                                        .map(
-                                                point ->
-                                                        new MissRateCurve.Point(
-                                                                point.capacityBytes,
-                                                                point.missRate))
-                                        .collect(Collectors.toList()));
-                var nativeCurve =
-                        MemoryParallelismCurve.fromMissRateCurve(
-                                operator.targetRecordsPerSecond,
-                                request.policy.missSeconds,
-                                request.policy.hitSeconds,
-                                operator.minParallelism,
-                                operator.maxParallelism,
-                                baseline);
-                originalCurves.put(id, nativeCurve);
-                var extracted = new io.a4s.core.MemoryParallelismCurve(operator, fixed);
-                for (var point : nativeCurve.getPoints()) {
-                    int p = point.getParallelism();
-                    double oldBytes = point.getMemoryMB() * MIB;
-                    var newBytes = extracted.minimumCacheBytes(p);
-                    boolean measuredSupport = hasSupport(fixed, operator, p);
-                    require(
-                            newBytes.isPresent() == measuredSupport,
-                            request,
-                            "MPC disagrees with measured support");
-                    require(
-                            newBytes.isEmpty() || Math.abs(newBytes.getAsLong() - oldBytes) < 0.5,
-                            request,
-                            "Supported MPC point differs");
-                    evidence.write(
-                            request.snapshot.snapshotId
-                                    + "\t"
-                                    + operator.operatorId
-                                    + "\t"
-                                    + p
-                                    + "\t"
-                                    + (long) oldBytes
-                                    + "\t"
-                                    + (newBytes.isPresent() ? newBytes.getAsLong() : "")
-                                    + "\t"
-                                    + (measuredSupport ? "match" : "legacy plateau fallback")
-                                    + "\n");
-                }
+                originalCurves.put(id, compareCurve(request, operator, fixed, evidence));
             }
         }
         var config = new Configuration();
@@ -199,6 +174,52 @@ public final class CompareLegacyA4s {
                     }
                 });
         return result;
+    }
+
+    private static MemoryParallelismCurve compareCurve(
+            EvaluationRequest request,
+            OperatorMetrics operator,
+            FixedLatencyModel fixed,
+            Writer evidence) throws Exception {
+        require(
+                operator.histogram == null && !operator.missRateCurve.isEmpty(),
+                request,
+                "Legacy MPC comparison requires a supplied miss-rate curve");
+        var baseline = new MissRateCurve(
+                operator.missRateCurve.stream()
+                        .map(point -> new MissRateCurve.Point(point.capacityBytes, point.missRate))
+                        .collect(Collectors.toList()));
+        var nativeCurve = MemoryParallelismCurve.fromMissRateCurve(
+                operator.targetRecordsPerSecond,
+                request.policy.missSeconds,
+                request.policy.hitSeconds,
+                operator.minParallelism,
+                operator.maxParallelism,
+                baseline);
+        var extracted = new io.a4s.core.MemoryParallelismCurve(operator, fixed);
+        for (var point : nativeCurve.getPoints()) {
+            int p = point.getParallelism();
+            if (!operator.permittedParallelisms.isEmpty()
+                    && !operator.permittedParallelisms.contains(p)) {
+                continue;
+            }
+            double oldBytes = point.getMemoryMB() * MIB;
+            var newBytes = extracted.minimumCacheBytes(p);
+            boolean measuredSupport = hasSupport(fixed, operator, p);
+            require(
+                    newBytes.isPresent() == measuredSupport,
+                    request,
+                    "MPC disagrees with measured support");
+            require(
+                    newBytes.isEmpty() || Math.abs(newBytes.getAsLong() - oldBytes) < 0.5,
+                    request,
+                    "Supported MPC point differs");
+            evidence.write(
+                    request.snapshot.snapshotId + "\t" + operator.operatorId + "\t" + p + "\t"
+                            + (long) oldBytes + "\t" + (newBytes.isPresent() ? newBytes.getAsLong() : "")
+                            + "\t" + (measuredSupport ? "match" : "legacy plateau fallback") + "\n");
+        }
+        return nativeCurve;
     }
 
     private static void comparePlan(

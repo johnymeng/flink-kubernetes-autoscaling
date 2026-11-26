@@ -172,6 +172,8 @@ java -jar "$runner" replay --verify \
 
 The tool requires identical embedded and HTTP recommendations. It records the MPC comparison for each parallelism and checks the original and extracted allocations where the original selection has measured support for its target. The output labels the original plateau fallback separately.
 
+For archive requests with explicit CPU budgets or noncontiguous permitted parallelisms, append `--frontiers-only` to the `CompareLegacyA4s.java` invocation and pass the recorded JSONL file. This mode verifies embedded and HTTP recommendations on the unchanged requests and compares the original MPC at the permitted parallelisms. Use the shared-constraints invocation above to compare the selected original allocation.
+
 ## Native instrumentation and future adapters
 
 The C++11 [SHARDS estimator](../sources/libs/frocksdb/util/shards/) builds independently with CMake. FRocksDB still supplies its original seeded hash, scoped cache keys, charge and admission semantics. The RocksDB wrapper retains the JNI snapshot layout and cumulative counters. Flink's existing histogram aggregation and `scaledMrc` endpoint still publish aggregate observations. The network service receives no individual cache access.
