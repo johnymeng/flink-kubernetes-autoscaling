@@ -47,6 +47,40 @@ import static org.assertj.core.api.Assertions.fail;
 /** Tests for the {@link MetricDumpSerialization}. */
 class MetricDumpSerializerTest {
     @Test
+    void testLargeGaugeAndFailedPartialWrite() {
+        MetricDumpSerialization.MetricDumpSerializer serializer =
+                new MetricDumpSerialization.MetricDumpSerializer();
+        MetricDumpSerialization.MetricDumpDeserializer deserializer =
+                new MetricDumpSerialization.MetricDumpDeserializer();
+        Map<Gauge<?>, Tuple2<QueryScopeInfo, String>> gauges = new java.util.LinkedHashMap<>();
+        String histogram = String.join(",", Collections.nCopies(20000, "123456789"));
+        String shards = histogram + "é\u0000";
+        gauges.put(
+                () -> histogram,
+                new Tuple2<>(new QueryScopeInfo.JobManagerQueryScopeInfo("A"), "quickmrc"));
+        gauges.put(
+                () -> "bad",
+                new Tuple2<>(
+                        new QueryScopeInfo.JobManagerQueryScopeInfo("A"),
+                        String.join("", Collections.nCopies(65536, "x"))));
+        gauges.put(
+                () -> shards,
+                new Tuple2<>(new QueryScopeInfo.JobManagerQueryScopeInfo("A"), "shards"));
+
+        MetricDumpSerialization.MetricSerializationResult result =
+                serializer.serialize(
+                        Collections.emptyMap(),
+                        gauges,
+                        Collections.emptyMap(),
+                        Collections.emptyMap());
+        List<MetricDump> dumps = deserializer.deserialize(result);
+        assertThat(result.numGauges).isEqualTo(2);
+        assertThat(dumps).hasSize(2);
+        assertThat(((MetricDump.GaugeDump) dumps.get(0)).value).isEqualTo(histogram);
+        assertThat(((MetricDump.GaugeDump) dumps.get(1)).value).isEqualTo(shards);
+    }
+
+    @Test
     void testNullGaugeHandling() throws IOException {
         MetricDumpSerialization.MetricDumpSerializer serializer =
                 new MetricDumpSerialization.MetricDumpSerializer();
