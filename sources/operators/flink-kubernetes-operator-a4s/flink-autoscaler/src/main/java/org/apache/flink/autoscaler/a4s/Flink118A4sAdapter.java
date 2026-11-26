@@ -34,6 +34,7 @@ import io.a4s.core.A4sPolicy;
 import io.a4s.http.DecisionClient;
 import io.a4s.http.SnapshotRecorder;
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.net.URI;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -181,7 +182,7 @@ public final class Flink118A4sAdapter {
                         Long.MAX_VALUE,
                         null,
                         600 * BYTES_PER_MIB,
-                        null,
+                        exclusiveCpuBudget(conf, topology, operators),
                         0,
                         conf.get(AutoScalerOptions.A4S_SNAPSHOT_MAX_AGE).toMillis(),
                         null,
@@ -207,6 +208,31 @@ public final class Flink118A4sAdapter {
                 policy,
                 new PolicyState(1, null),
                 now.toEpochMilli());
+    }
+
+    private static Double exclusiveCpuBudget(
+            Configuration conf, JobTopology topology, List<OperatorMetrics> operators) {
+        var quota = conf.getOptional(AutoScalerOptions.CPU_QUOTA).orElse(null);
+        if (quota == null
+                || !Double.isFinite(quota)
+                || quota < 0
+                || topology.getSlotSharingGroupMapping().values().stream()
+                        .anyMatch(group -> group.size() > 1)
+                || !topology.getFinishedVertices().isEmpty()) {
+            return null;
+        }
+        // Justin reports applied profiles only for exclusive running slots and creates
+        // a group per vertex on update. The executor still checks whole TaskManagers.
+        var currentCores =
+                operators.stream()
+                        .map(
+                                operator ->
+                                        BigDecimal.valueOf(operator.current.cpuCoresPerTask)
+                                                .multiply(
+                                                        BigDecimal.valueOf(
+                                                                operator.current.parallelism)))
+                        .reduce(BigDecimal.ZERO, BigDecimal::add);
+        return currentCores.compareTo(BigDecimal.valueOf(quota)) <= 0 ? quota : null;
     }
 
     private static List<Integer> permittedParallelisms(

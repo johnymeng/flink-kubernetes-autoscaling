@@ -20,6 +20,7 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -58,6 +59,7 @@ import org.apache.flink.runtime.rest.messages.job.metrics.IOMetricsInfo;
 
 import com.sun.net.httpserver.HttpServer;
 import io.a4s.api.EvaluationRequest;
+import io.a4s.api.ScalingPlan;
 import io.a4s.core.A4sPolicy;
 import io.a4s.http.Wire;
 import org.junit.jupiter.api.BeforeEach;
@@ -1443,6 +1445,61 @@ public class ScalingExecutorTest {
                                 "7",
                                 "a6b7102b8d3e3a9564998c1ffeb5e2b7",
                                 "8"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "exclusive, 16.0, true",
+        "unreported, 16.0, true",
+        "shared, 16.0, false",
+        "exclusive, 9.0, false",
+        "exclusive, Infinity, false"
+    })
+    void a4sPublishesAnAttestedExclusiveSlotCpuBudget(
+            String groupReporting, double configuredQuota, boolean publishBudget) {
+        conf.set(AutoScalerOptions.CPU_QUOTA, configuredQuota);
+        var bids = new JobVertexID();
+        var auctions = new JobVertexID();
+        var join = new JobVertexID();
+        var bidSlots = groupReporting.equals("unreported") ? null : new SlotSharingGroupId();
+        var auctionSlots = groupReporting.equals("exclusive") ? new SlotSharingGroupId() : bidSlots;
+        var joinSlots = bidSlots == null ? null : new SlotSharingGroupId();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(bids, bidSlots, Map.of(), 6, 24, false, null),
+                        new VertexInfo(auctions, auctionSlots, Map.of(), 3, 24, false, null),
+                        new VertexInfo(
+                                join, joinSlots, Map.of(bids, HASH, auctions, HASH),
+                                1, 24, false, null));
+        var joinMetrics = evaluated(1, 70, 100);
+        var evaluation =
+                new EvaluatedMetrics(
+                        Map.of(bids, evaluated(6, 70, 100),
+                                auctions, evaluated(3, 70, 100), join, joinMetrics),
+                        dummyGlobalMetrics,
+                        Map.of());
+        var now = Instant.now();
+        evaluation.setWindowStart(now.minusSeconds(10));
+        evaluation.setWindowEnd(now);
+        var profile = ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(192).build();
+        var request =
+                new Flink118A4sAdapter()
+                        .request(
+                                context.getJobID().toString(),
+                                "generation",
+                                now,
+                                topology,
+                                evaluation,
+                                Map.of(join, new ScalingSummary(1, 18, joinMetrics)),
+                                Map.of(bids, profile, auctions, profile, join, profile),
+                                conf);
+
+        assertThat(request.constraints.cpuBudgetCores)
+                .isEqualTo(publishBudget ? configuredQuota : null);
+        assertThat(new A4sPolicy().evaluate(request).action)
+                .isEqualTo(publishBudget
+                        ? ScalingPlan.Action.INFEASIBLE_CONFIGURATION
+                        : ScalingPlan.Action.RESCALE);
     }
 
     @ParameterizedTest
