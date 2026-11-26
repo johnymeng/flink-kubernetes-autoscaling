@@ -58,6 +58,8 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
 
     private final Map<KEY, ScalingTracking> scalingTrackingStore;
 
+    private final Map<KEY, A4sScalingIntent> a4sIntents = new ConcurrentHashMap<>();
+
     private final Map<KEY, DelayedScaleDown> delayedScaleDownStore;
 
     public InMemoryAutoScalerStateStore() {
@@ -184,7 +186,23 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
     }
 
     @Override
+    public Optional<A4sScalingIntent> getA4sScalingIntent(Context jobContext) {
+        return Optional.ofNullable(a4sIntents.get(jobContext.getJobKey()));
+    }
+
+    @Override
+    public void storeA4sScalingIntent(Context jobContext, A4sScalingIntent intent) {
+        a4sIntents.put(jobContext.getJobKey(), intent);
+    }
+
+    @Override
+    public void removeA4sScalingIntent(Context jobContext) {
+        a4sIntents.remove(jobContext.getJobKey());
+    }
+
+    @Override
     public void clearAll(Context jobContext) {
+        removeA4sScalingIntent(jobContext);
         scalingHistoryStore.remove(jobContext.getJobKey());
         parallelismOverridesStore.remove(jobContext.getJobKey());
         collectedMetricsStore.remove(jobContext.getJobKey());
@@ -200,6 +218,7 @@ public class InMemoryAutoScalerStateStore<KEY, Context extends JobAutoScalerCont
 
     @Override
     public void removeInfoFromCache(KEY jobKey) {
+        a4sIntents.remove(jobKey);
         scalingHistoryStore.remove(jobKey);
         collectedMetricsStore.remove(jobKey);
         parallelismOverridesStore.remove(jobKey);

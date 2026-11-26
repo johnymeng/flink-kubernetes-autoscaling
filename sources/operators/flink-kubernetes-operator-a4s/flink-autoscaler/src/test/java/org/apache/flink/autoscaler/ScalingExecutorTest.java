@@ -76,6 +76,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -316,8 +317,10 @@ public class ScalingExecutorTest {
         assertThat(stateStore.getScalingTracking(context).getLatestScalingRecordEntry()).isEmpty();
     }
 
-    @Test
-    void testA4SMemoryOnlyScaling() throws Exception {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void testA4SMemoryOnlyScaling(boolean conditional) throws Exception {
+        conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, conditional);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
@@ -349,11 +352,14 @@ public class ScalingExecutorTest {
         var live = new HashMap<JobVertexID, JustinVertexResourceRequirements>();
         live.put(source, new JustinVertexResourceRequirements(parallelism, original, original));
         live.put(stateful, new JustinVertexResourceRequirements(parallelism, original, original));
+        var executionToken = new ArrayDeque<String>();
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
                     @Override
-                    String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
-                            EvaluatedMetrics evaluated, JobTopology topology) {
+                    String readRuntimeGeneration(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
                         return "generation";
                     }
 
@@ -361,6 +367,15 @@ public class ScalingExecutorTest {
                     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
                             JobAutoScalerContext<JobID> ctx) {
                         return live;
+                    }
+
+                    @Override
+                    JustinResourceRequirementsBody readConditionalRequirements(
+                            JobAutoScalerContext<JobID> ctx) {
+                        String nextToken = executionToken.poll();
+                        return new JustinResourceRequirementsBody(
+                                new JustinResourceRequirements(live),
+                                nextToken == null ? "stable" : nextToken);
                     }
                 };
         var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
@@ -415,6 +430,22 @@ public class ScalingExecutorTest {
                         new DelayedScaleDown()));
         metrics.setGlobalMetrics(dummyGlobalMetrics);
 
+        if (conditional) {
+            executionToken.addAll(List.of("before", "after"));
+            assertFalse(
+                    scalingExecutor.scaleResource(
+                            context,
+                            metrics,
+                            history,
+                            scalingTracking,
+                            now,
+                            topology,
+                            new DelayedScaleDown()));
+            assertThat(stateStore.getA4sScalingIntent(context)).isEmpty();
+            assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+        }
+
         assertTrue(
                 scalingExecutor.scaleResource(
                         context,
@@ -425,15 +456,27 @@ public class ScalingExecutorTest {
                         topology,
                         new DelayedScaleDown()));
         var expected = ResourceProfile.newBuilder(original).setManagedMemoryMB(34).build();
-        assertThat(stateStore.getResourceProfileOverrides(context))
-                .containsExactlyInAnyOrderEntriesOf(
-                        Map.of(
-                                source.toString(),
-                                original.toString(),
-                                stateful.toString(),
-                                expected.toString()));
-        assertThat(getScaledParallelism(stateStore, context))
-                .containsExactlyInAnyOrderEntriesOf(Map.of(source, 1, stateful, 1));
+        var expectedProfiles =
+                Map.of(
+                        source.toString(),
+                        original.toString(),
+                        stateful.toString(),
+                        expected.toString());
+        if (conditional) {
+            var intent = stateStore.getA4sScalingIntent(context).orElseThrow();
+            assertThat(intent.getExecutionToken()).isEqualTo("stable");
+            assertThat(intent.getParallelism())
+                    .isEqualTo(Map.of(source.toString(), "1", stateful.toString(), "1"));
+            assertThat(intent.getLowerBounds())
+                    .isEqualTo(Map.of(source.toString(), 1, stateful.toString(), 1));
+            assertThat(intent.getResourceProfiles()).isEqualTo(expectedProfiles);
+            assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+        } else {
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEqualTo(expectedProfiles);
+            assertThat(getScaledParallelism(stateStore, context))
+                    .containsExactlyInAnyOrderEntriesOf(Map.of(source, 1, stateful, 1));
+        }
         assertThat(history).isEmpty();
 
         live.put(stateful, new JustinVertexResourceRequirements(parallelism, expected, expected));

@@ -17,11 +17,12 @@
 
 package org.apache.flink.autoscaler.realizer;
 
-import org.apache.commons.lang3.NotImplementedException;
 import org.apache.flink.annotation.Experimental;
 import org.apache.flink.autoscaler.JobAutoScalerContext;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
 
+import java.time.Clock;
 import java.util.Map;
 
 /**
@@ -49,6 +50,23 @@ public interface ScalingRealizer<KEY, Context extends JobAutoScalerContext<KEY>>
      */
     void realizeParallelismOverrides(Context context, Map<String, String> parallelismOverrides, Map<String, String> justinOverrides)
             throws Exception;
+
+    /** Reuse confirmed overrides when they are already recorded in deployment status. */
+    default void restoreA4sOverrides(
+            Context context, Map<String, String> parallelism, Map<String, String> profiles) {}
+
+    default A4sIntentResult reconcileA4sIntent(
+            Context context, A4sScalingIntent intent, Clock clock, boolean allowSubmission)
+            throws Exception {
+        throw new UnsupportedOperationException("This realizer does not support A4S intents");
+    }
+
+    /** Result of reconciling a previously persisted conditional target. */
+    enum A4sIntentResult {
+        PENDING,
+        APPLIED,
+        DISCARDED
+    }
 
     /**
      * Updates the TaskManager memory configuration.

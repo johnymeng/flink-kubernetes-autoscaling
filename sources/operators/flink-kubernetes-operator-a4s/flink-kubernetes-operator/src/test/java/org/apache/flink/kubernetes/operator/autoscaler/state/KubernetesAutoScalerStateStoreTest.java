@@ -21,6 +21,7 @@ import org.apache.flink.autoscaler.ScalingSummary;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AbstractAutoScalerStateStoreTest;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.kubernetes.operator.autoscaler.KubernetesJobAutoScalerContext;
@@ -78,6 +79,26 @@ public class KubernetesAutoScalerStateStoreTest
     @Override
     protected void preSetup() {
         configMapStore = new ConfigMapStore(kubernetesClient);
+    }
+
+    @Test
+    void pendingA4sTargetSurvivesStateStoreRecreation() throws Exception {
+        var vertex = new JobVertexID().toHexString();
+        var intent =
+                new A4sScalingIntent(
+                        ctx.getJobID().toString(), "execution-token", 1234,
+                        Map.of(vertex, "2"), Map.of(vertex, "profile"), Map.of(vertex, 1));
+        stateStore.storeA4sScalingIntent(ctx, intent);
+        stateStore.flush(ctx);
+
+        var recovered = createPhysicalAutoScalerStateStore();
+        assertThat(recovered.getA4sScalingIntent(ctx)).contains(intent);
+        assertThat(recovered.getParallelismOverrides(ctx)).isEmpty();
+        assertThat(recovered.getResourceProfileOverrides(ctx)).isEmpty();
+
+        recovered.removeA4sScalingIntent(ctx);
+        recovered.flush(ctx);
+        assertThat(createPhysicalAutoScalerStateStore().getA4sScalingIntent(ctx)).isEmpty();
     }
 
     @Test

@@ -30,6 +30,7 @@ import javax.annotation.Nonnull;
 
 import java.time.Instant;
 import java.util.Map;
+import java.util.Optional;
 import java.util.SortedMap;
 
 /**
@@ -78,6 +79,17 @@ public interface AutoScalerStateStore<KEY, Context extends JobAutoScalerContext<
     Map<String, String> getResourceProfileOverrides(Context jobContext) throws Exception;
 
     void removeResourceProfileOverrides(Context jobContext) throws Exception;
+
+    default Optional<A4sScalingIntent> getA4sScalingIntent(Context jobContext) throws Exception {
+        return Optional.empty();
+    }
+
+    default void storeA4sScalingIntent(Context jobContext, A4sScalingIntent intent)
+            throws Exception {
+        throw new UnsupportedOperationException("This state store does not support A4S intents");
+    }
+
+    default void removeA4sScalingIntent(Context jobContext) throws Exception {}
 
     void storeConfigChanges(Context jobContext, ConfigChanges configChanges) throws Exception;
 

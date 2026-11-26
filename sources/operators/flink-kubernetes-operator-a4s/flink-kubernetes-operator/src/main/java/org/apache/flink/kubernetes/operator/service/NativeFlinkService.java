@@ -22,6 +22,8 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.autoscaler.ScalingExecutor;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
+import org.apache.flink.autoscaler.realizer.ScalingRealizer.A4sIntentResult;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.utils.justin.*;
 import org.apache.flink.client.cli.ApplicationDeployer;
 import org.apache.flink.client.deployment.ClusterClientFactory;
@@ -47,6 +49,7 @@ import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
 import org.apache.flink.kubernetes.operator.utils.EventRecorder;
 import org.apache.flink.kubernetes.utils.KubernetesUtils;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
+import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.JobVertexResourceRequirements;
@@ -55,6 +58,9 @@ import org.apache.flink.runtime.rest.messages.JobMessageParameters;
 import org.apache.flink.runtime.rest.messages.job.JobResourceRequirementsBody;
 import org.apache.flink.runtime.rest.messages.job.JobResourceRequirementsHeaders;
 import org.apache.flink.runtime.rest.messages.job.JobResourcesRequirementsUpdateHeaders;
+import org.apache.flink.runtime.rest.util.RestClientException;
+
+import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseStatus;
 
 import io.fabric8.kubernetes.api.model.DeletionPropagation;
 import io.fabric8.kubernetes.api.model.PodList;
@@ -68,14 +74,18 @@ import org.apache.commons.lang3.ObjectUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.apache.flink.kubernetes.operator.config.FlinkConfigBuilder.FLINK_VERSION;
+import static org.apache.flink.util.ExceptionUtils.findThrowable;
 
 /**
  * Implementation of {@link FlinkService} submitting and interacting with Native Kubernetes Flink
@@ -277,7 +287,11 @@ public class NativeFlinkService extends AbstractFlinkService {
             if (requirements.equals(newRequirements)) {
                 LOG.info("Vertex resources requirements already match target, nothing to do...");
             } else {
-                updateJustinResources(client, resource, newRequirements, observeConfig);
+                updateJustinResources(
+                        client,
+                        JobID.fromHexString(resource.getStatus().getJobStatus().getJobId()),
+                        new JustinResourceRequirements(newRequirements),
+                        null);
                 ScalingExecutor.scalingTriggered(JobID.fromHexString(resource.getStatus().getJobStatus().getJobId()));
                 eventRecorder.triggerEvent(
                         resource,
@@ -292,6 +306,117 @@ public class NativeFlinkService extends AbstractFlinkService {
             LOG.error("Error while rescaling, falling back to regular upgrade", t);
             return false;
         }
+    }
+
+    public A4sIntentResult reconcileA4sIntent(
+            FlinkResourceContext<?> ctx,
+            A4sScalingIntent intent,
+            Clock clock,
+            boolean allowSubmission)
+            throws Exception {
+        var resource = ctx.getResource();
+        var observed = ctx.getObserveConfig();
+        if (!intent.getJobId().equals(resource.getStatus().getJobStatus().getJobId())
+                || !supportsInPlaceScaling(resource, observed)) {
+            return A4sIntentResult.DISCARDED;
+        }
+        var jobId = JobID.fromHexString(intent.getJobId());
+        var builder = JustinResourceRequirements.newBuilder();
+        intent.getParallelism()
+                .forEach(
+                        (id, parallelism) ->
+                                builder.setParallelismForJobVertex(
+                                        JobVertexID.fromHexString(id),
+                                                intent.getLowerBounds().get(id),
+                                        Integer.parseInt(parallelism),
+                                                parseResourceProfile(
+                                                        intent.getResourceProfiles().get(id))));
+        var target = builder.build();
+        var timeout = operatorConfig.getFlinkClientTimeout();
+        var headers = JustinResourceRequirementsHeaders.INSTANCE;
+        try (var client = getClusterClient(observed)) {
+            var response = headers.readAppliedRequirements(client, jobId, timeout, true);
+            var live = response.asJustinResourceRequirements().orElseThrow();
+            var token = response.executionToken();
+            if (target.equals(live)) {
+                if (token.isEmpty() || !hasAppliedProfiles(live, target)) {
+                    return A4sIntentResult.PENDING;
+                }
+                var details =
+                        client.getJobDetails(jobId).get(timeout.toMillis(), TimeUnit.MILLISECONDS);
+                if (details.getJobStatus() != JobStatus.RUNNING
+                        || !jobId.equals(details.getJobId())
+                        || details.getJobVertexInfos().size() != target.getJobVertices().size()
+                        || !details.getJobVertexInfos().stream()
+                                .allMatch(
+                                        vertex -> {
+                                            var id = vertex.getJobVertexID();
+                                            int parallelism = vertex.getParallelism();
+                                            return target.getJobVertices().contains(id)
+                                                    && target.getParallelism(id).getUpperBound()
+                                                            == parallelism
+                                                    && vertex.getTasksPerState()
+                                                                    .getOrDefault(
+                                                                            ExecutionState.RUNNING,
+                                                                            0)
+                                                            == parallelism;
+                                        })) {
+                    return A4sIntentResult.PENDING;
+                }
+                // Bind the requirements and task observations to the same running execution.
+                var confirmed = headers.readAppliedRequirements(client, jobId, timeout, true);
+                return token.equals(confirmed.executionToken())
+                                && confirmed
+                                        .asJustinResourceRequirements()
+                                        .filter(
+                                                requirements ->
+                                                        target.equals(requirements)
+                                                                && hasAppliedProfiles(
+                                                                        requirements, target))
+                                        .isPresent()
+                        ? A4sIntentResult.APPLIED
+                        : A4sIntentResult.PENDING;
+            }
+            if (!allowSubmission
+                    || clock.millis() > intent.getExpiresAtMillis()
+                    || !target.getJobVertices().equals(live.getJobVertices())
+                    || (token.isPresent() && !intent.getExecutionToken().equals(token.get()))) {
+                LOG.info("Discarding conditional A4S target for job {}", jobId);
+                return A4sIntentResult.DISCARDED;
+            }
+            if (token.isPresent()) {
+                try {
+                    updateJustinResources(client, jobId, target, intent.getExecutionToken());
+                    LOG.info("Conditional A4S target accepted for job {}", jobId);
+                } catch (ExecutionException | TimeoutException e) {
+                    if (findThrowable(e, RestClientException.class)
+                            .map(RestClientException::getHttpResponseStatus)
+                            .filter(HttpResponseStatus.CONFLICT::equals)
+                            .isPresent()) {
+                        LOG.info(
+                                "Flink rejected the stale conditional A4S target for job {}",
+                                jobId);
+                        return A4sIntentResult.DISCARDED;
+                    }
+                    // Observe live requirements before retrying an ambiguous response.
+                    LOG.info("Conditional A4S update outcome uncertain for job {}", jobId);
+                    LOG.debug("Conditional Justin response failure", e);
+                }
+            }
+            return A4sIntentResult.PENDING;
+        }
+    }
+
+    private static boolean hasAppliedProfiles(
+            JustinResourceRequirements live, JustinResourceRequirements target) {
+        return target.getJobVertices().stream()
+                .allMatch(
+                        id ->
+                                target.getResourceProfile(id)
+                                        .equals(
+                                                live.getJobVertexParallelisms()
+                                                        .get(id)
+                                                        .getAppliedResourceProfile()));
     }
 
     @VisibleForTesting
@@ -393,22 +518,17 @@ public class NativeFlinkService extends AbstractFlinkService {
         return currentRequirements.asJobResourceRequirements().get().getJobVertexParallelisms();
     }
 
-
     private void updateJustinResources(
             RestClusterClient<String> client,
-            AbstractFlinkResource<?, ?> resource,
-            Map<JobVertexID, JustinVertexResourceRequirements> newReqs,
-            Configuration conf)
+            JobID jobId,
+            JustinResourceRequirements requirements,
+            String executionToken)
             throws Exception {
         var jobParameters = new JobMessageParameters();
-        jobParameters.jobPathParameter.resolve(
-                JobID.fromHexString(resource.getStatus().getJobStatus().getJobId()));
-
-        var requestBody = new JustinResourceRequirementsBody(new JustinResourceRequirements(newReqs));
-
-        client.sendRequest(new JustinResourceRequirementsUpdateHeaders(), jobParameters, requestBody)
-                .get(operatorConfig.getFlinkClientTimeout().toSeconds(), TimeUnit.SECONDS);
-
+        jobParameters.jobPathParameter.resolve(jobId);
+        var request = new JustinResourceRequirementsBody(requirements, executionToken);
+        client.sendRequest(new JustinResourceRequirementsUpdateHeaders(), jobParameters, request)
+                .get(operatorConfig.getFlinkClientTimeout().toMillis(), TimeUnit.MILLISECONDS);
     }
 
     public static ResourceProfile parseResourceProfile(String override) {

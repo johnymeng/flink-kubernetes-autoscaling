@@ -17,19 +17,35 @@
 
 package org.apache.flink.kubernetes.operator.autoscaler;
 
+import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.realizer.ScalingRealizer.A4sIntentResult;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
-import org.apache.flink.configuration.GlobalConfiguration;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
+import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.diff.DiffType;
+import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
+import org.apache.flink.kubernetes.operator.controller.FlinkResourceContext;
+import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.reconciler.diff.ReflectiveDiffBuilder;
+import org.apache.flink.kubernetes.operator.service.NativeFlinkService;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 /** Tests for KubernetesScalingRealizer. */
 public class KubernetesScalingRealizerTest {
@@ -85,6 +101,86 @@ public class KubernetesScalingRealizerTest {
                                 .getResource()
                                 .getMemory())
                 .isEqualTo(String.valueOf(memoryOverride.getBytes()));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void changesDeploymentStatusOnlyAfterTheRuntimeConfirmsTheTarget() throws Exception {
+        var deployment = TestUtils.buildApplicationCluster();
+        var jobId = new JobID();
+        var vertex = new JobVertexID().toString();
+        var clock = Clock.systemUTC();
+        var realizer = new KubernetesScalingRealizer();
+        var initialConfig = Configuration.fromMap(deployment.getSpec().getFlinkConfiguration());
+        ReconciliationUtils.updateStatusForDeployedSpec(deployment, initialConfig, clock);
+        var reconciliation = deployment.getStatus().getReconciliationStatus();
+        reconciliation.markReconciledSpecAsStable();
+
+        var service = mock(NativeFlinkService.class);
+        var context = mock(FlinkResourceContext.class);
+        when(context.getResource()).thenReturn(deployment);
+        when(context.getDeploymentMode()).thenReturn(KubernetesDeploymentMode.NATIVE);
+        when(context.getFlinkService()).thenReturn(service);
+        when(context.getObserveConfig()).thenReturn(initialConfig);
+        when(context.getDeployConfig(deployment.getSpec()))
+                .thenAnswer(
+                        ignored ->
+                                Configuration.fromMap(
+                                        deployment.getSpec().getFlinkConfiguration()));
+        var autoscalerContext =
+                new KubernetesJobAutoScalerContext(
+                        jobId,
+                        JobStatus.RUNNING,
+                        initialConfig,
+                        new UnregisteredMetricsGroup(),
+                        null,
+                        context);
+        var intent =
+                new A4sScalingIntent(
+                        jobId.toString(),
+                        "token",
+                        Long.MAX_VALUE,
+                        Map.of(vertex, "2"),
+                        Map.of(vertex, "profile"),
+                        Map.of(vertex, 1));
+
+        when(service.reconcileA4sIntent(context, intent, clock, true))
+                .thenReturn(
+                        A4sIntentResult.DISCARDED,
+                        A4sIntentResult.PENDING,
+                        A4sIntentResult.APPLIED);
+        realizer.restoreA4sOverrides(
+                autoscalerContext, intent.getParallelism(), intent.getResourceProfiles());
+        assertThat(realizer.reconcileA4sIntent(autoscalerContext, intent, clock, true))
+                .isEqualTo(A4sIntentResult.DISCARDED);
+        assertThat(realizer.reconcileA4sIntent(autoscalerContext, intent, clock, true))
+                .isEqualTo(A4sIntentResult.PENDING);
+        assertThat(deployment.getSpec().getFlinkConfiguration())
+                .doesNotContainKeys(
+                        PipelineOptions.PARALLELISM_OVERRIDES.key(),
+                        KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES.key());
+
+        assertThat(realizer.reconcileA4sIntent(autoscalerContext, intent, clock, true))
+                .isEqualTo(A4sIntentResult.PENDING);
+        var confirmed = reconciliation.deserializeLastReconciledSpec();
+        assertThat(
+                        new ReflectiveDiffBuilder<>(
+                                        KubernetesDeploymentMode.NATIVE,
+                                        confirmed,
+                                        deployment.getSpec())
+                                .build()
+                                .getType())
+                .isEqualTo(DiffType.IGNORE);
+
+        // A new reconciliation starts with the unchanged user spec and the saved status.
+        deployment.getSpec().setFlinkConfiguration(new LinkedHashMap<>(initialConfig.toMap()));
+        reconciliation.markReconciledSpecAsStable();
+        when(context.getObserveConfig())
+                .thenReturn(Configuration.fromMap(confirmed.getFlinkConfiguration()));
+        realizer.restoreA4sOverrides(
+                autoscalerContext, intent.getParallelism(), intent.getResourceProfiles());
+        assertThat(realizer.reconcileA4sIntent(autoscalerContext, intent, clock, true))
+                .isEqualTo(A4sIntentResult.APPLIED);
     }
 
     private void assertOverridesDoNotChange(

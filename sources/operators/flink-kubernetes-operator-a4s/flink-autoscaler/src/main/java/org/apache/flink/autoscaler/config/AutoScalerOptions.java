@@ -420,6 +420,13 @@ public class AutoScalerOptions {
                     .withFallbackKeys(oldOperatorConfigKey("a4s.runner.url"))
                     .withDescription("HTTP(S) origin of the A4S decision service. Omit for embedded A4S.");
 
+    public static final ConfigOption<Boolean> A4S_CONDITIONAL_JUSTIN_ENABLED =
+            ConfigOptions.key("job.autoscaler.a4s.conditional-justin.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Bind A4S requests to the execution token of the patched Flink runtime.");
+
     public static final ConfigOption<Duration> A4S_RUNNER_TIMEOUT =
             autoScalerConfig("a4s.runner.timeout").durationType().defaultValue(Duration.ofSeconds(3))
                     .withFallbackKeys(oldOperatorConfigKey("a4s.runner.timeout"))

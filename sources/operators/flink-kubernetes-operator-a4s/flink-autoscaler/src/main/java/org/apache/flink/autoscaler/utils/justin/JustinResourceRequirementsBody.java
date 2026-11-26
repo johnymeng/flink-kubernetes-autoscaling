@@ -3,7 +3,6 @@ package org.apache.flink.autoscaler.utils.justin;
 
 import org.apache.flink.annotation.docs.FlinkJsonSchema;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
-import org.apache.flink.runtime.jobgraph.JobVertexResourceRequirements;
 import org.apache.flink.runtime.rest.messages.RequestBody;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 import org.apache.flink.runtime.rest.messages.json.JobVertexIDKeyDeserializer;
@@ -12,6 +11,8 @@ import org.apache.flink.runtime.rest.messages.json.JobVertexIDKeySerializer;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnyGetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonAnySetter;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonIgnore;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.annotation.JsonSerialize;
 
@@ -26,6 +27,11 @@ import java.util.Optional;
 @FlinkJsonSchema.AdditionalFields(type = JustinVertexResourceRequirements.class)
 public class JustinResourceRequirementsBody implements RequestBody, ResponseBody {
 
+    @Nullable
+    @JsonProperty("executionToken")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String executionToken;
+
     @JsonAnySetter
     @JsonAnyGetter
     @JsonSerialize(keyUsing = JobVertexIDKeySerializer.class)
@@ -38,6 +44,13 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
 
     public JustinResourceRequirementsBody(
             @Nullable JustinResourceRequirements justinVertexResourceRequirements) {
+        this(justinVertexResourceRequirements, null);
+    }
+
+    public JustinResourceRequirementsBody(
+            @Nullable JustinResourceRequirements justinVertexResourceRequirements,
+            @Nullable String executionToken) {
+        this.executionToken = executionToken;
         if (justinVertexResourceRequirements != null) {
             this.justinVertexResourceRequirements = justinVertexResourceRequirements.getJobVertexParallelisms();
         } else {
@@ -53,6 +66,11 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
         return Optional.of(new JustinResourceRequirements(justinVertexResourceRequirements));
     }
 
+    @JsonIgnore
+    public Optional<String> executionToken() {
+        return Optional.ofNullable(executionToken);
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) {
@@ -62,11 +80,13 @@ public class JustinResourceRequirementsBody implements RequestBody, ResponseBody
             return false;
         }
         final JustinResourceRequirementsBody that = (JustinResourceRequirementsBody) o;
-        return Objects.equals(justinVertexResourceRequirements, that.justinVertexResourceRequirements);
+        return Objects.equals(
+                        justinVertexResourceRequirements, that.justinVertexResourceRequirements)
+                && Objects.equals(executionToken, that.executionToken);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(justinVertexResourceRequirements);
+        return Objects.hash(justinVertexResourceRequirements, executionToken);
     }
 }

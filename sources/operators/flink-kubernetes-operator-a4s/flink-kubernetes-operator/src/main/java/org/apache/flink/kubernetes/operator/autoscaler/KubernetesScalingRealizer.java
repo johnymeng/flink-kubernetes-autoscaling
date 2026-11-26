@@ -18,12 +18,18 @@
 package org.apache.flink.kubernetes.operator.autoscaler;
 
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.autoscaler.tuning.MemoryTuning;
 import org.apache.flink.configuration.*;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
+import org.apache.flink.kubernetes.operator.api.diff.DiffType;
 import org.apache.flink.kubernetes.operator.api.spec.Resource;
+import org.apache.flink.kubernetes.operator.api.status.ReconciliationState;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigBuilder;
+import org.apache.flink.kubernetes.operator.reconciler.ReconciliationUtils;
+import org.apache.flink.kubernetes.operator.reconciler.diff.ReflectiveDiffBuilder;
+import org.apache.flink.kubernetes.operator.service.NativeFlinkService;
 
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import org.slf4j.Logger;
@@ -31,6 +37,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.time.Clock;
 import java.util.Collections;
 import java.util.Map;
 
@@ -59,7 +66,10 @@ public class KubernetesScalingRealizer
                 .getFlinkConfiguration()
                 .put(
                         PipelineOptions.PARALLELISM_OVERRIDES.key(),
-                        getOverrideString(context, parallelismOverrides));
+                        getOverrideString(
+                                context,
+                                PipelineOptions.PARALLELISM_OVERRIDES,
+                                parallelismOverrides));
     }
 
     @Override
@@ -70,11 +80,75 @@ public class KubernetesScalingRealizer
                 .getFlinkConfiguration();
         config.put(
                 PipelineOptions.PARALLELISM_OVERRIDES.key(),
-                getOverrideString(context, parallelismOverrides));
-        config
-                .put(
-                        RESOURCE_PROFILE_OVERRIDES.key(),
-                        getOverrideString(context, justinOverrides));
+                getOverrideString(
+                        context, PipelineOptions.PARALLELISM_OVERRIDES, parallelismOverrides));
+        config.put(
+                RESOURCE_PROFILE_OVERRIDES.key(),
+                getOverrideString(context, RESOURCE_PROFILE_OVERRIDES, justinOverrides));
+    }
+
+    @Override
+    public void restoreA4sOverrides(
+            KubernetesJobAutoScalerContext context,
+            Map<String, String> parallelism,
+            Map<String, String> profiles) {
+        if (!parallelism.isEmpty()
+                && matchesOverrides(
+                        context.getResourceContext().getObserveConfig(), parallelism, profiles)) {
+            realizeParallelismOverrides(context, parallelism, profiles);
+        }
+    }
+
+    @Override
+    public A4sIntentResult reconcileA4sIntent(
+            KubernetesJobAutoScalerContext context,
+            A4sScalingIntent intent,
+            Clock clock,
+            boolean allowSubmission)
+            throws Exception {
+        var resourceContext = context.getResourceContext();
+        if (!(context.getResource() instanceof FlinkDeployment)
+                || !(resourceContext.getFlinkService() instanceof NativeFlinkService)) {
+            return A4sIntentResult.DISCARDED;
+        }
+        var deployment = (FlinkDeployment) context.getResource();
+        var reconciliation = deployment.getStatus().getReconciliationStatus();
+        var observed = resourceContext.getObserveConfig();
+        if (reconciliation.getState() != ReconciliationState.DEPLOYED || observed == null) {
+            return A4sIntentResult.PENDING;
+        }
+        var diff =
+                new ReflectiveDiffBuilder<>(
+                                resourceContext.getDeploymentMode(),
+                                reconciliation.deserializeLastReconciledSpec(),
+                                deployment.getSpec())
+                        .build();
+        if (diff.getType() != DiffType.IGNORE) {
+            return A4sIntentResult.DISCARDED;
+        }
+        if (!reconciliation.isLastReconciledSpecStable()) {
+            return A4sIntentResult.PENDING;
+        }
+        var service = (NativeFlinkService) resourceContext.getFlinkService();
+        var result = service.reconcileA4sIntent(resourceContext, intent, clock, allowSubmission);
+        if (result != A4sIntentResult.APPLIED
+                || matchesOverrides(
+                        observed, intent.getParallelism(), intent.getResourceProfiles())) {
+            return result;
+        }
+
+        realizeParallelismOverrides(context, intent.getParallelism(), intent.getResourceProfiles());
+        ReconciliationUtils.updateStatusForDeployedSpec(
+                deployment, resourceContext.getDeployConfig(deployment.getSpec()), clock);
+        // Keep the intent until the next reconcile observes the persisted status.
+        return A4sIntentResult.PENDING;
+    }
+
+    private static boolean matchesOverrides(
+            Configuration observed, Map<String, String> parallelism, Map<String, String> profiles) {
+        return observed != null
+                && observed.get(PipelineOptions.PARALLELISM_OVERRIDES).equals(parallelism)
+                && observed.get(RESOURCE_PROFILE_OVERRIDES).equals(profiles);
     }
 
     @Override
@@ -112,21 +186,22 @@ public class KubernetesScalingRealizer
 
     @Nullable
     private static String getOverrideString(
-            KubernetesJobAutoScalerContext context, Map<String, String> newOverrides) {
+            KubernetesJobAutoScalerContext context,
+            ConfigOption<Map<String, String>> option,
+            Map<String, String> newOverrides) {
         if (context.getResource().getStatus().getReconciliationStatus().isBeforeFirstDeployment()) {
             return ConfigurationUtils.convertValue(newOverrides, String.class);
         }
 
         var conf = context.getResourceContext().getObserveConfig();
-        var currentOverrides =
-                conf.getOptional(PipelineOptions.PARALLELISM_OVERRIDES).orElse(Map.of());
+        var currentOverrides = conf.getOptional(option).orElse(Map.of());
 
         // Check that the overrides actually changed and not just the String representation.
         // This way we prevent reconciling a NOOP config change which would unnecessarily redeploy
         // the pipeline.
         if (currentOverrides.equals(newOverrides)) {
             // If overrides are identical, use the previous string as-is.
-            return conf.getValue(PipelineOptions.PARALLELISM_OVERRIDES);
+            return conf.getValue(option);
         } else {
             return ConfigurationUtils.convertValue(newOverrides, String.class);
         }

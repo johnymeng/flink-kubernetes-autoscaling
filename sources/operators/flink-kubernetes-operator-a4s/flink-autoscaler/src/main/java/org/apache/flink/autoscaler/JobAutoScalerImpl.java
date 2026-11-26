@@ -25,8 +25,10 @@ import org.apache.flink.autoscaler.exceptions.NotReadyException;
 import org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
+import org.apache.flink.autoscaler.realizer.ScalingRealizer.A4sIntentResult;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
+import org.apache.flink.autoscaler.utils.CalendarUtils;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.util.Preconditions;
 
@@ -36,11 +38,14 @@ import org.slf4j.LoggerFactory;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.A4S_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.JUSTIN_ENABLED;
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.SCALING_ENABLED;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.initRecommendedParallelism;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.resetRecommendedParallelism;
 import static org.apache.flink.autoscaler.metrics.ScalingHistoryUtils.getTrimmedScalingHistory;
@@ -89,13 +94,21 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         var autoscalerMetrics = getOrInitAutoscalerFlinkMetrics(ctx);
         var conf = ctx.getConfiguration();
         boolean a4sEnabled = false;
+        boolean conditionalJustin = false;
         boolean realizeOverrides = true;
         try {
             a4sEnabled = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED);
+            conditionalJustin = a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
+            realizeOverrides = !conditionalJustin;
             if (!conf.getBoolean(AUTOSCALER_ENABLED)) {
                 LOG.debug("Autoscaler is disabled");
                 stateStore.clearAll(ctx);
                 stateStore.flush(ctx);
+                return;
+            }
+
+            if (conditionalJustin) {
+                scaleConditionally(ctx, autoscalerMetrics);
                 return;
             }
 
@@ -117,6 +130,11 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 stateStore.removeInfoFromCache(ctx.getJobKey());
             }
             onError(ctx, autoscalerMetrics, e);
+            if (conditionalJustin) {
+                // Let the controller retry without interpreting an incomplete status overlay
+                // as a user-initiated spec change.
+                throw e;
+            }
         } finally {
             if (realizeOverrides) {
                 try {
@@ -132,6 +150,49 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
                 }
             }
         }
+    }
+
+    private void scaleConditionally(Context ctx, AutoscalerFlinkMetrics autoscalerMetrics)
+            throws Exception {
+        var jobId = Objects.toString(ctx.getJobID(), "");
+        var pending = stateStore.getA4sScalingIntent(ctx);
+        if (pending.isPresent() && pending.get().getJobId().equals(jobId)) {
+            scalingRealizer.restoreA4sOverrides(
+                    ctx, pending.get().getParallelism(), pending.get().getResourceProfiles());
+        }
+        scalingRealizer.restoreA4sOverrides(
+                ctx, getParallelismOverrides(ctx), getResourceProfileOverrides(ctx));
+
+        if (ctx.getJobStatus() != JobStatus.RUNNING) {
+            lastEvaluatedMetrics.remove(ctx.getJobKey());
+            return;
+        }
+        if (pending.isEmpty()) {
+            runScalingLogic(ctx, autoscalerMetrics);
+            stateStore.flush(ctx);
+            pending = stateStore.getA4sScalingIntent(ctx);
+        }
+        if (pending.isEmpty()) {
+            return;
+        }
+        var intent = pending.get();
+        var conf = ctx.getConfiguration();
+        boolean allowSubmission =
+                conf.get(SCALING_ENABLED)
+                        && !CalendarUtils.inExcludedPeriods(conf, clock.instant());
+        var result =
+                intent.getJobId().equals(jobId)
+                        ? scalingRealizer.reconcileA4sIntent(ctx, intent, clock, allowSubmission)
+                        : A4sIntentResult.DISCARDED;
+        if (result == A4sIntentResult.PENDING) {
+            return;
+        }
+        if (result == A4sIntentResult.APPLIED) {
+            stateStore.storeParallelismOverrides(ctx, intent.getParallelism());
+            stateStore.storeResourceProfileOverrides(ctx, intent.getResourceProfiles());
+        }
+        stateStore.removeA4sScalingIntent(ctx);
+        stateStore.flush(ctx);
     }
 
     @Override

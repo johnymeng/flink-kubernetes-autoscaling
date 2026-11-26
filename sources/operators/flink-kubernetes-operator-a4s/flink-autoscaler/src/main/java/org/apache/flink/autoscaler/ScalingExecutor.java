@@ -28,12 +28,14 @@ import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.resources.NoopResourceCheck;
 import org.apache.flink.autoscaler.resources.ResourceCheck;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.autoscaler.tuning.MemoryTuning;
 import org.apache.flink.autoscaler.utils.CalendarUtils;
 import org.apache.flink.autoscaler.utils.ResourceCheckUtils;
+import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsBody;
 import org.apache.flink.autoscaler.utils.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.autoscaler.utils.justin.ResourceProfileParser;
@@ -151,6 +153,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         boolean memoryChanged = false;
         boolean justinEnabled = conf.get(JUSTIN_ENABLED);
         boolean a4sEnabled = justinEnabled && conf.get(A4S_ENABLED);
+        boolean conditionalJustin = a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
+        String executionToken = null;
         String generation = null;
         Map<JobVertexID, JustinVertexResourceRequirements> a4sRequirements = null;
         ScalingPlan plan = null;
@@ -161,10 +165,30 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 return false;
             }
             generation = readRuntimeGeneration(context, evaluatedMetrics, jobTopology);
-            a4sRequirements = readResourceRequirements(context);
+            if (conditionalJustin) {
+                var requirements = readConditionalRequirements(context);
+                executionToken =
+                        requirements
+                                .executionToken()
+                                .filter(token -> !token.isBlank())
+                                .orElse(null);
+                if (executionToken == null) {
+                    LOG.info("A4S deferred until Flink supplies an execution token");
+                    return false;
+                }
+                a4sRequirements =
+                        requirements
+                                .asJustinResourceRequirements()
+                                .orElseThrow()
+                                .getJobVertexParallelisms();
+            } else {
+                a4sRequirements = readResourceRequirements(context);
+            }
             var profiles = appliedProfiles(a4sRequirements, jobTopology);
-            if (generation == null || profiles == null
-                    || !previousOverridesApplied(context, jobTopology, profiles)) {
+            if (generation == null
+                    || profiles == null
+                    || (!conditionalJustin
+                            && !previousOverridesApplied(context, jobTopology, profiles))) {
                 LOG.info("A4S deferred pending a stable generation and confirmed applied profiles");
                 return false;
             }
@@ -279,21 +303,54 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                             context.getJobID(), scalingConfigurations, conf);
         }
 
-        if (plan != null && (!Objects.equals(generation,
-                        readRuntimeGeneration(context, evaluatedMetrics, jobTopology))
-                || !sameRequirements(a4sRequirements, readResourceRequirements(context))
-                || now.plusNanos(System.nanoTime() - evaluationStart).toEpochMilli() > plan.expiresAtMillis)) {
+        if (plan != null
+                && !runtimeStillMatches(
+                        context,
+                        evaluatedMetrics,
+                        jobTopology,
+                        generation,
+                        a4sRequirements,
+                        executionToken,
+                        now,
+                        evaluationStart,
+                        plan.expiresAtMillis)) {
             LOG.info("A4S recommendation expired or the runtime changed during evaluation");
             return false;
+        }
+
+        if (conditionalJustin) {
+            var lowerBounds = new HashMap<String, Integer>();
+            for (var entry : parallelismOverrides.entrySet()) {
+                var current = a4sRequirements.get(JobVertexID.fromHexString(entry.getKey()));
+                if (current == null) {
+                    return false;
+                }
+                lowerBounds.put(
+                        entry.getKey(),
+                        Math.min(
+                                Integer.parseInt(entry.getValue()),
+                                current.getParallelism().getLowerBound()));
+            }
+            autoScalerStateStore.storeA4sScalingIntent(
+                    context,
+                    new A4sScalingIntent(
+                            context.getJobID().toString(),
+                            executionToken,
+                            plan.expiresAtMillis,
+                            parallelismOverrides,
+                            profileOverrides,
+                            lowerBounds));
         }
 
         addToScalingHistoryAndStore(
                 autoScalerStateStore, context, scalingHistory, now, scalingSummaries);
         scalingTracking.addScalingRecord(now, new ScalingRecord());
         autoScalerStateStore.storeScalingTracking(context, scalingTracking);
-        autoScalerStateStore.storeParallelismOverrides(context, parallelismOverrides);
-        if (justinEnabled) {
-            autoScalerStateStore.storeResourceProfileOverrides(context, profileOverrides);
+        if (!conditionalJustin) {
+            autoScalerStateStore.storeParallelismOverrides(context, parallelismOverrides);
+            if (justinEnabled) {
+                autoScalerStateStore.storeResourceProfileOverrides(context, profileOverrides);
+            }
         }
         autoScalerStateStore.storeConfigChanges(context, configOverrides);
 
@@ -450,21 +507,60 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 entry.getValue().getAppliedResourceProfile(), after.get(entry.getKey()).getAppliedResourceProfile()));
     }
 
+    private boolean runtimeStillMatches(
+            Context context,
+            EvaluatedMetrics evaluated,
+            JobTopology topology,
+            String generation,
+            Map<JobVertexID, JustinVertexResourceRequirements> requirements,
+            @Nullable String executionToken,
+            Instant evaluationTime,
+            long evaluationStart,
+            long expiresAtMillis)
+            throws Exception {
+        if (!Objects.equals(generation, readRuntimeGeneration(context, evaluated, topology))) {
+            return false;
+        }
+        Map<JobVertexID, JustinVertexResourceRequirements> current;
+        if (executionToken != null) {
+            var response = readConditionalRequirements(context);
+            if (!executionToken.equals(response.executionToken().orElse(null))) {
+                return false;
+            }
+            current =
+                    response.asJustinResourceRequirements()
+                            .orElseThrow()
+                            .getJobVertexParallelisms();
+        } else {
+            current = readResourceRequirements(context);
+        }
+        return sameRequirements(requirements, current)
+                && evaluationTime.plusNanos(System.nanoTime() - evaluationStart).toEpochMilli()
+                        <= expiresAtMillis;
+    }
+
+    @VisibleForTesting
+    JustinResourceRequirementsBody readConditionalRequirements(Context context) throws Exception {
+        return readAppliedRequirements(context, true);
+    }
+
     @VisibleForTesting
     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(Context context)
             throws Exception {
-        var headers = JustinResourceRequirementsHeaders.INSTANCE;
-        var parameters = headers.getUnresolvedMessageParameters();
-        parameters.jobPathParameter.resolve(context.getJobID());
-        parameters.includeAppliedProfile.resolve(Collections.singletonList(true));
+        return readAppliedRequirements(context, false)
+                .asJustinResourceRequirements()
+                .orElseThrow()
+                .getJobVertexParallelisms();
+    }
+
+    private JustinResourceRequirementsBody readAppliedRequirements(
+            Context context, boolean includeToken) throws Exception {
         try (var client = context.getRestClusterClient()) {
-            return client.sendRequest(headers, parameters, EmptyRequestBody.getInstance())
-                    .get(
-                            context.getConfiguration().get(FLINK_CLIENT_TIMEOUT).toMillis(),
-                            TimeUnit.MILLISECONDS)
-                    .asJustinResourceRequirements()
-                    .orElseThrow()
-                    .getJobVertexParallelisms();
+            return JustinResourceRequirementsHeaders.INSTANCE.readAppliedRequirements(
+                    client,
+                    context.getJobID(),
+                    context.getConfiguration().get(FLINK_CLIENT_TIMEOUT),
+                    includeToken);
         }
     }
 

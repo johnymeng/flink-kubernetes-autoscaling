@@ -127,12 +127,10 @@ public abstract class AbstractFlinkResourceReconciler<
             return;
         }
 
-        SPEC lastReconciledSpec =
-                cr.getStatus().getReconciliationStatus().deserializeLastReconciledSpec();
-        SPEC currentDeploySpec = cr.getSpec();
-
         applyAutoscaler(ctx);
 
+        SPEC lastReconciledSpec = reconciliationStatus.deserializeLastReconciledSpec();
+        SPEC currentDeploySpec = cr.getSpec();
         var reconciliationState = reconciliationStatus.getState();
         var specDiff =
                 new ReflectiveDiffBuilder<>(

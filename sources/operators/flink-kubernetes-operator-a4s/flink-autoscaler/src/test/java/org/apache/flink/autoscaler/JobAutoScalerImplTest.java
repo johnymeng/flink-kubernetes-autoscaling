@@ -28,6 +28,7 @@ import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.metrics.TestMetrics;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
 import org.apache.flink.autoscaler.realizer.TestingScalingRealizer;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.JobTopology;
@@ -50,6 +51,7 @@ import org.junit.jupiter.api.Test;
 
 import javax.annotation.Nullable;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Collection;
@@ -58,6 +60,8 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static java.util.Map.entry;
 import static org.apache.flink.autoscaler.TestingAutoscalerUtils.createDefaultJobAutoScalerContext;
@@ -67,6 +71,7 @@ import static org.apache.flink.autoscaler.config.AutoScalerOptions.VERTEX_SCALIN
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Tests for JobAutoScalerImpl. */
@@ -302,6 +307,85 @@ public class JobAutoScalerImplTest {
         assertThat(realizer.events).hasSize(1);
         assertEquals(parallelism, realizer.events.getFirst().getParallelismOverrides());
         assertEquals(profiles, realizedProfiles);
+    }
+
+    @Test
+    void reconcilesConditionalTargetOnlyAfterFlushAndCommitsObservedOverrides() throws Exception {
+        var conf = context.getConfiguration();
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, true);
+        conf.set(SCALING_ENABLED, true);
+        var vertex = new JobVertexID();
+        var intent =
+                new A4sScalingIntent(
+                        context.getJobID().toString(),
+                        "observed-token",
+                        Long.MAX_VALUE,
+                        Map.of(vertex.toString(), "2"),
+                        Map.of(vertex.toString(), ResourceProfile.ZERO.toString()),
+                        Map.of(vertex.toString(), 1));
+        var failFlush = new AtomicBoolean(true);
+        var persistedIntent = new AtomicReference<A4sScalingIntent>();
+        var store =
+                new InMemoryAutoScalerStateStore<JobID, JobAutoScalerContext<JobID>>() {
+                    @Override
+                    public void flush(JobAutoScalerContext<JobID> ctx) {
+                        if (failFlush.get()) {
+                            throw new IllegalStateException(
+                                    "Injected ConfigMap persistence failure");
+                        }
+                        persistedIntent.set(getA4sScalingIntent(ctx).orElse(null));
+                    }
+                };
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 20));
+        var metricsCollector =
+                new TestingMetricsCollector<JobID, JobAutoScalerContext<JobID>>(topology) {
+                    @Override
+                    public CollectedMetricHistory updateMetrics(
+                            JobAutoScalerContext<JobID> ctx,
+                            AutoScalerStateStore<JobID, JobAutoScalerContext<JobID>> stateStore) {
+                        store.storeA4sScalingIntent(ctx, intent);
+                        return new CollectedMetricHistory(topology, new TreeMap<>(), Instant.EPOCH);
+                    }
+                };
+        var reconciliations = new AtomicInteger();
+        var realizer =
+                new TestingScalingRealizer<JobID, JobAutoScalerContext<JobID>>() {
+                    @Override
+                    public A4sIntentResult reconcileA4sIntent(
+                            JobAutoScalerContext<JobID> ctx,
+                            A4sScalingIntent pending,
+                            Clock clock,
+                            boolean allowSubmission) {
+                        assertThat(pending).isEqualTo(intent).isEqualTo(persistedIntent.get());
+                        assertThat(allowSubmission).isTrue();
+                        return reconciliations.incrementAndGet() == 1
+                                ? A4sIntentResult.PENDING
+                                : A4sIntentResult.APPLIED;
+                    }
+                };
+        var autoscaler =
+                new JobAutoScalerImpl<>(
+                        metricsCollector, null, null, eventCollector, realizer, store);
+
+        assertThrows(IllegalStateException.class, () -> autoscaler.scale(context));
+        assertThat(reconciliations.get()).isZero();
+        assertThat(store.getA4sScalingIntent(context)).isEmpty();
+
+        failFlush.set(false);
+        autoscaler.scale(context);
+        assertThat(store.getA4sScalingIntent(context)).contains(intent);
+        assertThat(store.getParallelismOverrides(context)).isEmpty();
+        assertThat(store.getResourceProfileOverrides(context)).isEmpty();
+
+        autoscaler.scale(context);
+        assertThat(reconciliations.get()).isEqualTo(2);
+        assertThat(store.getA4sScalingIntent(context)).isEmpty();
+        assertThat(store.getParallelismOverrides(context)).isEqualTo(intent.getParallelism());
+        assertThat(store.getResourceProfileOverrides(context))
+                .isEqualTo(intent.getResourceProfiles());
+        assertThat(realizer.events).isEmpty();
     }
 
     @Test

@@ -22,6 +22,7 @@ import org.apache.flink.autoscaler.DelayedScaleDown;
 import org.apache.flink.autoscaler.ScalingSummary;
 import org.apache.flink.autoscaler.ScalingTracking;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
 import org.apache.flink.autoscaler.utils.AutoScalerSerDeModule;
@@ -77,6 +78,8 @@ public class KubernetesAutoScalerStateStore
     protected static final String PARALLELISM_OVERRIDES_KEY = "parallelismOverrides";
     protected static final String RESOURCE_PROFILE_OVERRIDES_KEY = "resourceProfileOverrides";
     protected static final String PREVIOUS_SCALING_DECISION = "previousScalingDecision";
+
+    private static final String A4S_INTENT_KEY = "a4sScalingIntent";
 
     protected static final String CONFIG_OVERRIDES_KEY = "configOverrides";
 
@@ -251,6 +254,28 @@ public class KubernetesAutoScalerStateStore
     @Override
     public void removeResourceProfileOverrides(KubernetesJobAutoScalerContext jobContext) throws Exception {
         configMapStore.removeSerializedState(jobContext, RESOURCE_PROFILE_OVERRIDES_KEY);
+    }
+
+    @Override
+    public Optional<A4sScalingIntent> getA4sScalingIntent(KubernetesJobAutoScalerContext jobContext)
+            throws Exception {
+        var state = configMapStore.getSerializedState(jobContext, A4S_INTENT_KEY);
+        if (state.isEmpty()) {
+            return Optional.empty();
+        }
+        return Optional.of(YAML_MAPPER.readValue(state.get(), A4sScalingIntent.class));
+    }
+
+    @Override
+    public void storeA4sScalingIntent(
+            KubernetesJobAutoScalerContext jobContext, A4sScalingIntent intent) throws Exception {
+        configMapStore.putSerializedState(
+                jobContext, A4S_INTENT_KEY, YAML_MAPPER.writeValueAsString(intent));
+    }
+
+    @Override
+    public void removeA4sScalingIntent(KubernetesJobAutoScalerContext jobContext) {
+        configMapStore.removeSerializedState(jobContext, A4S_INTENT_KEY);
     }
 
     @Override
