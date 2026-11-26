@@ -49,3 +49,9 @@ One preceding attempt was stopped after the startup supervisor did not receive t
 A separate 600-second run at 8,000 offered records/s exercised lifecycle cases under the same four-TaskManager, 16-slot envelope and the defer policy. P1 → P2, P2 → P4, and P4 → P8 applied. While P12 was preparing on the P8 graph, P10 superseded it. A run-owned TaskManager was removed while P10 was preparing. Native recovery applied P10 without a restart for the obsolete P12 generation.
 
 A 16 MiB increase in the join's managed memory at P10 went through the existing fallback path and the new profile was confirmed. After P10 → P4, a P24 request exceeded the configured slot cap and was deferred. The P4 attempts did not restart and processed another 4,552,317 observed join records over the subsequent 453 seconds. Both namespace and storage cleanup completed. [Controlled verification trace](evidence/q8-controlled-verification.json)
+
+## End-to-end automatic A4S
+
+Automatic A4S ran for a separate 600-second window with the existing policy and the same 16-slot cap. It issued two timed requests. A memory-only native fallback reduced the join from 158 MiB to 33 MiB at P1. The runtime reported the actual allocation and the autoscaler persisted `APPLIED`.
+
+The second request targeted a P24 join, requiring 28 slots with the source tasks. It used the normal native path without preparation and remained `COMMITTING` at cutoff while the job waited for resources. That request was acknowledged and had no recorded restart completion. The experiment kept its original cap and included the incomplete outcome. [Automatic verification trace](evidence/q8-automatic-verification.json)
