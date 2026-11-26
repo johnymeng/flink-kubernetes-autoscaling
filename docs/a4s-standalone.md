@@ -47,6 +47,7 @@ The example returns `RESCALE` to six subtasks with 44,739,243 bytes of cache per
 Build the runner image and make it available to the target Kubernetes namespace. Set `A4S_IMAGE` to the chosen registry and tag before running the commands.
 
 ```bash
+mvn -B -f sources/a4s/pom.xml package
 docker build -t "${A4S_IMAGE}" sources/a4s
 docker push "${A4S_IMAGE}"
 sed "s|image: a4s-runner:0.1.0|image: ${A4S_IMAGE}|" cluster/a4s/runner.yaml |
