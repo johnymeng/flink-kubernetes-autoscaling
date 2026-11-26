@@ -47,6 +47,10 @@ import org.apache.flink.runtime.rest.messages.MessageParameters;
 import org.apache.flink.runtime.rest.messages.RequestBody;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
 
+import com.sun.net.httpserver.HttpServer;
+import io.a4s.api.EvaluationRequest;
+import io.a4s.core.A4sPolicy;
+import io.a4s.http.Wire;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -55,6 +59,8 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -66,6 +72,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -428,8 +435,9 @@ public class ScalingExecutorTest {
                         new DelayedScaleDown()));
     }
 
-    @Test
-    void testA4SFinalParallelismIsValidatedAndStored() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"embedded", "remote", "stale", "unavailable"})
+    void testA4SFinalParallelismIsValidatedAndStored(String mode) throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
@@ -443,9 +451,11 @@ public class ScalingExecutorTest {
                         dummyGlobalMetrics,
                         Map.of(
                                 vertex,
-                                new MissRateCurve(java.util.List.of(
-                                        new MissRateCurve.Point(100L * 1024 * 1024, 0.6),
-                                        new MissRateCurve.Point(700L * 1024 * 1024, 0.1)))));
+                                new MissRateCurve(
+                                        java.util.List.of(
+                                                new MissRateCurve.Point(100L * 1024 * 1024, 0.6),
+                                                new MissRateCurve.Point(
+                                                        700L * 1024 * 1024, 0.1)))));
         metrics.setWindowStart(Instant.now().minusSeconds(10));
         metrics.setWindowEnd(Instant.now());
         var original = ResourceProfile.newBuilder().setManagedMemoryMB(128).build();
@@ -453,8 +463,10 @@ public class ScalingExecutorTest {
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
                     @Override
-                    String readRuntimeGeneration(JobAutoScalerContext<JobID> ctx,
-                            EvaluatedMetrics evaluated, JobTopology topology) {
+                    String readRuntimeGeneration(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
                         return "generation";
                     }
 
@@ -480,20 +492,91 @@ public class ScalingExecutorTest {
                         return false;
                     }
                 };
+        var received = new CompletableFuture<EvaluationRequest>();
+        var server =
+                mode.equals("embedded")
+                        ? null
+                        : HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        if (server != null) {
+            server.createContext(
+                    "/v1/evaluate",
+                    exchange -> {
+                        try {
+                            var request =
+                                    Wire.decode(
+                                            exchange.getRequestBody().readAllBytes(),
+                                            EvaluationRequest.class);
+                            received.complete(request);
+                            if (mode.equals("unavailable")) {
+                                exchange.sendResponseHeaders(503, -1);
+                                return;
+                            }
+                            byte[] body = Wire.encode(new A4sPolicy().evaluate(request));
+                            if (mode.equals("stale")) {
+                                body =
+                                        new String(body, StandardCharsets.UTF_8)
+                                                .replace(
+                                                        "\"executionGeneration\":\"generation\"",
+                                                        "\"executionGeneration\":\"previous-generation\"")
+                                                .getBytes(StandardCharsets.UTF_8);
+                            }
+                            exchange.getResponseHeaders().set("Content-Type", "application/json");
+                            exchange.sendResponseHeaders(200, body.length);
+                            exchange.getResponseBody().write(body);
+                        } finally {
+                            exchange.close();
+                        }
+                    });
+            server.start();
+            conf.set(
+                    AutoScalerOptions.A4S_RUNNER_URL,
+                    "http://127.0.0.1:" + server.getAddress().getPort());
+        }
         var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
         var now = Instant.now();
-        assertTrue(
-                scalingExecutor.scaleResource(
-                        context,
-                        metrics,
-                        history,
-                        scalingTracking,
-                        now,
-                        topology,
-                        new DelayedScaleDown()));
+        boolean scaled;
+        try {
+            scaled =
+                    scalingExecutor.scaleResource(
+                            context,
+                            metrics,
+                            history,
+                            scalingTracking,
+                            now,
+                            topology,
+                            new DelayedScaleDown());
+            if (server != null) {
+                var request = received.get(1, TimeUnit.SECONDS);
+                assertEquals(context.getJobID().toString(), request.snapshot.jobId);
+                assertEquals("generation", request.snapshot.executionGeneration);
+                assertEquals(vertex.toHexString(), request.snapshot.operators.get(0).operatorId);
+            }
+        } finally {
+            if (server != null) {
+                server.stop(0);
+            }
+        }
+
+        if (mode.equals("stale") || mode.equals("unavailable")) {
+            assertFalse(scaled);
+            assertThat(validated).isEmpty();
+            assertThat(history).isEmpty();
+            assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+            return;
+        }
+
+        assertTrue(scaled);
         assertEquals(2, validated.get(vertex).getNewParallelism());
         assertEquals(2, history.get(vertex).get(now).getNewParallelism());
         assertEquals(Map.of(vertex, 2), getScaledParallelism(stateStore, context));
+        assertThat(stateStore.getResourceProfileOverrides(context))
+                .containsEntry(
+                        vertex.toHexString(),
+                        ResourceProfile.newBuilder(original)
+                                .setManagedMemoryMB(116)
+                                .build()
+                                .toString());
     }
 
     @ParameterizedTest
