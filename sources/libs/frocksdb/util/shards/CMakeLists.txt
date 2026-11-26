@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.12)
+project(shards_core LANGUAGES CXX)
+
+find_package(Threads REQUIRED)
+add_library(shards_core STATIC shards_estimator.cc)
+target_compile_features(shards_core PUBLIC cxx_std_11)
+target_include_directories(shards_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(shards_core PUBLIC Threads::Threads)
+
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(shards_core_test shards_estimator_test.cc)
+  target_link_libraries(shards_core_test PRIVATE shards_core)
+  add_test(NAME shards_core_test COMMAND shards_core_test)
+endif()
