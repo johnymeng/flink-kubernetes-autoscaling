@@ -19,9 +19,19 @@ import java.util.Set;
 
 /** Discards Q20 output after sampling latency from the Kafka bid timestamp. */
 public final class Q20KafkaLatencySinkFactory implements DynamicTableSinkFactory {
-    private static final String METRIC = "q20KafkaLatencyV1";
-    private static final int BIN_MILLIS = 10;
+    private static final String METRIC = "q20KafkaLatencyV2";
+    private static final int SHORT_END_MILLIS = 2_000;
+    private static final int MEDIUM_END_MILLIS = 60_000;
     private static final int OVERFLOW_MILLIS = 900_000;
+    private static final int SHORT_WIDTH_MILLIS = 10;
+    private static final int MEDIUM_WIDTH_MILLIS = 100;
+    private static final int LONG_WIDTH_MILLIS = 1_000;
+    private static final int MEDIUM_START_BIN = SHORT_END_MILLIS / SHORT_WIDTH_MILLIS;
+    private static final int LONG_START_BIN = MEDIUM_START_BIN
+            + (MEDIUM_END_MILLIS - SHORT_END_MILLIS) / MEDIUM_WIDTH_MILLIS;
+    // Even with every bin present and 19-digit counts, the gauge stays below writeUTF's limit.
+    private static final int OVERFLOW_BIN = LONG_START_BIN
+            + (OVERFLOW_MILLIS - MEDIUM_END_MILLIS) / LONG_WIDTH_MILLIS;
     private static final String TIMESTAMP_FIELD = "bid_kafka_timestamp";
     private static final ConfigOption<Integer> SAMPLE_EVERY =
             ConfigOptions.key("sample-every").intType().defaultValue(1024);
@@ -108,7 +118,7 @@ public final class Q20KafkaLatencySinkFactory implements DynamicTableSinkFactory
 
         @Override
         public void open(Configuration parameters) {
-            buckets = new long[OVERFLOW_MILLIS / BIN_MILLIS + 1];
+            buckets = new long[OVERFLOW_BIN + 1];
             attempt = getRuntimeContext().getAttemptNumber();
             getRuntimeContext().getMetricGroup().gauge(METRIC, (Gauge<String>) this::snapshot);
         }
@@ -127,13 +137,14 @@ public final class Q20KafkaLatencySinkFactory implements DynamicTableSinkFactory
                 invalid++;
                 return;
             }
-            int bin = (int) (Math.min(now - received, OVERFLOW_MILLIS) / BIN_MILLIS);
-            buckets[bin]++;
+            buckets[bin(now - received)]++;
         }
 
         private synchronized String snapshot() {
             var json = new StringBuilder().append("{\"attempt\":").append(attempt)
-                    .append(",\"binMs\":").append(BIN_MILLIS)
+                    .append(",\"segments\":[[").append(SHORT_END_MILLIS).append(',').append(SHORT_WIDTH_MILLIS)
+                    .append("],[").append(MEDIUM_END_MILLIS).append(',').append(MEDIUM_WIDTH_MILLIS)
+                    .append("],[").append(OVERFLOW_MILLIS).append(',').append(LONG_WIDTH_MILLIS).append("]]")
                     .append(",\"overflowAtMs\":").append(OVERFLOW_MILLIS)
                     .append(",\"invalid\":").append(invalid).append(",\"counts\":{");
             String delimiter = "";
@@ -144,6 +155,17 @@ public final class Q20KafkaLatencySinkFactory implements DynamicTableSinkFactory
                 }
             }
             return json.append("}}").toString();
+        }
+
+        private static int bin(long elapsed) {
+            if (elapsed < SHORT_END_MILLIS) {
+                return (int) (elapsed / SHORT_WIDTH_MILLIS);
+            }
+            if (elapsed < MEDIUM_END_MILLIS) {
+                return MEDIUM_START_BIN + (int) ((elapsed - SHORT_END_MILLIS) / MEDIUM_WIDTH_MILLIS);
+            }
+            return LONG_START_BIN + (int) ((Math.min(elapsed, OVERFLOW_MILLIS) - MEDIUM_END_MILLIS)
+                    / LONG_WIDTH_MILLIS);
         }
     }
 }

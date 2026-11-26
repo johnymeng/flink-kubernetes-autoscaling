@@ -55,6 +55,25 @@ class LatencySummaryTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             summarize(self.before, self.after)
 
+    def test_q20_v2_resolves_bucket_boundaries_and_overflow(self):
+        for snapshot in (self.before, self.after):
+            snapshot["metric"] = "q20KafkaLatencyV2"
+            for gauge in snapshot["histograms"].values():
+                gauge.pop("binMs")
+                gauge["overflowAtMs"] = 900_000
+                gauge["segments"] = [[2_000, 10], [60_000, 100], [900_000, 1_000]]
+        for bucket, lower, upper in (
+            (199, 1_990, 1_999), (200, 2_000, 2_099), (779, 59_900, 59_999),
+            (780, 60_000, 60_999), (1_619, 899_000, 899_999), (1_620, 900_000, None),
+        ):
+            with self.subTest(bucket=bucket):
+                self.after["histograms"]["0"]["counts"] = {"1": 100, str(bucket): 1}
+                result = summarize(self.before, self.after)
+                self.assertEqual(result["p99"], {"lowerMs": lower, "upperMs": upper})
+        self.after["histograms"]["0"]["counts"]["1621"] = 1
+        with self.assertRaises(ValueError):
+            summarize(self.before, self.after)
+
     def test_rejects_resets_and_incomplete_or_changed_attempts(self):
         changes = [
             ("reset", lambda window: window["histograms"]["0"]["counts"].clear()),

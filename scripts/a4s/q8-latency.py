@@ -12,12 +12,22 @@ from urllib.request import urlopen
 
 
 METRIC = "q8AuctionLatencyV1"
-BIN_MS = 10
-OVERFLOW_MS = {METRIC: 120_000, "q20KafkaLatencyV1": 900_000}
+BUCKET_LAYOUTS = {
+    METRIC: ((120_000, 10),),
+    "q20KafkaLatencyV1": ((900_000, 10),),
+    "q20KafkaLatencyV2": ((2_000, 10), (60_000, 100), (900_000, 1_000)),
+}
+
+
+def bucket_segments(layout):
+    start = 0
+    for end, width in layout:
+        yield start, width, (end - start) // width
+        start = end
 
 
 def capture(rest_url, job, vertex, gauge=METRIC):
-    overflow_at_ms = OVERFLOW_MS[gauge]
+    layout = BUCKET_LAYOUTS[gauge]
     if any(not re.fullmatch(r"[0-9a-f]{32}", value) for value in (job, vertex)):
         raise ValueError("Job and vertex IDs must be 32 lowercase hexadecimal digits")
 
@@ -58,7 +68,7 @@ def capture(rest_url, job, vertex, gauge=METRIC):
         if metric["id"] not in ids or task in observed or task not in before:
             raise ValueError("Ambiguous latency gauge identity")
         value = json.loads(metric["value"])
-        validate_histogram(value, before[task][0], overflow_at_ms)
+        validate_histogram(value, before[task][0], layout)
         observed[task] = value
     observed_at = time.time_ns() // 1_000_000
     if before != roster() or observed.keys() != before.keys():
@@ -72,26 +82,30 @@ def capture(rest_url, job, vertex, gauge=METRIC):
     return result
 
 
-def validate_histogram(value, attempt, overflow_at_ms):
+def validate_histogram(value, attempt, layout):
+    expected_layout = ({"binMs": layout[0][1]} if len(layout) == 1
+                       else {"segments": [list(row) for row in layout]})
     if (
         type(value["attempt"]) is not int or value["attempt"] != attempt
-        or value["binMs"] != BIN_MS or value["overflowAtMs"] != overflow_at_ms
+        or value["overflowAtMs"] != layout[-1][0]
+        or any(value.get(key) != expected for key, expected in expected_layout.items())
         or type(value["invalid"]) is not int or value["invalid"] < 0
     ):
         raise ValueError("Latency gauge does not match the running attempt or expected layout")
+    overflow_bin = sum(count for _, _, count in bucket_segments(layout))
     for bin_id, count in value["counts"].items():
         bin_index = int(bin_id)
-        if (str(bin_index) != bin_id or not 0 <= bin_index <= overflow_at_ms // BIN_MS
+        if (str(bin_index) != bin_id or not 0 <= bin_index <= overflow_bin
                 or type(count) is not int or count <= 0):
             raise ValueError("Invalid latency bucket")
 
 
 def summarize(before, after):
     gauge = before.get("metric", METRIC)
-    if gauge not in OVERFLOW_MS or after.get("metric", METRIC) != gauge:
+    if gauge not in BUCKET_LAYOUTS or after.get("metric", METRIC) != gauge:
         raise ValueError("The latency snapshots must describe the same supported gauge")
-    overflow_at_ms = OVERFLOW_MS[gauge]
-    overflow_bin = overflow_at_ms // BIN_MS
+    layout = BUCKET_LAYOUTS[gauge]
+    overflow_bin = sum(count for _, _, count in bucket_segments(layout))
     if (any(before[key] != after[key] for key in ("job", "vertex", "roster"))
             or not before["roster"] or before["observedAtMs"] >= after["observedAtMs"]):
         raise ValueError("The two snapshots must cover one ordered, unchanged sink roster")
@@ -103,7 +117,7 @@ def summarize(before, after):
     for task, (attempt, _, _) in before["roster"].items():
         old, new = (snapshot["histograms"][task] for snapshot in (before, after))
         for value in (old, new):
-            validate_histogram(value, attempt, overflow_at_ms)
+            validate_histogram(value, attempt, layout)
         if new["invalid"] < old["invalid"]:
             raise ValueError("The clock error counter reset")
         invalid += new["invalid"] - old["invalid"]
@@ -123,10 +137,12 @@ def summarize(before, after):
         for index, population in sorted(totals.items()):
             rank -= population
             if rank <= 0:
-                return {
-                    "lowerMs": index * BIN_MS,
-                    "upperMs": None if index == overflow_bin else (index + 1) * BIN_MS - 1,
-                }
+                for start, width, bins in bucket_segments(layout):
+                    if index < bins:
+                        lower = start + index * width
+                        return {"lowerMs": lower, "upperMs": lower + width - 1}
+                    index -= bins
+                return {"lowerMs": layout[-1][0], "upperMs": None}
         raise AssertionError("The latency rank exceeds the recorded sample count")
 
     return {
@@ -142,7 +158,7 @@ def main():
     capture_command.add_argument("rest_url")
     capture_command.add_argument("job_id")
     capture_command.add_argument("vertex_id")
-    capture_command.add_argument("--metric", choices=OVERFLOW_MS, default=METRIC)
+    capture_command.add_argument("--metric", choices=BUCKET_LAYOUTS, default=METRIC)
     summarize_command = commands.add_parser("summarize")
     summarize_command.add_argument("before", type=Path)
     summarize_command.add_argument("after", type=Path)

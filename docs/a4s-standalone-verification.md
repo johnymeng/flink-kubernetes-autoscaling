@@ -326,16 +326,20 @@ python3 scripts/a4s/build-q20-latency.py "$Q20_BASE_JAR" "$Q20_TIMED_JAR" \
   --base-sha256 "$Q20_BASE_SHA256" --flink-classpath "$FLINK_HOME/lib/*"
 ```
 
-Capture the join vertex at both ends of each observation window. The script verifies the running subtask roster and rejects a window that spans an attempt change. After recovery, start a new window with the new roster. The histogram samples one out of 1,024 joined rows by default. It reports 10 ms bins and a separate overflow bucket from 900 seconds.
+Capture the join vertex at both ends of each observation window. The script verifies the running subtask roster and rejects a window that spans an attempt change. After recovery, start a new window with the new roster. The histogram samples one out of 1,024 joined rows by default. It uses 10 ms bins below two seconds, 100 ms bins up to one minute, and one-second bins up to the 900-second overflow bucket.
 
 ```bash
 python3 scripts/a4s/q8-latency.py capture "$FLINK_REST" "$JOB_ID" "$JOIN_VERTEX" \
-  --metric q20KafkaLatencyV1 > before.json
+  --metric q20KafkaLatencyV2 > before.json
 # Capture after.json with the same command at the end of the observation window.
 python3 scripts/a4s/q8-latency.py summarize before.json after.json
 ```
 
-A local Kafka and Flink test verified that the timed query kept all three original Q20 vertex IDs. The broker replaced deliberately old producer timestamps with its append time. The query recorded exactly seven expected joined rows in the first attempt. After replacing the TaskManager, Flink restored one RocksDB checkpoint and joined two new bids against the restored auction without replaying the previous outputs into the new window. Both windows had zero invalid or overflow samples. The collector rejected the window spanning the old and new attempts. The timed variant still needs matched lab latency measurements.
+A local Kafka and Flink test verified that the timed query kept all three original Q20 vertex IDs. The broker replaced deliberately old producer timestamps with its append time. The query recorded exactly seven expected joined rows in the first attempt. After replacing the TaskManager, Flink restored one RocksDB checkpoint and joined two new bids against the restored auction without replaying the previous outputs into the new window. Both windows had zero invalid or overflow samples. The collector rejected the window spanning the old and new attempts.
+
+The lab pilot `live-414743c5` used the rebuilt runtime on Java 11 and the v1 latency probe with one-in-64 sampling. The virtual API, broker, producer, Flink, operator, and runner were scoped to c167. Startup verified the exact image and JAR pins, an empty latency gauge, and `LogAppendTime` on the bid topic. The job completed three fixed-allocation observation windows in embedded, remote, remote order. Their join input rates were 9,000, 8,925, and 9,123 records/s. Their p95 Kafka-to-join latencies were 123.18, 178.32, and 236.52 seconds, with 3,850 valid samples and zero timestamp or overflow errors. All 32 recorded decisions replayed exactly. The last checkpoint observation showed 12 completed checkpoints and zero restores. The partial run leaves the performance comparison open.
+
+The fourth window stopped when Flink returned an empty gauge value. The last valid v1 gauge was 63,657 bytes. Flink's actual metric serializer omitted the same gauge after a test added 400 occupied bins and grew it to 67,657 bytes. A fully populated v2 gauge with maximum positive counts serialized and deserialized exactly at 42,764 bytes. The collector still reads archived v1 captures. The run-owned namespace was removed and the shared worker lock was available after teardown. A complete lab run with the bounded probe remains open.
 
 ### Exclusive-slot Kafka Q20 comparison on c167
 
