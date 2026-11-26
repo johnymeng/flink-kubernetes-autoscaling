@@ -42,7 +42,9 @@ The scorer matches the manual request against the JobManager event timestamps an
 - Decision-to-running spans the decision to the last target task reaching running. Record the acknowledgement separately.
 - Execution interruption spans restart start to the first increase in a stateful input or output counter on a replacement attempt. Report sample bounds. Estimate observed downtime using the counter progress gap immediately surrounding the restart.
 - Throughput recovery begins with ten consecutive seconds at or above 90% of the median stateful input throughput in the preceding 30-second pre-decision reference window. If samples are insufficient, mark recovery unavailable.
-- Backlog clearance spans decision to the first sustained return to the pre-decision backlog band. Report peak backlog and backlog at cutoff. Keep genuine zeros and failed polls distinct.
+- Backlog clearance spans decision to the first three consecutive samples after the peak that span at least nine seconds and stay at or below 110% of the median backlog in the 30 seconds before the decision. Report peak backlog and backlog at cutoff. Keep genuine zeros and failed polls distinct.
 - Calculate excess allocation by integrating CPU and memory requests over matched offsets. Report core-seconds and GiB-seconds, resource peaks, utilization, and timeout/fallback frequency.
+
+Use `score_resources.py LAB_RECEIPT TIMINGS_JSON` with the run-owned pod snapshots and the workload sampler to compute resource-time and DataStream backlog. The calculation excludes intervals with gaps greater than 14 seconds and reports coverage.
 
 Use `figure10_input.py LAB_RECEIPT RESULTS_ROOT` to adapt the archived sampler JSON lines into indexed Figure 10 CSVs. Use the supplied Figure 10 `plot_run.py` with those files and its comparison arguments. Align any supplemental plots to input release and preserve the raw data. Earlier PR #5 timings measured decision-to-running under a different comparison. Estimating the new downtime effect requires the live matched repetitions.
