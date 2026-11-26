@@ -449,10 +449,13 @@ public class ScalingExecutorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"embedded", "remote", "stale", "unavailable", "timeout"})
-    void testA4SFinalParallelismIsValidatedAndStored(String mode) throws Exception {
+    @ValueSource(strings = {"embedded", "remote", "remote-observe-only", "stale", "unavailable", "timeout"})
+    void storesA4sRecommendationsOnlyWhenValidAndScalingIsEnabled(String mode) throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        if (mode.equals("remote-observe-only")) {
+            conf.set(AutoScalerOptions.SCALING_ENABLED, false);
+        }
         conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
         conf.set(AutoScalerOptions.A4S_MISS_LATENCY_SEC, 0.025);
         var vertex = new JobVertexID();
@@ -594,12 +597,16 @@ public class ScalingExecutorTest {
             }
         }
 
-        if (Set.of("stale", "unavailable", "timeout").contains(mode)) {
+        if (Set.of("remote-observe-only", "stale", "unavailable", "timeout").contains(mode)) {
             assertFalse(scaled);
             assertThat(validated).isEmpty();
             assertThat(history).isEmpty();
             assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
             assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+            if (mode.equals("remote-observe-only")) {
+                assertEquals(2.0, metrics.getVertexMetrics().get(vertex)
+                        .get(ScalingMetric.RECOMMENDED_PARALLELISM).getCurrent());
+            }
             return;
         }
 
