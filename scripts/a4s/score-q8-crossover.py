@@ -5,6 +5,7 @@ import argparse
 import json
 import runpy
 from datetime import datetime
+from math import sqrt
 from pathlib import Path
 from statistics import median
 
@@ -83,15 +84,85 @@ def join_timeline(path, spec, windows, events):
     return intervals
 
 
+def pod_resources_by_period(samples, start, end):
+    """Use cumulative container counters captured inside the observed interval."""
+    roles = {"flink": ("flink-main-container", 3),
+             "operator": ("flink-kubernetes-operator", 1), "runner": ("runner", 1)}
+    result = {}
+    for role, (container_name, expected_count) in roles.items():
+        endpoints = {}
+        peak_working_set = None
+        stable_ids = None
+        for sample in samples:
+            if not start <= sample["observedAtMs"] <= end:
+                continue
+            containers = [row for row in sample.get("containers", [])
+                          if row["container"] == container_name]
+            if len(containers) != expected_count:
+                continue
+            ids = {(row["pod"]["uid"], row["startTime"]) for row in containers}
+            if len(ids) != expected_count or (stable_ids is not None and stable_ids != ids):
+                endpoints.clear()
+                break
+            stable_ids = ids
+            memory = []
+            for row in containers:
+                identity = row["pod"]["uid"], row["startTime"]
+                cpu = row.get("cpu") or {}
+                memory.append((row.get("memory") or {}).get("workingSetBytes"))
+                counter = cpu.get("usageCoreNanoSeconds")
+                if "time" not in cpu or type(counter) is not int or counter < 0:
+                    continue
+                timestamp = datetime.fromisoformat(cpu["time"].replace("Z", "+00:00")).timestamp() * 1000
+                if start <= timestamp <= end:
+                    endpoints.setdefault(identity, {})[timestamp] = counter
+            if all(type(value) is int and value >= 0 for value in memory):
+                peak_working_set = max(peak_working_set or 0, sum(memory))
+
+        observations = [sorted(values.items()) for values in endpoints.values()]
+        if len(observations) != expected_count or any(
+                len(series) < 2 or any(before[1] > after[1] for before, after in zip(series, series[1:]))
+                for series in observations):
+            result[role] = None
+            continue
+        durations_ms = [series[-1][0] - series[0][0] for series in observations]
+        cores = sum((series[-1][1] - series[0][1]) / (duration * 1_000_000)
+                    for series, duration in zip(observations, durations_ms))
+        result[role] = {"meanCpuCores": cores, "minimumCpuSampleSeconds": min(durations_ms) / 1000,
+                        "peakWorkingSetBytes": peak_working_set}
+    return result
+
+
+def running_roster(frame):
+    expected = {"person": 2, "auction": 2, "join": 1}
+    roster = {}
+    for role, count in expected.items():
+        subtasks = frame["vertices"][role]["subtasks"]
+        assert sorted(task["subtask"] for task in subtasks) == list(range(count))
+        assert all(task["status"] == "RUNNING" and not task.get("other-concurrent-attempts")
+                   for task in subtasks)
+        roster[role] = sorted((task["subtask"], task["attempt"], task["start-time"], task["taskmanager-id"])
+                              for task in subtasks)
+    return roster
+
+
 def score(bundle, latency_script):
     arm = bundle / "scout"
     paths = sorted((arm / "crossover").glob("[0-9][0-9]-*"))
     events = list(read_runner(arm / "runner.log"))
+    resources = arm / "pod-resources.jsonl"
+    pod_samples = []
+    if resources.is_file():
+        with resources.open() as stream:
+            pod_samples = list(map(json.loads, stream))
     spec = read(bundle / "execution-spec.json")
     assert (arm / "crossover/complete").is_file() and len(paths) == len(spec["crossover_order"])
     merge_latency = runpy.run_path(str(latency_script))["summarize"]
     decisions, all_periods = set(), []
     observed_intervals = []
+    admission = arm / "admission/confirmed-applied-profiles.json"
+    startup_profiles = read(admission) if admission.is_file() else None
+    roster = None
     for mode, path in zip(spec["crossover_order"], paths):
         planned = read(path / "planned.json")
         assert planned["mode"] == mode
@@ -100,8 +171,14 @@ def score(bundle, latency_script):
         assert planned["observeFromMs"] <= start < finish and planned["observeToMs"] <= finish
         assert finish < planned["observeToMs"] + 5000
         observed_intervals.append((start, finish, path.name))
-        assert before["profiles"] == after["profiles"]
         for frame in (before, after):
+            if startup_profiles is None:
+                startup_profiles = frame["profiles"]
+            assert frame["profiles"] == startup_profiles
+            current_roster = running_roster(frame)
+            if roster is None:
+                roster = current_roster
+            assert current_roster == roster, "Task attempts changed during the crossover"
             assert frame["overview"]["slots-total"] == 8 and frame["overview"]["slots-available"] == 3
         elapsed = (finish - start) / 1000
 
@@ -130,7 +207,7 @@ def score(bundle, latency_script):
         assert bool(routed) == (mode == "remote") and all(event["status"] == 200 for event in routed)
         latency_summary = merge_latency(before["latency"], after["latency"])
         assert latency_summary == read(path / "latency-summary.json")
-        all_periods.append({
+        summary = {
             "period": path.name, "mode": mode, "measuredSeconds": elapsed,
             "joinInputRecordsPerSecond": counter_rate(["join"], "read-records"),
             "sourceOutputRecordsPerSecond": counter_rate(["person", "auction"], "write-records"),
@@ -141,7 +218,10 @@ def score(bundle, latency_script):
             "cacheCapacityBytes": actual_cache[0] if actual_cache and len(set(actual_cache)) == 1 else None,
             "cacheMissFraction": misses / (hits + misses)
             if hits is not None and misses is not None and hits + misses > 0 else None,
-        })
+        }
+        if pod_samples:
+            summary["podResources"] = pod_resources_by_period(pod_samples, start, finish)
+        all_periods.append(summary)
 
     assert len(decisions) == 1, "Multiple execution generations in measured periods"
     relative = []
@@ -154,8 +234,75 @@ def score(bundle, latency_script):
             "joinIntervals": join_timeline(arm / "operational-snapshots.jsonl", spec, observed_intervals, events)}
 
 
+def workload_configuration(bundle):
+    deployment = read(bundle / "scout/deployment.json")["spec"]
+    job = deployment["job"]
+    args = job["args"].copy()
+    args[args.index("--q8-release-epoch-ms") + 1] = "<release>"
+    configuration = dict(deployment["flinkConfiguration"])
+    configuration.pop("$internal.pipeline.job-id")
+    return {
+        "job": {**job, "args": args},
+        "configuration": configuration,
+        "jobManagerResources": deployment["jobManager"]["resource"],
+        "taskManagerResources": deployment["taskManager"]["resource"],
+    }
+
+
+def compare_counterbalanced(first_bundle, second_bundle, latency_script):
+    """Compare the same fixed allocation and treatment at opposite positions in time."""
+    bundles = [first_bundle, second_bundle]
+    specs = [read(bundle / "execution-spec.json") for bundle in bundles]
+    first, second = specs
+    if first["run"] == second["run"] or first["job_id"] == second["job_id"]:
+        raise ValueError("Expected two different Q8 deployments")
+    for name in ("image", "operator", "vertices", "worker", "effective_gate_values",
+                 "collection_seconds", "crossover_first_offset_seconds", "crossover_period_seconds",
+                 "crossover_guard_seconds", "crossover_trailing_seconds"):
+        if first[name] != second[name]:
+            raise ValueError(f"The two Q8 deployments differ in {name}")
+    first_order, second_order = (spec["crossover_order"] for spec in specs)
+    reversed_modes = {"embedded": "remote", "remote": "embedded"}
+    if second_order != [reversed_modes[mode] for mode in first_order]:
+        raise ValueError("Expected the opposite mode at each position")
+    if read(first_bundle / "release-receipt.json") != read(second_bundle / "release-receipt.json"):
+        raise ValueError("The pinned Q8 releases differ")
+    if workload_configuration(first_bundle) != workload_configuration(second_bundle):
+        raise ValueError("The two initial workload configurations differ")
+    if (read(first_bundle / "scout/admission/confirmed-applied-profiles.json")
+            != read(second_bundle / "scout/admission/confirmed-applied-profiles.json")):
+        raise ValueError("The two startup allocations differ")
+
+    deployments = [score(bundle, latency_script) for bundle in bundles]
+    for deployment in deployments:
+        rates = {}
+        for mode in reversed_modes:
+            periods = [row for row in deployment["periods"] if row["mode"] == mode]
+            seconds = sum(row["measuredSeconds"] for row in periods)
+            rates[mode] = sum(row["joinInputRecordsPerSecond"] * row["measuredSeconds"]
+                              for row in periods) / seconds
+        deployment["measuredJoinInputByMode"] = rates
+        deployment["measuredRemoteChangePct"] = 100 * (rates["remote"] / rates["embedded"] - 1)
+
+    paired_changes = [deployment["pairedRemoteJoinInputChangePct"] for deployment in deployments]
+    return {
+        "experimentUnits": len(deployments),
+        "deployments": deployments,
+        "counterbalancedPairChangePct": [
+            100 * (sqrt((1 + normal / 100) * (1 + reverse / 100)) - 1)
+            for normal, reverse in zip(*paired_changes)
+        ],
+    }
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
+    parser.add_argument("--counterbalanced-bundle", type=Path, help="A second deployment with opposite mode order")
     args = parser.parse_args()
-    print(json.dumps(score(args.bundle, Path(__file__).with_name("q8-latency.py")), indent=2))
+    latency_script = Path(__file__).with_name("q8-latency.py")
+    if args.counterbalanced_bundle:
+        result = compare_counterbalanced(args.bundle, args.counterbalanced_bundle, latency_script)
+    else:
+        result = score(args.bundle, latency_script)
+    print(json.dumps(result, indent=2))
