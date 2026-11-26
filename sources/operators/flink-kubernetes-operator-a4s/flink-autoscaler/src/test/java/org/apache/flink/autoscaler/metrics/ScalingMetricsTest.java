@@ -46,6 +46,18 @@ public class ScalingMetricsTest {
     private static final double PREV_TPR = 123;
     private static final JobVertexID SOURCE = new JobVertexID();
 
+    @ParameterizedTest
+    @EnumSource(
+            value = FlinkMetric.class,
+            names = {"ROCKS_DB_BLOCK_CACHE_HIT", "ROCKS_DB_BLOCK_CACHE_MISS"})
+    void leavesCacheRateUnavailableWhenACounterIsMissing(FlinkMetric available) {
+        Map<ScalingMetric, Double> scalingMetrics = new HashMap<>();
+        ScalingMetrics.computeCacheRateMetrics(
+                Map.of(FlinkMetric.ROCKS_DB_BLOCK_CACHE_USAGE, aggSum(256.), available, aggSum(8.)),
+                scalingMetrics);
+        assertTrue(scalingMetrics.isEmpty());
+    }
+
     @Test
     public void testProcessingAndOutputMetrics() {
         var source = new JobVertexID();
