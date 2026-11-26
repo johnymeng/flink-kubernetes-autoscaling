@@ -395,7 +395,7 @@ public class A4SAggregatingVertexMetricsHandlerTest extends TestLogger {
                         "stack-distance-histogram",
                         "{\"bucketCounts\": [1, \"bad\", 3]}"));
 
-        var response =
+        A4SAggregatedMetricsResponseBody response =
                 handler.handleRequest(
                                 createRequest(jobId.toString(), jobVertexId.toString()),
                                 restfulGateway)
