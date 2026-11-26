@@ -69,57 +69,18 @@ public final class A4sPolicy implements ScalingPolicy {
     @Override
     public ScalingPlan evaluate(EvaluationRequest request) {
         var snapshot = request.snapshot;
-        var constraints = request.constraints;
-        long expiry = expiry(request);
-        if (!snapshot.metricsComplete || request.evaluatedAtMillis > expiry) {
-            return hold(
-                    request,
-                    Action.INSUFFICIENT_METRICS,
-                    "Incomplete or expired measurement window",
-                    0);
-        }
-        if (snapshot.reconfigurationInProgress || request.previousState.pendingDecisionId != null) {
-            return hold(request, Action.NO_CHANGE, "Previous reconfiguration is unresolved", 0);
-        }
-        if (snapshot.lastReconfigurationMillis != null
-                && request.evaluatedAtMillis - snapshot.lastReconfigurationMillis
-                        < constraints.cooldownMillis) {
-            return hold(request, Action.NO_CHANGE, "Reconfiguration cooldown", 0);
-        }
-        if (constraints.requiresPlacement
-                || constraints.latencyObjectiveMillis != null
-                || constraints.backlogRecoveryMillis != null) {
-            return hold(
-                    request, Action.UNSUPPORTED_ACTION, "Requested objective has no v1 model", 0);
+        var hold = snapshotHold(request);
+        if (hold != null) {
+            return hold;
         }
 
         var model = performanceModels.apply(request.policy);
         var frontiers = new ArrayList<Frontier>(snapshot.operators.size());
         var selected = new ArrayList<OperatorDecision>(snapshot.operators.size());
         for (var operator : snapshot.operators) {
-            if (operator.cacheSensitive && operator.targetRecordsPerSecond == null) {
-                return hold(
-                        request,
-                        Action.INSUFFICIENT_METRICS,
-                        "Missing demand for " + operator.operatorId,
-                        0);
-            }
-            if (!hasUsableCapacityAxis(request, operator)) {
-                return hold(
-                        request,
-                        Action.INSUFFICIENT_METRICS,
-                        "Actual cache capacity is unavailable for " + operator.operatorId,
-                        0);
-            }
-            if (operator.histogram != null
-                    && (operator.histogram.startMillis < snapshot.windowStartMillis
-                            || operator.histogram.endMillis != snapshot.windowEndMillis)) {
-                return hold(
-                        request,
-                        Action.INSUFFICIENT_METRICS,
-                        "Histogram does not cover the current measurement end for "
-                                + operator.operatorId,
-                        0);
+            String issue = operatorMetricsIssue(request, operator);
+            if (issue != null) {
+                return hold(request, Action.INSUFFICIENT_METRICS, issue, 0);
             }
             var frontier = new Frontier(request, operator, model);
             if (frontier.curve != null && !frontier.curve.hasMeasurements()) {
@@ -158,6 +119,52 @@ public final class A4sPolicy implements ScalingPolicy {
             }
         }
         throw new IllegalStateException("Invalid attempt limit");
+    }
+
+    private ScalingPlan snapshotHold(EvaluationRequest request) {
+        var snapshot = request.snapshot;
+        var constraints = request.constraints;
+        long expiry = expiry(request);
+        if (!snapshot.metricsComplete || request.evaluatedAtMillis > expiry) {
+            return hold(
+                    request,
+                    Action.INSUFFICIENT_METRICS,
+                    "Incomplete or expired measurement window",
+                    0);
+        }
+        if (snapshot.reconfigurationInProgress || request.previousState.pendingDecisionId != null) {
+            return hold(request, Action.NO_CHANGE, "Previous reconfiguration is unresolved", 0);
+        }
+        if (snapshot.lastReconfigurationMillis != null
+                && request.evaluatedAtMillis - snapshot.lastReconfigurationMillis
+                        < constraints.cooldownMillis) {
+            return hold(request, Action.NO_CHANGE, "Reconfiguration cooldown", 0);
+        }
+        if (constraints.requiresPlacement
+                || constraints.latencyObjectiveMillis != null
+                || constraints.backlogRecoveryMillis != null) {
+            return hold(
+                    request, Action.UNSUPPORTED_ACTION, "Requested objective has no v1 model", 0);
+        }
+        return null;
+    }
+
+    private static String operatorMetricsIssue(
+            EvaluationRequest request, OperatorMetrics operator) {
+        if (operator.cacheSensitive && operator.targetRecordsPerSecond == null) {
+            return "Missing demand for " + operator.operatorId;
+        }
+        if (!hasUsableCapacityAxis(request, operator)) {
+            return "Actual cache capacity is unavailable for " + operator.operatorId;
+        }
+        var histogram = operator.histogram;
+        if (histogram != null
+                && (histogram.startMillis < request.snapshot.windowStartMillis
+                        || histogram.endMillis != request.snapshot.windowEndMillis)) {
+            return "Histogram does not cover the current measurement end for "
+                    + operator.operatorId;
+        }
+        return null;
     }
 
     private static boolean hasUsableCapacityAxis(
@@ -445,16 +452,8 @@ public final class A4sPolicy implements ScalingPolicy {
                 || plan.policyState.version != request.previousState.version
                 || !Objects.equals(
                         plan.policyState.pendingDecisionId, request.previousState.pendingDecisionId)
-                || !snapshot.metricsComplete
-                || snapshot.reconfigurationInProgress
-                || request.previousState.pendingDecisionId != null
-                || plan.operators.size() != snapshot.operators.size()
-                || snapshot.lastReconfigurationMillis != null
-                        && request.evaluatedAtMillis - snapshot.lastReconfigurationMillis
-                                < request.constraints.cooldownMillis
-                || request.constraints.requiresPlacement
-                || request.constraints.latencyObjectiveMillis != null
-                || request.constraints.backlogRecoveryMillis != null) {
+                || snapshotHold(request) != null
+                || plan.operators.size() != snapshot.operators.size()) {
             return false;
         }
 
@@ -466,8 +465,7 @@ public final class A4sPolicy implements ScalingPolicy {
             if (decision == null
                     || current == null
                     || !sameAllocation(operator.current, current)
-                    || operator.cacheSensitive && operator.targetRecordsPerSecond == null
-                    || !hasUsableCapacityAxis(request, operator)) {
+                    || operatorMetricsIssue(request, operator) != null) {
                 return false;
             }
             int parallelism = decision.target.parallelism;
@@ -480,12 +478,10 @@ public final class A4sPolicy implements ScalingPolicy {
                 return false;
             }
             var frontier = new Frontier(request, operator, model);
-            if (frontier.curve == null
-                    && parallelism
-                            != Math.max(operator.startingParallelism, operator.minParallelism)) {
-                return false;
-            }
-            var expected = frontier.candidate(parallelism);
+            var expected =
+                    frontier.curve == null
+                            ? frontier.atOrAbove(operator.startingParallelism)
+                            : frontier.candidate(parallelism);
             if (expected == null
                     || !sameAllocation(expected.target, decision.target)
                     || !Objects.equals(

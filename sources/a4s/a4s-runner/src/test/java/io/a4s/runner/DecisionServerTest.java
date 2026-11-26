@@ -290,10 +290,48 @@ class DecisionServerTest {
         assertEquals("rate=1/4,seed=2", histogram.sampling);
         assertEquals("attempt-1", histogram.counterGeneration);
         assertEquals(20, histogram.missesOutsideBuckets);
-        assertEquals(ScalingPlan.Action.RESCALE, new A4sPolicy().evaluate(roundTrip).action);
+        var policy = new A4sPolicy();
+        var plan = policy.evaluate(roundTrip);
+        assertEquals(ScalingPlan.Action.RESCALE, plan.action);
+        assertTrue(policy.isApplicable(roundTrip, plan, 10_002));
         var stale = decode(input.replace("\"endMillis\":10000", "\"endMillis\":9000"));
-        assertEquals(
-                ScalingPlan.Action.INSUFFICIENT_METRICS, new A4sPolicy().evaluate(stale).action);
+        assertEquals(ScalingPlan.Action.INSUFFICIENT_METRICS, policy.evaluate(stale).action);
+        assertFalse(policy.isApplicable(stale, plan, 10_002));
+        var expired = decode(input.replace("10001", "40001"));
+        assertEquals(ScalingPlan.Action.INSUFFICIENT_METRICS, policy.evaluate(expired).action);
+        assertFalse(policy.isApplicable(expired, plan, 10_002));
+    }
+
+    @Test
+    void validatesTheFirstPermittedParallelismForAnOperatorWithoutCacheScaling() throws Exception {
+        var policy = new A4sPolicy();
+        var fixture =
+                EXAMPLE_JSON
+                        .replace("\"cacheSensitive\": true", "\"cacheSensitive\": false")
+                        .replace("\"startingParallelism\": 4", "\"startingParallelism\": 5")
+                        .replace(
+                                "\"maxCachePerTaskBytes\": 134217728",
+                                "\"maxCachePerTaskBytes\": 201326592")
+                        .replace(
+                                "\"totalCacheBudgetBytes\": 1073741824",
+                                "\"totalCacheBudgetBytes\": 1610612736")
+                        .replace("\"cpuBudgetCores\": 6", "\"cpuBudgetCores\": 8");
+        var request = decode(fixture);
+        var plan = policy.evaluate(request);
+        assertEquals(ScalingPlan.Action.RESCALE, plan.action);
+        assertEquals(6, plan.operators.get("join").target.parallelism);
+        var fromWire = Wire.decode(Wire.encode(plan), ScalingPlan.class);
+        assertTrue(policy.isApplicable(request, fromWire, 10_002));
+
+        var later =
+                policy.evaluate(
+                        decode(
+                                fixture.replace(
+                                        "\"startingParallelism\": 5",
+                                        "\"startingParallelism\": 7")));
+        assertEquals(ScalingPlan.Action.RESCALE, later.action);
+        assertEquals(8, later.operators.get("join").target.parallelism);
+        assertFalse(policy.isApplicable(request, later, 10_002));
     }
 
     @Test
