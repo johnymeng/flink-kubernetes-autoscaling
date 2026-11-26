@@ -85,7 +85,7 @@ def execute(args):
     if args.stateful_vertex not in vertices or not set(args.source_vertex) < vertices:
         raise RuntimeError("vertex IDs do not match the verified Q8 graph")
 
-    requirements = checked(request(args.rest, native_path + "?includeAppliedProfile=true"))
+    requirements = checked(request(args.rest, native_path + "?include-applied-profile=true"))
     if set(requirements) != vertices:
         raise RuntimeError("native profile response is incomplete")
     for _, parallelism in args.transition:
@@ -113,7 +113,7 @@ def execute(args):
     }
     (args.output / "run.json").write_text(json.dumps(protocol, indent=2) + "\n")
     paths = {"job": job_path, "workers": "/taskmanagers", "overview": "/overview",
-             "native": native_path + "?includeAppliedProfile=true"}
+             "native": native_path + "?include-applied-profile=true"}
     paths.update({vertex: job_path + "/vertices/" + vertex for vertex in vertices})
 
     if args.start_epoch is not None:
