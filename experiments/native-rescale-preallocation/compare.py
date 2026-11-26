@@ -12,6 +12,9 @@ METRICS = (
     "execution_interruption_upper_seconds",
     "observed_positive_progress_gap_seconds",
     "sustained_throughput_recovery_seconds",
+    "old_task_termination_seconds",
+    "replacement_graph_creation_seconds",
+    "checkpoint_restore_seconds",
 )
 
 
@@ -45,6 +48,13 @@ def wait_after_termination(row):
     return (stages["GRAPH_CREATE_REQUESTED"][0] - stages["OLD_TASKS_TERMINATED"][0]) / 1000
 
 
+def initialization_after_restore(row):
+    stages = row.get("stage_timestamps_ms", {})
+    restored = stages.get("CHECKPOINT_RESTORE_END", [])
+    running = stages.get("ALL_TARGET_TASKS_RUNNING", [])
+    return (running[0] - restored[0]) / 1000 if restored and running else None
+
+
 def compare_pair(baseline, treatment):
     if (baseline["flag"], treatment["flag"]) != ("false", "true"):
         raise ValueError("provide a disabled arm followed by an enabled arm")
@@ -61,10 +71,12 @@ def compare_pair(baseline, treatment):
         new_metrics = {key: new.get(key) for key in METRICS}
         old_metrics.update(
             wait_after_termination_seconds=wait_after_termination(old),
+            task_initialization_after_restore_seconds=initialization_after_restore(old),
             peak_datastream_pending_records=old.get("datastream_pending_records", {}).get("peak_records"),
         )
         new_metrics.update(
             wait_after_termination_seconds=wait_after_termination(new),
+            task_initialization_after_restore_seconds=initialization_after_restore(new),
             peak_datastream_pending_records=new.get("datastream_pending_records", {}).get("peak_records"),
         )
         rows.append({
@@ -95,7 +107,14 @@ def summarize(pairs):
             values = [row["enabled_minus_disabled"][key] for row in rows
                       if row["enabled_minus_disabled"][key] is not None
                       and row["enabled_result"] == row["disabled_result"] == "applied"]
+            arm_values = {
+                arm: [row[arm][key] for row in rows
+                      if row[f"{arm}_result"] == "applied" and row[arm][key] is not None]
+                for arm in ("disabled", "enabled")
+            }
             statistics[key] = {
+                **{f"median_{arm}": median(observed) if observed else None
+                   for arm, observed in arm_values.items()},
                 "pairs_with_timings": len(values),
                 "median_enabled_minus_disabled": median(values) if values else None,
                 "range": [min(values), max(values)] if values else None,
