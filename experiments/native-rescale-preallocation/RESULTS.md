@@ -70,3 +70,7 @@ P2 → P4 acquired one additional TaskManager. The old join processed another 20
 Both arms restored a checkpoint and resumed the same topics. Observed sums over all 24 partitions of each consumed topic were positive after redeployment and subsequently increased. The producer and broker ran through the native changes with their original identities. Initial and final broker offsets, consumer positions, and the Flink partition offset series are included in the raw evidence. The immediate arm's offset sampler resumed with batched queries partway through the window. Its initial run of the sampler returned errors and is retained in the archive. The lag snapshots are terminal observations. This pair cannot establish a reproducible reduction across SQL workloads or state sizes. SQL evidence covers Q20.
 
 [SQL paired observations](evidence/q20-exploratory-pair.json) · [SQL stage timeline](evidence/q20-stages.png)
+
+## Supplemental telemetry
+
+The first Q20 broker-capture attempt, `live-505f2dfb`, produced 120 samples across the 600-second window. There were 119 observed arrival-rate intervals and 109 complete consumer-lag samples. The native decision observer finished just before the launcher cutoff. The launcher's process check returned an error, skipping terminal logs and snapshots. Both cleanup exit codes were zero. The partial evidence is kept outside the paired comparison. The launcher now waits on the observer's actual exit status and preserves the timed window before capturing terminal evidence. [Supplemental telemetry protocol](telemetry/README.md)

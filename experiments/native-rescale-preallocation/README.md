@@ -28,7 +28,7 @@ python3 experiments/native-rescale-preallocation/observe.py \
   --output "$RUN_EVIDENCE"
 ```
 
-The observer verifies the effective feature setting and initial profiles before submitting manual targets. It records HTTP outcomes and times, task-attempt counters, workers and slots, requested and applied resources, checkpoints, and missing samples. Use the workload-specific sampler in parallel for other metrics. An uninstrumented DataStream workload cannot establish input backlog, independent source arrivals, or end-to-end latency quantiles. Use instrumented DataStream counters for its source backlog and the Kafka SQL Q8 variant for consumer lag, keeping the same producer and topics through each rescale.
+The observer verifies the effective feature setting and initial profiles before submitting manual targets. It records HTTP outcomes and times, task-attempt counters, workers and slots, requested and applied resources, checkpoints, and missing samples. Use the workload-specific sampler in parallel for other metrics. The matched Q8 runs used DataStream generator backlog counters. The supplemental protocol adds sampled auction-to-result latency on Q8 and continuous broker arrivals and checkpoint-aligned consumer lag on SQL Q20, keeping a single producer and the same topics through each rescale. [Supplemental telemetry protocol](telemetry/README.md)
 
 ## Score both arms consistently
 

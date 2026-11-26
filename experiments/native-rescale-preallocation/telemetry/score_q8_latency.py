@@ -51,7 +51,7 @@ def score(records, start, cutoff):
     for index, window in enumerate(range(start, cutoff, WINDOW_MS)):
         observations = windows[index]
         rows.append({
-            "timestamp_epoch": window / 1000,
+            "timestamp_epoch": (window + min(window + WINDOW_MS, cutoff)) / 2000,
             **{f"auction_to_result_{key}": value for key, value in quantiles(observations).items()},
         })
     return rows, {
