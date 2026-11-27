@@ -22,6 +22,7 @@ import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
+import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.spec.AbstractFlinkSpec;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
 import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
@@ -65,6 +66,15 @@ public abstract class FlinkResourceContext<CR extends AbstractFlinkResource<?, ?
 
     private KubernetesJobAutoScalerContext createJobAutoScalerContext() {
         Configuration conf = new Configuration(getDeployConfig(resource.getSpec()));
+        var conditionalJustin = AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED;
+        boolean nativeApplication =
+                resource instanceof FlinkDeployment
+                        && resource.getSpec().getJob() != null
+                        && getDeploymentMode() == KubernetesDeploymentMode.NATIVE;
+        conf.set(
+                conditionalJustin,
+                AutoScalerOptions.usesStandaloneA4s(conf)
+                        && conf.getOptional(conditionalJustin).orElse(nativeApplication));
         conf.set(
                 AutoScalerOptions.FLINK_CLIENT_TIMEOUT,
                 getOperatorConfig().getFlinkClientTimeout());

@@ -20,9 +20,14 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedVertexMetricsHeaders;
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.FlinkMetric;
+import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.topology.ShipStrategy;
+import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
@@ -57,6 +62,7 @@ import java.util.stream.Collectors;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.fail;
 
@@ -348,6 +354,68 @@ class RestApiMetricsCollectorTest {
         assertThat(curve.getPoints()).hasSize(2);
         assertThat(curve.getPoints().get(0).getCacheSizeBytes()).isEqualTo(1048576L);
         assertThat(curve.getPoints().get(1).getMissRate()).isEqualTo(0.25);
+    }
+
+    @Test
+    void requestsObservedBacklogOnlyForA4sSources() throws Exception {
+        var source = new JobVertexID();
+        var sink = new JobVertexID();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(source, Map.of(), 2, 8),
+                        new VertexInfo(sink, Map.of(source, ShipStrategy.REBALANCE), 2, 8));
+        var jobId = new JobID();
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var context =
+                new JobAutoScalerContext<>(
+                        jobId,
+                        jobId,
+                        JobStatus.RUNNING,
+                        conf,
+                        new UnregisteredMetricsGroup(),
+                        () ->
+                                new RestClusterClient<String>(
+                                        conf,
+                                        "test-cluster",
+                                        (c, e) -> new StandaloneClientHAServices("localhost")) {
+                                    @Override
+                                    public <
+                                                    M extends MessageHeaders<R, P, U>,
+                                                    U extends MessageParameters,
+                                                    R extends RequestBody,
+                                                    P extends ResponseBody>
+                                            CompletableFuture<P> sendRequest(
+                                                    M headers, U parameters, R request) {
+                                        assertThat(headers)
+                                                .isSameAs(
+                                                        A4SAggregatedVertexMetricsHeaders
+                                                                .getInstance());
+                                        String url =
+                                                MessageParameters.resolveUrl(
+                                                        headers.getTargetRestEndpointURL(),
+                                                        parameters);
+                                        boolean isSource = url.contains(source.toHexString());
+                                        assertEquals(
+                                                isSource,
+                                                url.contains("?get=observedSourceBacklogRecords"));
+                                        assertTrue(url.contains("observedTaskTimes"));
+                                        return CompletableFuture.completedFuture(
+                                                headers.getResponseClass()
+                                                        .cast(
+                                                                new A4SAggregatedMetricsResponseBody(
+                                                                        Status
+                                                                                .HISTOGRAM_UNAVAILABLE,
+                                                                        null,
+                                                                        isSource ? 0L : null)));
+                                    }
+                                });
+        var collector = new RestApiMetricsCollector<JobID, JobAutoScalerContext<JobID>>();
+        var observations = collector.queryAllA4sMetrics(context, topology, List.of(source, sink));
+        assertEquals(0L, observations.get(source).getObservedSourceBacklogRecords());
+        assertThat(observations.get(sink).getObservedSourceBacklogRecords()).isNull();
     }
 
     private static void assertMetricsEquals(

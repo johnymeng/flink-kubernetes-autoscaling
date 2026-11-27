@@ -38,6 +38,7 @@ import org.apache.flink.runtime.checkpoint.metadata.CheckpointMetadata;
 import org.apache.flink.runtime.client.DuplicateJobSubmissionException;
 import org.apache.flink.runtime.client.JobSubmissionException;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.dispatcher.cleanup.TestingCleanupRunnerFactory;
 import org.apache.flink.runtime.execution.librarycache.LibraryCacheManager;
 import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
@@ -51,8 +52,11 @@ import org.apache.flink.runtime.jobgraph.JobGraph;
 import org.apache.flink.runtime.jobgraph.JobGraphBuilder;
 import org.apache.flink.runtime.jobgraph.JobGraphTestUtils;
 import org.apache.flink.runtime.jobgraph.JobResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.StaleJustinExecutionException;
 import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.runtime.jobmaster.JobManagerRunner;
 import org.apache.flink.runtime.jobmaster.JobManagerRunnerResult;
 import org.apache.flink.runtime.jobmaster.JobManagerSharedServices;
@@ -147,10 +151,17 @@ import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.core.Is.is;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 /** Test for the {@link Dispatcher} component. */
 public class DispatcherTest extends AbstractDispatcherTest {
@@ -367,6 +378,55 @@ public class DispatcherTest extends AbstractDispatcherTest {
         } catch (ExecutionException e) {
             assertTrue(ExceptionUtils.findThrowable(e, JobSubmissionException.class).isPresent());
         }
+    }
+
+    @Test
+    public void testExclusiveVertexSlotsAreOptIn() throws Exception {
+        final JobVertex first = new JobVertex("first");
+        final JobVertex second = new JobVertex("second");
+        final SlotSharingGroup shared = new SlotSharingGroup();
+        first.setSlotSharingGroup(shared);
+        second.setSlotSharingGroup(shared);
+        final JobGraph graph = JobGraphTestUtils.streamingJobGraph(first, second);
+        final Configuration clusterConfiguration = new Configuration();
+        final String option = "pipeline.exclusive-vertex-slots";
+
+        Dispatcher.isolateDefaultSlotGroups(graph, clusterConfiguration);
+        assertSame(shared, first.getSlotSharingGroup());
+        assertSame(shared, second.getSlotSharingGroup());
+
+        clusterConfiguration.setBoolean(option, true);
+        graph.getJobConfiguration().setBoolean(option, false);
+        Dispatcher.isolateDefaultSlotGroups(graph, clusterConfiguration);
+        assertSame(shared, first.getSlotSharingGroup());
+        assertSame(shared, second.getSlotSharingGroup());
+
+        graph.getJobConfiguration().setBoolean(option, true);
+        Dispatcher.isolateDefaultSlotGroups(graph, clusterConfiguration);
+        assertNotSame(first.getSlotSharingGroup(), second.getSlotSharingGroup());
+        assertEquals(
+                Collections.singleton(first.getID()), first.getSlotSharingGroup().getJobVertexIds());
+        assertEquals(
+                Collections.singleton(second.getID()),
+                second.getSlotSharingGroup().getJobVertexIds());
+    }
+
+    @Test
+    public void testExclusiveVertexSlotsRejectSharedResourceBudget() {
+        final JobVertex first = new JobVertex("first");
+        final JobVertex second = new JobVertex("second");
+        final SlotSharingGroup shared = new SlotSharingGroup();
+        shared.setResourceProfile(ResourceProfile.newBuilder().setCpuCores(1).build());
+        first.setSlotSharingGroup(shared);
+        second.setSlotSharingGroup(shared);
+        final JobGraph graph = JobGraphTestUtils.streamingJobGraph(first, second);
+        graph.getJobConfiguration().setBoolean("pipeline.exclusive-vertex-slots", true);
+
+        assertThrows(
+                JobSubmissionException.class,
+                () -> Dispatcher.isolateDefaultSlotGroups(graph, new Configuration()));
+        assertSame(shared, first.getSlotSharingGroup());
+        assertSame(shared, second.getSlotSharingGroup());
     }
 
     @Test
@@ -1380,6 +1440,30 @@ public class DispatcherTest extends AbstractDispatcherTest {
         assertThatFuture(dispatcherGateway.requestJobResourceRequirements(jobId))
                 .eventuallySucceeds()
                 .isNotEqualTo(JobResourceRequirements.empty());
+    }
+
+    @Test
+    public void rejectedConditionalJustinUpdateDoesNotPersistRequirements() throws Exception {
+        configuration.set(JobManagerOptions.SCHEDULER, JobManagerOptions.SchedulerType.Adaptive);
+        final TestingJobGraphStore jobGraphStore = spy(TestingJobGraphStore.newBuilder().build());
+        haServices.setJobGraphStore(jobGraphStore);
+        jobGraphStore.start(null);
+        dispatcher = createAndStartDispatcher(
+                heartbeatServices, haServices, JobMasterServiceLeadershipRunnerFactory.INSTANCE);
+        final DispatcherGateway gateway = dispatcher.getSelfGateway(DispatcherGateway.class);
+        jobMasterLeaderElection.isLeader(UUID.randomUUID());
+        gateway.submitJob(jobGraph, TIMEOUT).get();
+        awaitStatus(gateway, jobId, JobStatus.CREATED);
+
+        final JobVertex vertex = jobGraph.getVertices().iterator().next();
+        final JustinResourceRequirements target = JustinResourceRequirements.newBuilder()
+                .setParallelismForJobVertex(vertex.getID(), 1, 1, ResourceProfile.UNKNOWN).build();
+        final JustinResourceRequirements guarded = new JustinResourceRequirements(
+                target.getJobVertexParallelisms(), "stale-execution");
+        assertThatFuture(gateway.updateJustinResourceRequirements(jobId, guarded))
+                .eventuallyFailsWith(ExecutionException.class)
+                .withCauseInstanceOf(StaleJustinExecutionException.class);
+        verify(jobGraphStore, never()).putJustinResourceRequirements(eq(jobId), any());
     }
 
     @Test

@@ -97,6 +97,10 @@ enum RocksDBSharedResourcesFactory {
         this.shareScope = shareScope;
     }
 
+    public boolean isSlotScoped() {
+        return shareScope == MemoryShareScope.SLOT;
+    }
+
     @Nullable
     public static RocksDBSharedResourcesFactory from(
             RocksDBMemoryConfiguration jobMemoryConfig, Environment env) {

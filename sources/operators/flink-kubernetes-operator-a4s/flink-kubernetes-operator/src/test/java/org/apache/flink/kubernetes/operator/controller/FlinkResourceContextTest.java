@@ -17,6 +17,7 @@
 
 package org.apache.flink.kubernetes.operator.controller;
 
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.TestUtils;
 import org.apache.flink.kubernetes.operator.TestingFlinkService;
@@ -24,6 +25,7 @@ import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
 import org.apache.flink.kubernetes.operator.api.spec.FlinkVersion;
+import org.apache.flink.kubernetes.operator.api.spec.KubernetesDeploymentMode;
 import org.apache.flink.kubernetes.operator.config.FlinkConfigManager;
 import org.apache.flink.kubernetes.operator.config.KubernetesOperatorConfigOptions;
 import org.apache.flink.kubernetes.operator.service.FlinkService;
@@ -33,6 +35,7 @@ import io.javaoperatorsdk.operator.api.reconciler.Context;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import java.time.Duration;
@@ -74,6 +77,26 @@ public class FlinkResourceContextTest {
         assertTrue(ctx.getFlinkService() == service);
         assertTrue(ctx.getFlinkService() == service);
         assertEquals(1, counter.get());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"LEGACY, false", "CORE_EMBEDDED, true", "CORE_REMOTE, true"})
+    void conditionalJustinDefaultsToStandaloneA4s(
+            AutoScalerOptions.A4sEngine engine, boolean enabled) {
+        var deployment = TestUtils.buildApplicationCluster();
+        deployment.getSpec().setMode(KubernetesDeploymentMode.NATIVE);
+        var config = deployment.getSpec().getFlinkConfiguration();
+        config.put(AutoScalerOptions.JUSTIN_ENABLED.key(), "true");
+        config.put(AutoScalerOptions.A4S_ENABLED.key(), "true");
+        if (engine == AutoScalerOptions.A4sEngine.LEGACY) {
+            config.put(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED.key(), "true");
+        } else {
+            config.put(AutoScalerOptions.A4S_ENGINE.key(), engine.name());
+        }
+
+        var effective = getContext(deployment).getJobAutoScalerContext().getConfiguration();
+        assertEquals(engine, effective.get(AutoScalerOptions.A4S_ENGINE));
+        assertEquals(enabled, effective.get(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED));
     }
 
     @Test

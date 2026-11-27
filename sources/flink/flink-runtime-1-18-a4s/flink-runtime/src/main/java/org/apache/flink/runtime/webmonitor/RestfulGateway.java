@@ -326,6 +326,12 @@ public interface RestfulGateway extends RpcGateway {
             JobID jobId) {
         throw new UnsupportedOperationException("Operation is not yet implemented.");
     }
+
+    default CompletableFuture<JustinResourceRequirements> requestJustinResourceRequirements(
+            JobID jobId, boolean includeExecutionToken) {
+        return requestJustinResourceRequirements(jobId);
+    }
+
     /**
      * Update {@link JustinResourceRequirements job resource requirements} for a given job. When the
      * returned future is complete the requirements have been updated and were persisted in HA, but

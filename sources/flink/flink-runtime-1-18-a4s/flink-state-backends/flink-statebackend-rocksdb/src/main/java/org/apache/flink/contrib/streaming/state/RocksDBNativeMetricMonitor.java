@@ -22,11 +22,14 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.metrics.View;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 
 import org.rocksdb.Cache;
 import org.rocksdb.ColumnFamilyHandle;
+import org.rocksdb.HistogramData;
+import org.rocksdb.HistogramType;
 import org.rocksdb.LRUCache;
 import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
@@ -42,6 +45,7 @@ import javax.annotation.concurrent.GuardedBy;
 import java.io.Closeable;
 import java.math.BigInteger;
 import java.util.Map;
+import java.util.UUID;
 import java.util.WeakHashMap;
 
 /**
@@ -66,6 +70,16 @@ public class RocksDBNativeMetricMonitor implements Closeable {
     @Nullable
     @GuardedBy("lock")
     private Statistics statistics;
+
+    @GuardedBy("lock")
+    private long cacheCounterSequence;
+
+    @GuardedBy("lock")
+    private long dbGetTimingSequence;
+
+    @Nullable
+    @GuardedBy("lock")
+    private LiveStateSizeView liveStateSizeView;
 
     @Nullable private final LRUCache lruCache;
     private final boolean shardsEnabled;
@@ -95,6 +109,7 @@ public class RocksDBNativeMetricMonitor implements Closeable {
             }
         }
         registerStatistics();
+        registerDatabaseObservations();
         registerStackDistanceHistogram();
     }
 
@@ -112,6 +127,61 @@ public class RocksDBNativeMetricMonitor implements Closeable {
                         String.format("rocksdb.%s", tickerType.name().toLowerCase()),
                         new RocksDBNativeStatisticsMetricView(tickerType));
             }
+        }
+    }
+
+    private void registerDatabaseObservations() {
+        final boolean reportCacheCounters =
+                statistics != null
+                        && options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_HIT)
+                        && options.getMonitorTickerTypes().contains(TickerType.BLOCK_CACHE_MISS);
+        final boolean reportLiveState =
+                options.getProperties()
+                        .contains(RocksDBProperty.EstimateLiveDataSize.getRocksDBProperty());
+        final boolean reportGetTiming = statistics != null && options.isDbGetTimingEnabled();
+        if (!reportCacheCounters && !reportLiveState && !reportGetTiming) {
+            return;
+        }
+        final String databaseId = UUID.randomUUID().toString();
+        if (reportCacheCounters) {
+            metricGroup.gauge(
+                    MetricNames.A4S_BLOCK_CACHE_COUNTERS, () -> sampleCacheCounters(databaseId));
+        }
+        if (reportLiveState) {
+            liveStateSizeView = new LiveStateSizeView(databaseId);
+            metricGroup.gauge(MetricNames.A4S_ROCKSDB_STATE_SIZE, liveStateSizeView);
+        }
+        if (reportGetTiming) {
+            metricGroup.gauge(
+                    MetricNames.A4S_ROCKSDB_GET_TIMING, () -> sampleDbGetTiming(databaseId));
+        }
+    }
+
+    private String sampleCacheCounters(String databaseId) {
+        synchronized (lock) {
+            if (statistics == null || cacheCounterSequence == Long.MAX_VALUE) {
+                return "";
+            }
+            long hits = statistics.getTickerCount(TickerType.BLOCK_CACHE_HIT);
+            long misses = statistics.getTickerCount(TickerType.BLOCK_CACHE_MISS);
+            return databaseId + ":" + (++cacheCounterSequence) + ":" + hits + ":" + misses;
+        }
+    }
+
+    private String sampleDbGetTiming(String databaseId) {
+        synchronized (lock) {
+            if (statistics == null || dbGetTimingSequence == Long.MAX_VALUE) {
+                return "";
+            }
+            HistogramData histogram = statistics.getHistogramData(HistogramType.DB_GET);
+            long micros = histogram.getSum();
+            long count = histogram.getCount();
+            if (micros < 0 || micros > Long.MAX_VALUE / 1_000 || count < 0
+                    || count == 0 && micros != 0) {
+                return "";
+            }
+            long nanos = micros * 1_000;
+            return databaseId + ":" + (++dbGetTimingSequence) + ":" + nanos + ":" + count;
         }
     }
 
@@ -182,6 +252,9 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         synchronized (lock) {
             rocksDB = null;
             statistics = null;
+            if (liveStateSizeView != null) {
+                liveStateSizeView.observation = "";
+            }
         }
     }
 
@@ -271,6 +344,43 @@ public class RocksDBNativeMetricMonitor implements Closeable {
         @Override
         public void update() {
             setStatistics(this);
+        }
+    }
+
+    /** A periodically refreshed estimate across the database's column families. */
+    private final class LiveStateSizeView implements Gauge<String>, View {
+        private final String databaseId;
+        private volatile String observation = "";
+
+        @GuardedBy("lock")
+        private long sequence;
+
+        private LiveStateSizeView(String databaseId) {
+            this.databaseId = databaseId;
+        }
+
+        @Override
+        public String getValue() {
+            return observation;
+        }
+
+        @Override
+        public void update() {
+            synchronized (lock) {
+                if (rocksDB == null || sequence == Long.MAX_VALUE) {
+                    observation = "";
+                    return;
+                }
+                try {
+                    long bytes =
+                            rocksDB.getAggregatedLongProperty(
+                                    RocksDBProperty.EstimateLiveDataSize.getRocksDBProperty());
+                    observation = bytes < 0 ? "" : databaseId + ":" + (++sequence) + ":" + bytes;
+                } catch (RocksDBException e) {
+                    observation = "";
+                    LOG.debug("Unable to observe RocksDB live state size", e);
+                }
+            }
         }
     }
 

@@ -1,0 +1,36 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.a4s</groupId>
+    <artifactId>a4s-parent</artifactId>
+    <version>0.1.0</version>
+  </parent>
+  <artifactId>a4s-core</artifactId>
+  <dependencies>
+    <dependency>
+      <groupId>io.a4s</groupId>
+      <artifactId>a4s-api</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions><execution>
+          <id>core-production-dependencies</id>
+          <goals><goal>enforce</goal></goals>
+          <configuration><rules><bannedDependencies>
+            <excludes><exclude>*:*</exclude></excludes>
+            <includes>
+              <include>*:*:*:*:test</include>
+              <include>io.a4s:a4s-api</include>
+            </includes>
+            <message>A4S Core may depend only on A4S API in production.</message>
+          </bannedDependencies></rules></configuration>
+        </execution></executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

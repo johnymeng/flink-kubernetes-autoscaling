@@ -303,6 +303,12 @@ public class RocksDBNativeMetricOptions implements Serializable {
                     .withDescription(
                             "Monitor the duration of writer requiring to wait for compaction or flush to finish in RocksDB.");
 
+    public static final ConfigOption<Boolean> MONITOR_DB_GET_TIMING =
+            ConfigOptions.key("state.backend.rocksdb.metrics.a4s-db-get-timing")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription("Expose the cumulative RocksDB DB_GET duration and count to A4S.");
+
     // --------------------------------------------------------------------------------------------
     //  RocksDB stack distance histogram metrics
     // --------------------------------------------------------------------------------------------
@@ -436,6 +442,7 @@ public class RocksDBNativeMetricOptions implements Serializable {
 
     private static void configureStatisticsMetrics(
             RocksDBNativeMetricOptions options, ReadableConfig config) {
+        options.monitorDbGetTiming = config.get(MONITOR_DB_GET_TIMING);
         for (Map.Entry<ConfigOption<Boolean>, TickerType> entry : tickerTypeMapping.entrySet()) {
             if (config.get(entry.getKey())) {
                 options.monitorTickerTypes.add(entry.getValue());
@@ -472,6 +479,7 @@ public class RocksDBNativeMetricOptions implements Serializable {
 
     private final Set<String> properties;
     private final Set<TickerType> monitorTickerTypes;
+    private boolean monitorDbGetTiming;
     private boolean columnFamilyAsVariable = COLUMN_FAMILY_AS_VARIABLE.defaultValue();
     private boolean monitorStackDistanceHistogram = MONITOR_STACK_DISTANCE_HISTOGRAM.defaultValue();
     private int stackDistanceHistogramBucketSizeScaling =
@@ -670,7 +678,11 @@ public class RocksDBNativeMetricOptions implements Serializable {
 
     /** @return true if RocksDB statistics metrics are enabled, false otherwise. */
     public boolean isStatisticsEnabled() {
-        return !monitorTickerTypes.isEmpty();
+        return monitorDbGetTiming || !monitorTickerTypes.isEmpty();
+    }
+
+    public boolean isDbGetTimingEnabled() {
+        return monitorDbGetTiming;
     }
 
     /** Enables the stack distance histogram metric. */

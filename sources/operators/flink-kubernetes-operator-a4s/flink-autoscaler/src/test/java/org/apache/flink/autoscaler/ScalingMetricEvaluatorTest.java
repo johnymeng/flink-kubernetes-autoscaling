@@ -19,6 +19,7 @@ package org.apache.flink.autoscaler;
 
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
@@ -27,10 +28,15 @@ import org.apache.flink.autoscaler.metrics.MetricAggregator;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -49,6 +55,7 @@ import static org.apache.flink.autoscaler.config.AutoScalerOptions.TARGET_UTILIZ
 import static org.apache.flink.autoscaler.topology.ShipStrategy.REBALANCE;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Scaling evaluator test. */
@@ -88,21 +95,192 @@ public class ScalingMetricEvaluatorTest {
                             curves));
         }
 
-        var evaluated =
-                evaluator.evaluate(
-                        new Configuration(),
-                        new CollectedMetricHistory(topology, history, history.firstKey()),
-                        Duration.ZERO);
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var collected = new CollectedMetricHistory(topology, history, history.firstKey());
+        var legacy = evaluator.evaluate(conf, collected, Duration.ZERO);
+        assertEquals(Set.of(downstream), legacy.getMemoryParallelismCurves().keySet());
+
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        var evaluated = evaluator.evaluate(conf, collected, Duration.ZERO);
+        assertTrue(evaluated.getMemoryParallelismCurves().isEmpty());
         assertEquals(
                 EvaluatedScalingMetric.avg(100),
                 evaluated.getVertexMetrics().get(source).get(ScalingMetric.TARGET_DATA_RATE));
-        assertEquals(Set.of(downstream), evaluated.getMemoryParallelismCurves().keySet());
+        assertEquals(Set.of(downstream), evaluated.getMissRateCurves().keySet());
+        assertEquals(1024 * 1024,
+                evaluated.getMissRateCurves().get(downstream).getPoints().get(0).getCacheSizeBytes());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "100, 120, 180, 8",
+        "100, 100, 100, 0",
+        "100, , 180,",
+        "100, 80, 180,",
+        "100, NaN, 180,"
+    })
+    void normalizesOutputThroughputOnlyForACompleteMonotonicWindow(
+            double first, Double middle, double last, Double expectedRate) {
+        var source = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(source, Map.of(), 1, 8));
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        Double[] counters = {first, middle, last};
+        int[] seconds = {0, 4, 10};
+        for (int i = 0; i < counters.length; i++) {
+            var metrics = new HashMap<ScalingMetric, Double>();
+            metrics.put(ScalingMetric.LAG, 0.0);
+            metrics.put(ScalingMetric.NUM_RECORDS_IN, seconds[i] * 10.0);
+            if (counters[i] != null) {
+                metrics.put(ScalingMetric.OBSERVED_NUM_RECORDS_OUT, counters[i]);
+            }
+            history.put(
+                    Instant.ofEpochSecond(seconds[i]),
+                    new CollectedMetrics(Map.of(source, metrics), Map.of(), Map.of()));
+        }
+        var evaluated =
+                evaluator.evaluate(
+                        conf,
+                        new CollectedMetricHistory(topology, history, history.firstKey()),
+                        Duration.ZERO);
+        var profile = ResourceProfile.newBuilder().setManagedMemoryMB(116).build();
+        var request =
+                new Flink118A4sAdapter()
+                        .request(
+                                "test-job",
+                                "generation-1",
+                                history.lastKey(),
+                                topology,
+                                evaluated,
+                                Map.of(),
+                                Map.of(source, profile),
+                                conf,
+                                true,
+                                Map.of());
         assertEquals(
-                1.0,
-                evaluated.getMemoryParallelismCurves()
-                        .get(downstream)
-                        .getMemoryMbForParallelism(1)
-                        .orElseThrow());
+                expectedRate, request.snapshot.operators.get(0).telemetry.outputRecordsPerSecond);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"valid", "missing", "restart", "reset", "no-elapsed", "invalid"})
+    void transportsOnlyCompleteSameRosterTaskTimeWindows(String mode) {
+        var vertex = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 8));
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var start = new TaskTimeTotals("roster-a", 100, 500, 300);
+        var middle = new TaskTimeTotals("roster-a", 200, 600, 350);
+        var end = new TaskTimeTotals("roster-a", 700, 700, 500);
+        switch (mode) {
+            case "missing":
+                middle = null;
+                break;
+            case "restart":
+                middle = new TaskTimeTotals("roster-b", 200, 600, 350);
+                break;
+            case "reset":
+                middle = new TaskTimeTotals("roster-a", 99, 600, 350);
+                break;
+            case "no-elapsed":
+                middle = start;
+                end = start;
+                break;
+            case "invalid":
+                middle = new TaskTimeTotals("roster-a", Double.NaN, 600, 350);
+                break;
+            default:
+                assertEquals("valid", mode);
+        }
+        TaskTimeTotals[] counters = {start, middle, end};
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        for (int i = 0; i < counters.length; i++) {
+            var metrics = new HashMap<ScalingMetric, Double>();
+            metrics.put(ScalingMetric.LAG, 0.0);
+            metrics.put(ScalingMetric.NUM_RECORDS_IN, i * 100.0);
+            var sample = new CollectedMetrics(Map.of(vertex, metrics), Map.of());
+            if (counters[i] != null) {
+                sample.setTaskTimeTotals(Map.of(vertex, counters[i]));
+            }
+            history.put(Instant.ofEpochSecond(i * 5), sample);
+        }
+
+        var evaluated =
+                evaluator.evaluate(
+                        conf,
+                        new CollectedMetricHistory(topology, history, history.firstKey()),
+                        Duration.ZERO);
+        var profile = ResourceProfile.newBuilder().setManagedMemoryMB(116).build();
+        var request =
+                new Flink118A4sAdapter()
+                        .request(
+                                "job",
+                                "generation-1",
+                                history.lastKey(),
+                                topology,
+                                evaluated,
+                                Map.of(),
+                                Map.of(vertex, profile),
+                                conf,
+                                true,
+                                Map.of());
+        var telemetry = request.snapshot.operators.get(0).telemetry;
+        if (mode.equals("valid")) {
+            assertEquals(0.6, telemetry.busyFraction);
+            assertEquals(0.2, telemetry.idleFraction);
+            assertEquals(0.2, telemetry.backpressuredFraction);
+        } else {
+            assertNull(telemetry.idleFraction);
+            assertNull(telemetry.backpressuredFraction);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"0, 0", "27, 27", ","})
+    void normalizesOnlyObservedSourceBacklog(Long observed, Long expected) {
+        var source = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(source, Map.of(), 1, 8));
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        for (int second : new int[] {0, 10}) {
+            var metrics = new HashMap<ScalingMetric, Double>();
+            metrics.put(ScalingMetric.LAG, 0.0);
+            metrics.put(ScalingMetric.NUM_RECORDS_IN, second * 10.0);
+            history.put(
+                    Instant.ofEpochSecond(second),
+                    new CollectedMetrics(Map.of(source, metrics), Map.of(), Map.of()));
+        }
+        var collected = new CollectedMetricHistory(topology, history, history.firstKey());
+        if (observed != null) {
+            collected.setObservedSourceBacklogs(Map.of(source, observed));
+        }
+        var evaluated = evaluator.evaluate(conf, collected, Duration.ZERO);
+        var profile = ResourceProfile.newBuilder().setManagedMemoryMB(116).build();
+        var request =
+                new Flink118A4sAdapter()
+                        .request(
+                                "test-job",
+                                "generation-1",
+                                history.lastKey(),
+                                topology,
+                                evaluated,
+                                Map.of(),
+                                Map.of(source, profile),
+                                conf,
+                                true,
+                                Map.of());
+        assertEquals(expected, request.snapshot.operators.get(0).telemetry.sourceBacklogRecords);
+        assertEquals(
+                0.0, evaluated.getVertexMetrics().get(source).get(ScalingMetric.LAG).getCurrent());
     }
 
     @Test

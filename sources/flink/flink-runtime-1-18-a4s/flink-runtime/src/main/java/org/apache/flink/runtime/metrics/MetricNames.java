@@ -75,6 +75,7 @@ public class MetricNames {
     public static final String TASK_BACK_PRESSURED_TIME = "backPressuredTimeMs" + SUFFIX_RATE;
     public static final String ACC_TASK_IDLE_TIME = "accumulateIdleTimeMs";
     public static final String ACC_TASK_BUSY_TIME = "accumulateBusyTimeMs";
+    public static final String A4S_TASK_TIME_TOTALS = "a4s-task-time-totals";
     public static final String ACC_TASK_BACK_PRESSURED_TIME = "accumulateBackPressuredTimeMs";
     public static final String TASK_SOFT_BACK_PRESSURED_TIME =
             "softBackPressuredTimeMs" + SUFFIX_RATE;
@@ -122,6 +123,12 @@ public class MetricNames {
     public static final String LOAD_COUNT = "loadCount";
     public static final String NUM_LOAD_FAILURES = "numLoadFailures";
     public static final String LATEST_LOAD_TIME = "latestLoadTime";
+    public static final String A4S_SLOT_BLOCK_CACHE = "a4s-slot-block-cache";
+    public static final String A4S_SLOT_BLOCK_CACHE_USAGE = "a4s-slot-block-cache-usage";
+    public static final String A4S_BLOCK_CACHE_COUNTERS = "a4s-block-cache-counters";
+    public static final String A4S_ROCKSDB_STATE_SIZE = "a4s-rocksdb-live-state-size";
+    public static final String A4S_ROCKSDB_GET_TIMING = "a4s-rocksdb-get-timing";
+
     public static final String NUM_CACHED_RECORDS = "numCachedRecords";
     public static final String NUM_CACHED_BYTES = "numCachedBytes";
 

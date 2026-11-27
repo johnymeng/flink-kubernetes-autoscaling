@@ -40,6 +40,16 @@ under the License.
 
     <dependencies>
         <dependency>
+            <groupId>io.a4s</groupId>
+            <artifactId>a4s-core</artifactId>
+            <version>0.1.0</version>
+        </dependency>
+        <dependency>
+            <groupId>io.a4s</groupId>
+            <artifactId>a4s-http</artifactId>
+            <version>0.1.0</version>
+        </dependency>
+        <dependency>
             <groupId>org.apache.flink</groupId>
             <artifactId>flink-runtime</artifactId>
             <version>${flink.version}</version>

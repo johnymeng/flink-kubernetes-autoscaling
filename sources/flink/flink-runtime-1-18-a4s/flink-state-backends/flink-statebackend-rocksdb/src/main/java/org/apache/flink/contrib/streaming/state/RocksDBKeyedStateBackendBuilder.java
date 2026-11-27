@@ -33,6 +33,7 @@ import org.apache.flink.contrib.streaming.state.snapshot.RocksNativeFullSnapshot
 import org.apache.flink.contrib.streaming.state.ttl.RocksDbTtlCompactFiltersManager;
 import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackendBuilder;
 import org.apache.flink.runtime.state.BackendBuildingException;
@@ -60,8 +61,10 @@ import org.rocksdb.ColumnFamilyHandle;
 import org.rocksdb.ColumnFamilyOptions;
 import org.rocksdb.DBOptions;
 import org.rocksdb.RocksDB;
+import org.rocksdb.RocksDBException;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 
 import java.io.File;
 import java.io.IOException;
@@ -90,6 +93,8 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
 
     /** String that identifies the operator that owns this backend. */
     private final String operatorIdentifier;
+
+    @Nullable private String slotCacheId;
 
     private final EmbeddedRocksDBStateBackend.PriorityQueueStateType priorityQueueStateType;
 
@@ -224,6 +229,27 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
         return this;
     }
 
+    void setSlotCacheId(String slotCacheId) {
+        this.slotCacheId = slotCacheId;
+    }
+
+    private void registerSlotCacheCapacity(RocksDB db) {
+        if (slotCacheId == null) {
+            return;
+        }
+        try {
+            final long capacity =
+                    db.getLongProperty(RocksDBProperty.BlockCacheCapacity.getRocksDBProperty());
+            if (capacity > 0) {
+                // Slot cache capacity is fixed for this backend's lifetime.
+                final String observation = slotCacheId + ":" + capacity;
+                metricGroup.gauge(MetricNames.A4S_SLOT_BLOCK_CACHE, () -> observation);
+            }
+        } catch (RocksDBException e) {
+            logger.debug("Unable to observe RocksDB slot cache capacity", e);
+        }
+    }
+
     RocksDBKeyedStateBackendBuilder<K> setNativeMetricOptions(
             RocksDBNativeMetricOptions nativeMetricOptions) {
         this.nativeMetricOptions = nativeMetricOptions;
@@ -335,6 +361,7 @@ public class RocksDBKeyedStateBackendBuilder<K> extends AbstractKeyedStateBacken
                 }
             }
 
+            registerSlotCacheCapacity(db);
             writeBatchWrapper =
                     new RocksDBWriteBatchWrapper(
                             db, optionsContainer.getWriteOptions(), writeBatchSize);

@@ -21,8 +21,10 @@ import org.apache.flink.autoscaler.ScalingSummary;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AbstractAutoScalerStateStoreTest;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.kubernetes.operator.autoscaler.KubernetesJobAutoScalerContext;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
@@ -31,6 +33,8 @@ import io.fabric8.kubernetes.client.server.mock.EnableKubernetesMockClient;
 import io.javaoperatorsdk.operator.processing.event.ResourceID;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.Collections;
@@ -78,6 +82,57 @@ public class KubernetesAutoScalerStateStoreTest
     @Override
     protected void preSetup() {
         configMapStore = new ConfigMapStore(kubernetesClient);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void pendingA4sTargetSurvivesStateStoreRecreation(boolean hasFingerprint) throws Exception {
+        var vertex = new JobVertexID().toHexString();
+        var intent =
+                new A4sScalingIntent(
+                        ctx.getJobID().toString(),
+                        "execution-token",
+                        1234,
+                        hasFingerprint
+                                ? A4sScalingIntent.fingerprint(ctx.getConfiguration())
+                                : null,
+                        Map.of(vertex, "2"),
+                        Map.of(vertex, "profile"),
+                        Map.of(vertex, 1));
+        stateStore.storeA4sScalingIntent(ctx, intent);
+        stateStore.flush(ctx);
+
+        var recovered = createPhysicalAutoScalerStateStore();
+        var persistedIntent = recovered.getA4sScalingIntent(ctx).orElseThrow();
+        assertThat(persistedIntent).isEqualTo(intent);
+        assertThat(persistedIntent.matchesConfiguration(ctx.getConfiguration()))
+                .isEqualTo(hasFingerprint);
+        assertThat(recovered.getParallelismOverrides(ctx)).isEmpty();
+        assertThat(recovered.getResourceProfileOverrides(ctx)).isEmpty();
+
+        recovered.removeA4sScalingIntent(ctx);
+        recovered.flush(ctx);
+        assertThat(createPhysicalAutoScalerStateStore().getA4sScalingIntent(ctx)).isEmpty();
+    }
+
+    @Test
+    void taskTimeTotalsSurviveConfigMapRecovery() throws Exception {
+        var vertex = new JobVertexID();
+        var sample = new CollectedMetrics(Map.of(), Map.of());
+        sample.setTaskTimeTotals(Map.of(vertex, new TaskTimeTotals("roster-1", 800.5, 1200, 200)));
+        var history = new TreeMap<Instant, CollectedMetrics>();
+        history.put(Instant.EPOCH, new CollectedMetrics(Map.of(), Map.of()));
+        history.put(Instant.EPOCH.plusSeconds(1), sample);
+        stateStore.storeCollectedMetrics(ctx, history);
+        stateStore.flush(ctx);
+
+        var recovered = createPhysicalAutoScalerStateStore().getCollectedMetrics(ctx);
+        assertThat(recovered.get(recovered.firstKey()).getTaskTimeTotals()).isEmpty();
+        var times = recovered.get(recovered.lastKey()).getTaskTimeTotals().get(vertex);
+        assertThat(times.rosterId).isEqualTo("roster-1");
+        assertThat(times.busyMillis).isEqualTo(800.5);
+        assertThat(times.idleMillis).isEqualTo(1200);
+        assertThat(times.backpressuredMillis).isEqualTo(200);
     }
 
     @Test

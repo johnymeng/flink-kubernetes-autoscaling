@@ -17,6 +17,7 @@
 
 package org.apache.flink.autoscaler;
 
+import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
@@ -28,10 +29,13 @@ import org.apache.flink.autoscaler.metrics.FlinkMetric;
 import org.apache.flink.autoscaler.metrics.MetricNotFoundException;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.metrics.ScalingMetrics;
-import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.IOMetrics;
 import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.execution.ExecutionState;
@@ -132,9 +136,13 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         var filteredVertexMetricNames = queryFilteredMetricNames(ctx, topology, isStabilizing);
 
         // Aggregated job vertex metrics collected from Flink based on the filtered metric names
-        var collectedVertexMetrics = queryAllAggregatedMetrics(ctx, filteredVertexMetricNames);        
-        var collectedMissRateCurves =
-                queryAllMissRateCurves(ctx, filteredVertexMetricNames.keySet());
+        var collectedVertexMetrics = queryAllAggregatedMetrics(ctx, filteredVertexMetricNames);
+        var a4sObservations = queryAllA4sMetrics(ctx, topology, filteredVertexMetricNames.keySet());
+        var collectedMissRateCurves = new HashMap<JobVertexID, MissRateCurve>();
+        a4sObservations.forEach(
+                (vertex, response) ->
+                        response.getCurve()
+                                .ifPresent(curve -> collectedMissRateCurves.put(vertex, curve)));
 
         var collectedJmMetrics = queryJmMetrics(ctx);
         var collectedTmMetrics = queryTmMetrics(ctx);
@@ -150,6 +158,16 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                         topology,
                         conf);
 
+        Map<JobVertexID, TaskTimeTotals> taskTimeTotals = new HashMap<>();
+        a4sObservations.forEach(
+                (vertex, response) -> {
+                    TaskTimeTotals taskTimes = response.getObservedTaskTimes();
+                    if (taskTimes != null && !topology.get(vertex).isFinished()) {
+                        taskTimeTotals.put(vertex, taskTimes);
+                    }
+                });
+        scalingMetrics.setTaskTimeTotals(Map.copyOf(taskTimeTotals));
+
         // Add scaling metrics to history if they were computed successfully
         metricHistory.put(now, scalingMetrics);
 
@@ -160,6 +178,57 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
         }
 
         var collectedMetrics = new CollectedMetricHistory(topology, metricHistory, jobRunningTs);
+        Map<JobVertexID, Long> observedSourceBacklogs = new HashMap<>();
+        Map<JobVertexID, Long> observedBlockCacheCapacities = new HashMap<>();
+        Map<JobVertexID, Long> observedBlockCacheUsage = new HashMap<>();
+        Map<JobVertexID, CacheCounters> observedBlockCacheCounters = new HashMap<>();
+        Map<JobVertexID, Long> observedStateSizes = new HashMap<>();
+        Map<JobVertexID, StateAccessTiming> observedStateAccessTiming = new HashMap<>();
+        a4sObservations.forEach(
+                (vertex, response) -> {
+                    Long capacity = response.getObservedBlockCacheCapacityBytes();
+                    if (capacity != null && capacity > 0 && !topology.get(vertex).isFinished()) {
+                        observedBlockCacheCapacities.put(vertex, capacity);
+                    }
+                    Long cacheUsage = response.getObservedBlockCacheUsageBytes();
+                    if (cacheUsage != null
+                            && cacheUsage >= 0
+                            && !topology.get(vertex).isFinished()) {
+                        observedBlockCacheUsage.put(vertex, cacheUsage);
+                    }
+                    CacheCounters counters = response.getObservedBlockCacheCounters();
+                    if (counters != null
+                            && counters.hits >= 0
+                            && counters.misses >= 0
+                            && !topology.get(vertex).isFinished()) {
+                        observedBlockCacheCounters.put(vertex, counters);
+                    }
+                    StateAccessTiming timing = response.getObservedStateAccessTiming();
+                    if (timing != null
+                            && timing.nanos >= 0
+                            && timing.count >= 0
+                            && (timing.count != 0 || timing.nanos == 0)
+                            && !topology.get(vertex).isFinished()) {
+                        observedStateAccessTiming.put(vertex, timing);
+                    }
+                    Long stateSize = response.getObservedStateSizeBytes();
+                    if (stateSize != null && stateSize >= 0 && !topology.get(vertex).isFinished()) {
+                        observedStateSizes.put(vertex, stateSize);
+                    }
+                    Long pending = response.getObservedSourceBacklogRecords();
+                    if (pending != null
+                            && pending >= 0
+                            && topology.isSource(vertex)
+                            && !topology.get(vertex).isFinished()) {
+                        observedSourceBacklogs.put(vertex, pending);
+                    }
+                });
+        collectedMetrics.setObservedSourceBacklogs(Map.copyOf(observedSourceBacklogs));
+        collectedMetrics.setObservedBlockCacheCapacities(Map.copyOf(observedBlockCacheCapacities));
+        collectedMetrics.setObservedBlockCacheUsage(Map.copyOf(observedBlockCacheUsage));
+        collectedMetrics.setObservedBlockCacheCounters(Map.copyOf(observedBlockCacheCounters));
+        collectedMetrics.setObservedStateSizes(Map.copyOf(observedStateSizes));
+        collectedMetrics.setObservedStateAccessTiming(Map.copyOf(observedStateAccessTiming));
         if (now.isBefore(windowFullTime)) {
             LOG.info("Metric window not full until {}", readable(windowFullTime));
         } else {
@@ -522,8 +591,8 @@ public abstract class ScalingMetricCollector<KEY, Context extends JobAutoScalerC
                     Context ctx,
                     Map<JobVertexID, Map<String, FlinkMetric>> filteredVertexMetricNames);
 
-    protected Map<JobVertexID, MissRateCurve> queryAllMissRateCurves(
-            Context ctx, Collection<JobVertexID> jobVertexIds) {
+    protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
+            Context ctx, JobTopology topology, Collection<JobVertexID> jobVertexIds) {
         return Collections.emptyMap();
     }
 

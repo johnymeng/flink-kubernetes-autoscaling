@@ -56,6 +56,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.usesStandaloneA4s;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
 
 /**
@@ -125,12 +126,10 @@ public abstract class AbstractFlinkResourceReconciler<
             return;
         }
 
-        SPEC lastReconciledSpec =
-                cr.getStatus().getReconciliationStatus().deserializeLastReconciledSpec();
-        SPEC currentDeploySpec = cr.getSpec();
-
         applyAutoscaler(ctx);
 
+        SPEC lastReconciledSpec = reconciliationStatus.deserializeLastReconciledSpec();
+        SPEC currentDeploySpec = cr.getSpec();
         var reconciliationState = reconciliationStatus.getState();
         var specDiff =
                 new ReflectiveDiffBuilder<>(
@@ -159,6 +158,15 @@ public abstract class AbstractFlinkResourceReconciler<
                     diffType != DiffType.SAVEPOINT_REDEPLOY
                             && diffType != DiffType.UPGRADE
                             && scale(ctx, deployConfig);
+
+            if (!scaled
+                    && diffType == DiffType.SCALE
+                    && usesStandaloneA4s(deployConfig)
+                    && currentDeploySpec.getJob() != null
+                    && currentDeploySpec.getJob().getUpgradeMode() == UpgradeMode.STATELESS) {
+                LOG.warn("Deferring A4S scale because Justin could not apply it in place");
+                return;
+            }
 
             // Reconcile spec change unless scaling was enough
             if (scaled || reconcileSpecChange(diffType, ctx, deployConfig, lastReconciledSpec)) {

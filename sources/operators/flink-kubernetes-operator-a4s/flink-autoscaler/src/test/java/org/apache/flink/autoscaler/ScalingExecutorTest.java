@@ -18,6 +18,10 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.ScalingExecutor.RuntimeObservation;
+import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
 import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
@@ -39,14 +43,27 @@ import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 import org.apache.flink.configuration.TaskManagerOptions;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
+import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.highavailability.nonha.standalone.StandaloneClientHAServices;
 import org.apache.flink.runtime.instance.SlotSharingGroupId;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
+import org.apache.flink.runtime.rest.messages.JobVertexDetailsHeaders;
+import org.apache.flink.runtime.rest.messages.JobVertexDetailsInfo;
 import org.apache.flink.runtime.rest.messages.MessageHeaders;
 import org.apache.flink.runtime.rest.messages.MessageParameters;
 import org.apache.flink.runtime.rest.messages.RequestBody;
 import org.apache.flink.runtime.rest.messages.ResponseBody;
+import org.apache.flink.runtime.rest.messages.JobPlanInfo;
+import org.apache.flink.runtime.rest.messages.job.JobDetailsInfo;
+import org.apache.flink.runtime.rest.messages.job.SubtaskExecutionAttemptDetailsInfo;
+import org.apache.flink.runtime.rest.messages.job.metrics.IOMetricsInfo;
 
+import com.sun.net.httpserver.HttpServer;
+import io.a4s.api.EvaluationRequest;
+import io.a4s.api.ScalingPlan;
+import io.a4s.core.A4sPolicy;
+import io.a4s.http.Wire;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -55,10 +72,13 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
+import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -66,6 +86,9 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.SortedMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -141,6 +164,8 @@ public class ScalingExecutorTest {
             boolean scaleStateful, boolean statefulProfileAvailable) throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_RUNNER_URL, "invalid runner URL");
+        conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
         conf.set(AutoScalerOptions.MEMORY_SCALING_ENABLED, false);
         conf.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(4096));
@@ -201,6 +226,16 @@ public class ScalingExecutorTest {
                         globalMetrics,
                         Map.of());
 
+        scalingExecutor =
+                new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    RuntimeObservation readRuntimeObservation(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
+                        throw new AssertionError("Legacy A4S does not use standalone observations");
+                    }
+                };
         var scalingHistory = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
         boolean scaled =
                 scalingExecutor.scaleResource(
@@ -287,8 +322,13 @@ public class ScalingExecutorTest {
         assertThat(stateStore.getScalingTracking(context).getLatestScalingRecordEntry()).isEmpty();
     }
 
-    @Test
-    void testA4SMemoryOnlyScaling() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"false,false", "true,false", "true,true"})
+    void testA4SMemoryOnlyScaling(boolean standalone, boolean conditional) throws Exception {
+        if (standalone) {
+            conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        }
+        conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, conditional);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
@@ -305,10 +345,17 @@ public class ScalingExecutorTest {
                         dummyGlobalMetrics,
                         Map.of(
                                 stateful,
-                                MemoryParallelismCurve.builder()
-                                        .targetThroughput(70)
-                                        .addPoint(1, 18)
-                                        .build()));
+                                new MissRateCurve(java.util.List.of(
+                                        new MissRateCurve.Point(18L * 1024 * 1024, 0.1)))));
+        if (!standalone) {
+            metrics.setMemoryParallelismCurves(
+                    Map.of(
+                            stateful,
+                            new MemoryParallelismCurve(
+                                    100, List.of(new MemoryParallelismCurve.Point(1, 18)))));
+        }
+        metrics.setWindowStart(Instant.now().minusSeconds(10));
+        metrics.setWindowEnd(Instant.now());
         var original =
                 ResourceProfile.newBuilder()
                         .setCpuCores(.25)
@@ -320,12 +367,32 @@ public class ScalingExecutorTest {
         var live = new HashMap<JobVertexID, JustinVertexResourceRequirements>();
         live.put(source, new JustinVertexResourceRequirements(parallelism, original, original));
         live.put(stateful, new JustinVertexResourceRequirements(parallelism, original, original));
+        var executionToken = new ArrayDeque<String>();
+        var recoveryAvailable = new ArrayDeque<Boolean>();
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    RuntimeObservation readRuntimeObservation(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
+                        return new RuntimeObservation("generation", Map.of());
+                    }
+
                     @Override
                     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
                             JobAutoScalerContext<JobID> ctx) {
                         return live;
+                    }
+
+                    @Override
+                    JustinResourceRequirementsBody readConditionalRequirements(
+                            JobAutoScalerContext<JobID> ctx) {
+                        String nextToken = executionToken.poll();
+                        return new JustinResourceRequirementsBody(
+                                new JustinResourceRequirements(live),
+                                nextToken == null ? "stable" : nextToken,
+                                recoveryAvailable.isEmpty() || recoveryAvailable.remove());
                     }
                 };
         var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
@@ -380,6 +447,36 @@ public class ScalingExecutorTest {
                         new DelayedScaleDown()));
         metrics.setGlobalMetrics(dummyGlobalMetrics);
 
+        if (conditional) {
+            for (var checks : List.of(List.of(false), List.of(true, false))) {
+                recoveryAvailable.addAll(checks);
+                assertFalse(
+                        scalingExecutor.scaleResource(
+                                context,
+                                metrics,
+                                history,
+                                scalingTracking,
+                                now,
+                                topology,
+                                new DelayedScaleDown()));
+                assertThat(stateStore.getA4sScalingIntent(context)).isEmpty();
+            }
+
+            executionToken.addAll(List.of("before", "after"));
+            assertFalse(
+                    scalingExecutor.scaleResource(
+                            context,
+                            metrics,
+                            history,
+                            scalingTracking,
+                            now,
+                            topology,
+                            new DelayedScaleDown()));
+            assertThat(stateStore.getA4sScalingIntent(context)).isEmpty();
+            assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+        }
+
         assertTrue(
                 scalingExecutor.scaleResource(
                         context,
@@ -390,15 +487,28 @@ public class ScalingExecutorTest {
                         topology,
                         new DelayedScaleDown()));
         var expected = ResourceProfile.newBuilder(original).setManagedMemoryMB(34).build();
-        assertThat(stateStore.getResourceProfileOverrides(context))
-                .containsExactlyInAnyOrderEntriesOf(
-                        Map.of(
-                                source.toString(),
-                                original.toString(),
-                                stateful.toString(),
-                                expected.toString()));
-        assertThat(getScaledParallelism(stateStore, context))
-                .containsExactlyInAnyOrderEntriesOf(Map.of(source, 1, stateful, 1));
+        var expectedProfiles =
+                Map.of(
+                        source.toString(),
+                        original.toString(),
+                        stateful.toString(),
+                        expected.toString());
+        if (conditional) {
+            var intent = stateStore.getA4sScalingIntent(context).orElseThrow();
+            assertThat(intent.getExecutionToken()).isEqualTo("stable");
+            assertThat(intent.matchesConfiguration(conf)).isTrue();
+            assertThat(intent.getParallelism())
+                    .isEqualTo(Map.of(source.toString(), "1", stateful.toString(), "1"));
+            assertThat(intent.getLowerBounds())
+                    .isEqualTo(Map.of(source.toString(), 1, stateful.toString(), 1));
+            assertThat(intent.getResourceProfiles()).isEqualTo(expectedProfiles);
+            assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+        } else {
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEqualTo(expectedProfiles);
+            assertThat(getScaledParallelism(stateStore, context))
+                    .containsExactlyInAnyOrderEntriesOf(Map.of(source, 1, stateful, 1));
+        }
         assertThat(history).isEmpty();
 
         live.put(stateful, new JustinVertexResourceRequirements(parallelism, expected, expected));
@@ -413,11 +523,24 @@ public class ScalingExecutorTest {
                         new DelayedScaleDown()));
     }
 
-    @Test
-    void testA4SFinalParallelismIsValidatedAndStored() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "embedded", "remote", "remote-observe-only", "stale", "unavailable", "timeout",
+        "unverified-migration", "missing-runner"
+    })
+    void storesA4sRecommendationsOnlyWhenValidAndScalingIsEnabled(String mode) throws Exception {
+        conf.set(
+                AutoScalerOptions.A4S_ENGINE,
+                mode.equals("embedded")
+                        ? AutoScalerOptions.A4sEngine.CORE_EMBEDDED
+                        : AutoScalerOptions.A4sEngine.CORE_REMOTE);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        if (mode.equals("remote-observe-only")) {
+            conf.set(AutoScalerOptions.SCALING_ENABLED, false);
+        }
         conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
+        conf.set(AutoScalerOptions.A4S_MISS_LATENCY_SEC, 0.025);
         var vertex = new JobVertexID();
         var topology =
                 new JobTopology(new VertexInfo(vertex, Map.of(), 1, MAX_PARALLELISM, false, null));
@@ -427,15 +550,26 @@ public class ScalingExecutorTest {
                         dummyGlobalMetrics,
                         Map.of(
                                 vertex,
-                                MemoryParallelismCurve.builder()
-                                        .targetThroughput(70)
-                                        .addPoint(1, 700)
-                                        .addPoint(2, 100)
-                                        .build()));
+                                new MissRateCurve(
+                                        java.util.List.of(
+                                                new MissRateCurve.Point(100L * 1024 * 1024, 0.6),
+                                                new MissRateCurve.Point(
+                                                        700L * 1024 * 1024, 0.1)))));
+        metrics.setWindowStart(Instant.now().minusSeconds(10));
+        metrics.setWindowEnd(Instant.now());
         var original = ResourceProfile.newBuilder().setManagedMemoryMB(128).build();
         var validated = new HashMap<JobVertexID, ScalingSummary>();
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
+                    @Override
+                    RuntimeObservation readRuntimeObservation(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
+                        return new RuntimeObservation(
+                                "generation", Map.of(vertex, Map.of("0", "tm-0")));
+                    }
+
                     @Override
                     Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
                             JobAutoScalerContext<JobID> ctx) {
@@ -458,20 +592,337 @@ public class ScalingExecutorTest {
                         return false;
                     }
                 };
+        var received = new CompletableFuture<EvaluationRequest>();
+        var releaseResponse = new CountDownLatch(1);
+        var delayedResponse = new CompletableFuture<Void>();
+        if (mode.equals("embedded")) {
+            conf.set(AutoScalerOptions.A4S_RUNNER_URL, "invalid runner URL");
+        }
+        var server =
+                Set.of("embedded", "missing-runner").contains(mode)
+                        ? null
+                        : HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        if (server != null) {
+            server.createContext(
+                    "/v1/evaluate",
+                    exchange -> {
+                        try {
+                            var request =
+                                    Wire.decode(
+                                            exchange.getRequestBody().readAllBytes(),
+                                            EvaluationRequest.class);
+                            received.complete(request);
+                            if (mode.equals("unavailable")) {
+                                exchange.sendResponseHeaders(503, -1);
+                                return;
+                            }
+                            if (mode.equals("timeout")) {
+                                exchange.sendResponseHeaders(200, 0);
+                                exchange.getResponseBody().write('{');
+                                exchange.getResponseBody().flush();
+                                try {
+                                    releaseResponse.await(5, TimeUnit.SECONDS);
+                                } catch (InterruptedException e) {
+                                    Thread.currentThread().interrupt();
+                                } finally {
+                                    delayedResponse.complete(null);
+                                }
+                                return;
+                            }
+                            byte[] body = Wire.encode(new A4sPolicy().evaluate(request));
+                            if (mode.equals("stale")) {
+                                body =
+                                        new String(body, StandardCharsets.UTF_8)
+                                                .replace(
+                                                        "\"executionGeneration\":\"generation\"",
+                                                        "\"executionGeneration\":\"previous-generation\"")
+                                                .getBytes(StandardCharsets.UTF_8);
+                            } else if (mode.equals("unverified-migration")) {
+                                body =
+                                        new String(body, StandardCharsets.UTF_8)
+                                                .replace("\"migration\":null", "\"migration\":{\"downtimeMillis\":1}")
+                                                .getBytes(StandardCharsets.UTF_8);
+                            }
+                            exchange.getResponseHeaders().set("Content-Type", "application/json");
+                            exchange.sendResponseHeaders(200, body.length);
+                            exchange.getResponseBody().write(body);
+                        } finally {
+                            exchange.close();
+                        }
+                    });
+            server.start();
+            if (mode.equals("timeout")) {
+                conf.set(AutoScalerOptions.A4S_RUNNER_TIMEOUT, Duration.ofSeconds(1));
+            }
+            conf.set(
+                    AutoScalerOptions.A4S_RUNNER_URL,
+                    "http://127.0.0.1:" + server.getAddress().getPort());
+        }
         var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
         var now = Instant.now();
-        assertTrue(
-                scalingExecutor.scaleResource(
-                        context,
-                        metrics,
-                        history,
-                        scalingTracking,
-                        now,
-                        topology,
-                        new DelayedScaleDown()));
+        boolean scaled;
+        try {
+            scaled =
+                    scalingExecutor.scaleResource(
+                            context,
+                            metrics,
+                            history,
+                            scalingTracking,
+                            now,
+                            topology,
+                            new DelayedScaleDown());
+            if (server != null) {
+                var request = received.get(1, TimeUnit.SECONDS);
+                assertEquals(context.getJobID().toString(), request.snapshot.jobId);
+                assertEquals("generation", request.snapshot.executionGeneration);
+                assertEquals(vertex.toHexString(), request.snapshot.operators.get(0).operatorId);
+                assertEquals(
+                        Map.of("0", "tm-0"),
+                        request.snapshot.operators.get(0).telemetry.taskPlacement);
+            }
+            if (mode.equals("timeout")) {
+                assertFalse(
+                        delayedResponse.isDone(),
+                        "The client must return while the response is pending");
+            }
+        } finally {
+            releaseResponse.countDown();
+            if (server != null) {
+                server.stop(0);
+            }
+        }
+
+        if (Set.of(
+                        "remote-observe-only", "stale", "unavailable", "timeout",
+                        "unverified-migration", "missing-runner")
+                .contains(mode)) {
+            assertFalse(scaled);
+            assertThat(validated).isEmpty();
+            assertThat(history).isEmpty();
+            assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+            assertThat(stateStore.getResourceProfileOverrides(context)).isEmpty();
+            if (mode.equals("remote-observe-only")) {
+                assertEquals(2.0, metrics.getVertexMetrics().get(vertex)
+                        .get(ScalingMetric.RECOMMENDED_PARALLELISM).getCurrent());
+            }
+            return;
+        }
+
+        assertTrue(scaled);
         assertEquals(2, validated.get(vertex).getNewParallelism());
         assertEquals(2, history.get(vertex).get(now).getNewParallelism());
         assertEquals(Map.of(vertex, 2), getScaledParallelism(stateStore, context));
+        assertThat(stateStore.getResourceProfileOverrides(context))
+                .containsEntry(
+                        vertex.toHexString(),
+                        ResourceProfile.newBuilder(original)
+                                .setManagedMemoryMB(116)
+                                .build()
+                                .toString());
+    }
+
+    @Test
+    void generationTracksEveryRunningSubtaskAndItsMeasurementWindow() throws Exception {
+        var id = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(id, Map.of(), 2, MAX_PARALLELISM));
+        var evaluated = new EvaluatedMetrics(Map.of(), Map.of(), Map.of());
+        evaluated.setJobRunningSince(Instant.ofEpochMilli(200));
+        evaluated.setWindowStart(Instant.ofEpochMilli(1_000));
+
+        var jobId = context.getJobID();
+        var vertex =
+                new JobDetailsInfo.JobVertexDetailsInfo(
+                        id,
+                        null,
+                        "operator",
+                        MAX_PARALLELISM,
+                        2,
+                        ExecutionState.RUNNING,
+                        300,
+                        -1,
+                        900,
+                        Map.of(ExecutionState.RUNNING, 2),
+                        EMPTY_IO_METRICS);
+        var job =
+                new JobDetailsInfo(
+                        jobId,
+                        "job",
+                        false,
+                        JobStatus.RUNNING,
+                        100,
+                        -1,
+                        1_100,
+                        MAX_PARALLELISM,
+                        1_200,
+                        Map.of(JobStatus.RUNNING, 200L),
+                        List.of(vertex),
+                        Map.of(ExecutionState.RUNNING, 1),
+                        new JobPlanInfo.RawJson("{}"));
+        var first = subtask(0, 0, 300, "tm-0");
+        var second = subtask(1, 0, 400, "tm-1");
+        var subtasks = new AtomicReference<>(List.of(first, second));
+        var ctx =
+                new JobAutoScalerContext<>(
+                        context.getJobKey(),
+                        jobId,
+                        JobStatus.RUNNING,
+                        conf,
+                        context.getMetricGroup(),
+                        () ->
+                                new RestClusterClient<String>(
+                                        new Configuration(),
+                                        "test-cluster",
+                                        (config, executor) ->
+                                                new StandaloneClientHAServices("localhost")) {
+                                    @Override
+                                    public CompletableFuture<JobDetailsInfo> getJobDetails(
+                                            JobID requested) {
+                                        assertEquals(jobId, requested);
+                                        return CompletableFuture.completedFuture(job);
+                                    }
+
+                                    @Override
+                                    public <
+                                                    M extends MessageHeaders<R, P, U>,
+                                                    U extends MessageParameters,
+                                                    R extends RequestBody,
+                                                    P extends ResponseBody>
+                                            CompletableFuture<P> sendRequest(
+                                                    M headers, U parameters, R request) {
+                                        assertThat(headers)
+                                                .isSameAs(JobVertexDetailsHeaders.getInstance());
+                                        assertThat(
+                                                        MessageParameters.resolveUrl(
+                                                                headers.getTargetRestEndpointURL(),
+                                                                parameters))
+                                                .isEqualTo("/jobs/" + jobId + "/vertices/" + id);
+                                        assertThat(request)
+                                                .isSameAs(EmptyRequestBody.getInstance());
+                                        return CompletableFuture.completedFuture(
+                                                headers.getResponseClass()
+                                                        .cast(
+                                                                new JobVertexDetailsInfo(
+                                                                        id,
+                                                                        "operator",
+                                                                        2,
+                                                                        MAX_PARALLELISM,
+                                                                        1_200,
+                                                                        subtasks.get())));
+                                    }
+                                });
+        var before = scalingExecutor.readRuntimeObservation(ctx, evaluated, topology);
+        assertThat(before).isNotNull();
+        assertThat(before.getTaskPlacements())
+                .isEqualTo(Map.of(id, Map.of("0", "tm-0", "1", "tm-1")));
+
+        subtasks.set(List.of(second, first));
+        assertEquals(before, scalingExecutor.readRuntimeObservation(ctx, evaluated, topology));
+
+        subtasks.set(List.of(first, subtask(1, 0, 400, "tm-replacement")));
+        var relocated = scalingExecutor.readRuntimeObservation(ctx, evaluated, topology);
+        assertThat(relocated.getGeneration()).isNotEqualTo(before.getGeneration());
+        assertThat(relocated.getTaskPlacements().get(id)).containsEntry("1", "tm-replacement");
+
+        // Only the second subtask restarts. The vertex start time and task counts stay the same.
+        var restarted = subtask(1, 1, 1_100, "tm-1");
+        subtasks.set(List.of(first, restarted));
+        assertThat(scalingExecutor.readRuntimeObservation(ctx, evaluated, topology)).isNull();
+        evaluated.setWindowStart(Instant.ofEpochMilli(1_200));
+        assertThat(scalingExecutor.readRuntimeObservation(ctx, evaluated, topology))
+                .isNotNull()
+                .isNotEqualTo(before);
+
+        subtasks.set(List.of(first));
+        assertThat(scalingExecutor.readRuntimeObservation(ctx, evaluated, topology)).isNull();
+    }
+
+    private static final IOMetricsInfo EMPTY_IO_METRICS =
+            new IOMetricsInfo(0, true, 0, true, 0, true, 0, true, 0, 0, 0);
+
+    private static SubtaskExecutionAttemptDetailsInfo subtask(
+            int index, int attempt, long start, String taskManager) {
+        return new SubtaskExecutionAttemptDetailsInfo(
+                index,
+                ExecutionState.RUNNING,
+                attempt,
+                "host",
+                start,
+                -1,
+                1_200 - start,
+                EMPTY_IO_METRICS,
+                taskManager,
+                Map.of(
+                        ExecutionState.CREATED,
+                        0L,
+                        ExecutionState.SCHEDULED,
+                        0L,
+                        ExecutionState.INITIALIZING,
+                        0L,
+                        ExecutionState.DEPLOYING,
+                        0L,
+                        ExecutionState.RUNNING,
+                        1_200 - start),
+                null);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,false", "false,true", "false,false"})
+    void discardsA4sRecommendationAfterGenerationOrAppliedProfileChanges(
+            boolean restart, boolean profileChange) throws Exception {
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);
+        var vertex = new JobVertexID();
+        var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, MAX_PARALLELISM));
+        var metrics = new EvaluatedMetrics(Map.of(vertex, evaluated(1, 70, 100)),
+                dummyGlobalMetrics, Map.of(vertex,
+                        new MissRateCurve(java.util.List.of(
+                                new MissRateCurve.Point(18L * 1024 * 1024, 0.1)))));
+        var now = Instant.now();
+        metrics.setWindowStart(now.minusSeconds(10));
+        metrics.setWindowEnd(now);
+        var current = ResourceProfile.newBuilder().setManagedMemoryMB(128).build();
+        var changed = ResourceProfile.newBuilder().setManagedMemoryMB(256).build();
+        var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 1);
+
+        scalingExecutor =
+                new ScalingExecutor<>(eventCollector, stateStore) {
+                    private int generationsRead;
+                    private int profilesRead;
+
+                    @Override
+                    RuntimeObservation readRuntimeObservation(
+                            JobAutoScalerContext<JobID> ctx,
+                            EvaluatedMetrics evaluated,
+                            JobTopology topology) {
+                        return new RuntimeObservation(
+                                ++generationsRead > 1 && restart ? "restarted" : "generation",
+                                Map.of());
+                    }
+
+                    @Override
+                    Map<JobVertexID, JustinVertexResourceRequirements> readResourceRequirements(
+                            JobAutoScalerContext<JobID> ctx) {
+                        var applied = ++profilesRead > 1 && profileChange ? changed : current;
+                        return Map.of(
+                                vertex,
+                                new JustinVertexResourceRequirements(
+                                        parallelism, current, applied));
+                    }
+                };
+        if (!restart && !profileChange) {
+            // An earlier scaling decision is still waiting for its requested profile.
+            stateStore.storeResourceProfileOverrides(context,
+                    Map.of(vertex.toHexString(), changed.toString()));
+        }
+        var history = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
+        assertFalse(scalingExecutor.scaleResource(context, metrics, history, scalingTracking,
+                now, topology, new DelayedScaleDown()));
+        assertThat(history).isEmpty();
+        assertThat(stateStore.getParallelismOverrides(context)).isEmpty();
+        assertThat(stateStore.getResourceProfileOverrides(context)).isEqualTo(
+                restart || profileChange ? Map.of() : Map.of(vertex.toHexString(), changed.toString()));
     }
 
     @Test
@@ -1116,6 +1567,129 @@ public class ScalingExecutorTest {
                                 "7",
                                 "a6b7102b8d3e3a9564998c1ffeb5e2b7",
                                 "8"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "exclusive, 16.0, true",
+        "unreported, 16.0, true",
+        "shared, 16.0, false",
+        "exclusive, 9.0, false",
+        "exclusive, Infinity, false"
+    })
+    void a4sPublishesAnAttestedExclusiveSlotCpuBudget(
+            String groupReporting, double configuredQuota, boolean publishBudget) {
+        conf.set(AutoScalerOptions.CPU_QUOTA, configuredQuota);
+        var bids = new JobVertexID();
+        var auctions = new JobVertexID();
+        var join = new JobVertexID();
+        var bidSlots = groupReporting.equals("unreported") ? null : new SlotSharingGroupId();
+        var auctionSlots = groupReporting.equals("exclusive") ? new SlotSharingGroupId() : bidSlots;
+        var joinSlots = bidSlots == null ? null : new SlotSharingGroupId();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(bids, bidSlots, Map.of(), 6, 24, false, null),
+                        new VertexInfo(auctions, auctionSlots, Map.of(), 3, 24, false, null),
+                        new VertexInfo(
+                                join, joinSlots, Map.of(bids, HASH, auctions, HASH),
+                                1, 24, false, null));
+        var joinMetrics = evaluated(1, 70, 100);
+        var evaluation =
+                new EvaluatedMetrics(
+                        Map.of(bids, evaluated(6, 70, 100),
+                                auctions, evaluated(3, 70, 100), join, joinMetrics),
+                        dummyGlobalMetrics,
+                        Map.of());
+        var now = Instant.now();
+        evaluation.setWindowStart(now.minusSeconds(10));
+        evaluation.setWindowEnd(now);
+        var profile = ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(192).build();
+        var request =
+                new Flink118A4sAdapter()
+                        .request(
+                                context.getJobID().toString(),
+                                "generation",
+                                now,
+                                topology,
+                                evaluation,
+                                Map.of(join, new ScalingSummary(1, 18, joinMetrics)),
+                                Map.of(bids, profile, auctions, profile, join, profile),
+                                conf,
+                                true,
+                                Map.of());
+
+        assertThat(request.constraints.cpuBudgetCores)
+                .isEqualTo(publishBudget ? configuredQuota : null);
+        long bytesPerSlot = profile.getTotalMemory().getBytes();
+        assertThat(request.snapshot.operators)
+                .allSatisfy(operator -> {
+                    assertThat(operator.telemetry.allocatedMemoryPerTaskBytes).isEqualTo(bytesPerSlot);
+                    assertThat(operator.telemetry.allocatedTotalMemoryBytes)
+                            .isEqualTo(bytesPerSlot * operator.current.parallelism);
+                });
+        assertThat(new A4sPolicy().evaluate(request).action)
+                .isEqualTo(publishBudget
+                        ? ScalingPlan.Action.INFEASIBLE_CONFIGURATION
+                        : ScalingPlan.Action.RESCALE);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"cpu", "memory"})
+    void quotaIncludesUnchangedGroupsAndRoundsUpPartiallyOccupiedTaskManagers(String budget) {
+        var ctx = TestingAutoscalerUtils.createResourceAwareContext(2.0, "2g");
+        var conf = ctx.getConfiguration();
+        conf.set(TaskManagerOptions.NUM_TASK_SLOTS, 4);
+        if (budget.equals("cpu")) {
+            conf.set(AutoScalerOptions.CPU_QUOTA, 2.0);
+        } else {
+            conf.set(AutoScalerOptions.MEMORY_QUOTA, MemorySize.parse("2g"));
+        }
+
+        var changing = new JobVertexID();
+        var unchanged = new JobVertexID();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(
+                                changing, new SlotSharingGroupId(), Map.of(), 2, 8, false, null),
+                        new VertexInfo(
+                                unchanged, new SlotSharingGroupId(), Map.of(), 2, 8, false, null));
+        // The unchanged group occupies two slots. Growing from four total slots to five
+        // adds a TaskManager even though the changing vertex fits in one by itself.
+        assertTrue(
+                ScalingExecutor.scalingWouldExceedResourceQuota(
+                        conf, topology, Map.of(changing, new ScalingSummary(2, 3, Map.of())), ctx));
+
+        var shared = new SlotSharingGroupId();
+        var sharedTopology =
+                new JobTopology(
+                        new VertexInfo(changing, shared, Map.of(), 2, 8, false, null),
+                        new VertexInfo(unchanged, shared, Map.of(), 4, 8, false, null));
+        assertFalse(
+                ScalingExecutor.scalingWouldExceedResourceQuota(
+                        conf,
+                        sharedTopology,
+                        Map.of(changing, new ScalingSummary(2, 3, Map.of())),
+                        ctx));
+    }
+
+    @Test
+    void quotaIncludesTaskManagerMemoryGrowthAtFixedParallelism() {
+        var ctx = TestingAutoscalerUtils.createResourceAwareContext(2.0, "2g");
+        var conf = ctx.getConfiguration();
+        conf.set(TaskManagerOptions.NUM_TASK_SLOTS, 4);
+        conf.set(AutoScalerOptions.MEMORY_QUOTA, MemorySize.parse("2g"));
+        var vertex = new JobVertexID();
+        var topology =
+                new JobTopology(
+                        new VertexInfo(
+                                vertex, new SlotSharingGroupId(), Map.of(), 4, 8, false, null));
+
+        var largerWorker = new Configuration(conf);
+        largerWorker.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.parse("3g"));
+        assertTrue(
+                ScalingExecutor.scalingWouldExceedResourceQuota(
+                        largerWorker, topology, Map.of(), ctx));
+        assertFalse(ScalingExecutor.scalingWouldExceedResourceQuota(conf, topology, Map.of(), ctx));
     }
 
     @ParameterizedTest

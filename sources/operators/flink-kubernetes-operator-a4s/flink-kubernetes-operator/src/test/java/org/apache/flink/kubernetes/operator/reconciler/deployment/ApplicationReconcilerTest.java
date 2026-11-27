@@ -17,6 +17,7 @@
 
 package org.apache.flink.kubernetes.operator.reconciler.deployment;
 
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.autoscaler.JobAutoScaler;
@@ -932,6 +933,39 @@ public class ApplicationReconcilerTest extends OperatorTestBase {
         assertEquals(1, rescaleCounter.get());
         assertEquals(3, flinkResourceEventCollector.events.size());
         assertFalse(reconStatus.isLastReconciledSpecStable());
+    }
+
+    @Test
+    public void testA4SScaleCannotFallBackToStatelessUpgrade() throws Exception {
+        var deployment = TestUtils.buildApplicationCluster();
+        deployment.getSpec().setFlinkVersion(FlinkVersion.v1_18);
+        deployment.getSpec().setMode(KubernetesDeploymentMode.NATIVE);
+        getJobSpec(deployment).setUpgradeMode(UpgradeMode.STATELESS);
+        var config = deployment.getSpec().getFlinkConfiguration();
+        config.put(AutoScalerOptions.JUSTIN_ENABLED.key(), "true");
+        config.put(AutoScalerOptions.A4S_ENABLED.key(), "true");
+        config.put(
+                AutoScalerOptions.A4S_ENGINE.key(),
+                AutoScalerOptions.A4sEngine.CORE_EMBEDDED.name());
+        deployment.getMetadata().setGeneration(1L);
+
+        reconciler.reconcile(deployment, context);
+        verifyAndSetRunningJobsToStatus(deployment, flinkService.listJobs());
+
+        // TestingFlinkService declines in-place scaling for native deployments.
+        config.put(PipelineOptions.PARALLELISM_OVERRIDES.key(), new JobVertexID() + ":2");
+        deployment.getMetadata().setGeneration(2L);
+        reconciler.reconcile(deployment, context);
+
+        assertEquals(JobState.RUNNING, getReconciledJobState(deployment));
+        var previous =
+                deployment.getStatus().getReconciliationStatus().deserializeLastReconciledSpec();
+        assertFalse(
+                previous.getFlinkConfiguration().containsKey(PipelineOptions.PARALLELISM_OVERRIDES.key()));
+
+        config.put(AutoScalerOptions.A4S_ENABLED.key(), "false");
+        reconciler.reconcile(deployment, context);
+        assertEquals(JobState.SUSPENDED, getReconciledJobState(deployment));
     }
 
     @Test

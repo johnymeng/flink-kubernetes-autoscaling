@@ -29,6 +29,7 @@ import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequireme
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsHeaders;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters.IncludeAppliedProfileParameter;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters.IncludeExecutionTokenParameter;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 
@@ -65,13 +66,28 @@ public class JustinResourceRequirementsHandler
         final JobID jobId = request.getPathParameter(JobIDPathParameter.class);
         final boolean includeApplied =
                 request.getQueryParameter(IncludeAppliedProfileParameter.class).contains(true);
-        return gateway.requestJustinResourceRequirements(jobId)
-                .thenApply(
-                        requirements ->
-                                new JustinResourceRequirementsBody(
-                                        includeApplied
-                                                ? requirements
-                                                : requestedOnly(requirements)));
+        final boolean includeExecutionToken =
+                request.getQueryParameter(IncludeExecutionTokenParameter.class).contains(true);
+        final CompletableFuture<JustinResourceRequirements> requested =
+                includeExecutionToken
+                        ? gateway.requestJustinResourceRequirements(jobId, true)
+                        : gateway.requestJustinResourceRequirements(jobId);
+        return requested.thenApply(
+                requirements -> {
+                    final JustinResourceRequirements view =
+                            includeApplied ? requirements : requestedOnly(requirements);
+                    return new JustinResourceRequirementsBody(
+                            new JustinResourceRequirements(
+                                    view.getJobVertexParallelisms(),
+                                    includeExecutionToken
+                                            ? requirements.getExecutionToken().orElse(null)
+                                            : null,
+                                    includeExecutionToken
+                                            ? requirements
+                                                    .getStatefulRescaleAvailable()
+                                                    .orElse(null)
+                                            : null));
+                });
     }
 
     private static JustinResourceRequirements requestedOnly(

@@ -21,6 +21,7 @@ import org.apache.flink.autoscaler.JobVertexScaler;
 import org.apache.flink.autoscaler.metrics.MetricAggregator;
 import org.apache.flink.configuration.ConfigOption;
 import org.apache.flink.configuration.ConfigOptions;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.MemorySize;
 
 import java.time.Duration;
@@ -414,6 +415,55 @@ public class AutoScalerOptions {
                             "Enable A4S co-designed scaling and placement algorithm. "
                                     + "When enabled, the autoscaler will use memory-parallelism curves "
                                     + "to find optimal (memory, parallelism) configurations for stateful operators.");
+
+    /** Selects the A4S policy for a job with A4S enabled. */
+    public enum A4sEngine {
+        LEGACY,
+        CORE_EMBEDDED,
+        CORE_REMOTE
+    }
+
+    public static final ConfigOption<A4sEngine> A4S_ENGINE =
+            autoScalerConfig("a4s.engine")
+                    .enumType(A4sEngine.class)
+                    .defaultValue(A4sEngine.LEGACY)
+                    .withDescription(
+                            "A4S engine. LEGACY uses the Flink-integrated policy. "
+                                    + "CORE_EMBEDDED uses the standalone core in the operator. "
+                                    + "CORE_REMOTE uses the A4S decision service.");
+
+    public static boolean usesStandaloneA4s(Configuration conf) {
+        return conf.get(JUSTIN_ENABLED)
+                && conf.get(A4S_ENABLED)
+                && conf.get(A4S_ENGINE) != A4sEngine.LEGACY;
+    }
+
+    public static final ConfigOption<String> A4S_RUNNER_URL =
+            autoScalerConfig("a4s.runner.url").stringType().noDefaultValue()
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.runner.url"))
+                    .withDescription("HTTP(S) origin of the A4S decision service. Required for CORE_REMOTE.");
+
+    public static final ConfigOption<Boolean> A4S_CONDITIONAL_JUSTIN_ENABLED =
+            ConfigOptions.key("job.autoscaler.a4s.conditional-justin.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Bind A4S requests to the execution token of the patched Flink runtime.");
+
+    public static final ConfigOption<Duration> A4S_RUNNER_TIMEOUT =
+            autoScalerConfig("a4s.runner.timeout").durationType().defaultValue(Duration.ofSeconds(3))
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.runner.timeout"))
+                    .withDescription("Maximum time to wait for the remote A4S recommendation.");
+
+    public static final ConfigOption<Duration> A4S_SNAPSHOT_MAX_AGE =
+            autoScalerConfig("a4s.snapshot.max-age").durationType().defaultValue(Duration.ofSeconds(60))
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.snapshot.max-age"))
+                    .withDescription("Maximum age of the metrics when applying an A4S recommendation.");
+
+    public static final ConfigOption<String> A4S_SNAPSHOT_RECORD_FILE =
+            autoScalerConfig("a4s.snapshot.record-file").stringType().noDefaultValue()
+                    .withFallbackKeys(oldOperatorConfigKey("a4s.snapshot.record-file"))
+                    .withDescription("Optional JSONL basename in the operator's A4S_SNAPSHOT_DIR for recording requests.");
 
     public static final ConfigOption<Integer> A4S_MAX_ATTEMPTS =
             autoScalerConfig("a4s.max-attempts")

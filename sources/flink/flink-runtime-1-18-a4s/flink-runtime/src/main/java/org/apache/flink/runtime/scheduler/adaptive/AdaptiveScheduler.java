@@ -35,6 +35,7 @@ import org.apache.flink.core.failure.FailureEnricher.Context;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.JobException;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
+import org.apache.flink.runtime.checkpoint.CheckpointCoordinator;
 import org.apache.flink.runtime.checkpoint.CheckpointException;
 import org.apache.flink.runtime.checkpoint.CheckpointFailureReason;
 import org.apache.flink.runtime.checkpoint.CheckpointIDCounter;
@@ -76,6 +77,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.jobgraph.justin.JustinVertexResourceRequirements;
+import org.apache.flink.runtime.jobgraph.justin.StaleJustinExecutionException;
 import org.apache.flink.runtime.jobmanager.PartitionProducerDisposedException;
 import org.apache.flink.runtime.jobmanager.scheduler.NoResourceAvailableException;
 import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
@@ -139,6 +141,7 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -151,6 +154,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledFuture;
@@ -249,6 +253,7 @@ public class AdaptiveScheduler
     private final Duration slotIdleTimeout;
 
     private JustinResourceRequirements justinResourceRequirements;
+    private long resourceRequirementsRevision;
 
     private boolean justinRescale = false;
 
@@ -865,6 +870,7 @@ public class AdaptiveScheduler
         if (maybeUpdateVertexParallelismStore.isPresent()) {
             this.jobInformation =
                     new JobGraphJobInformation(jobGraph, maybeUpdateVertexParallelismStore.get());
+            resourceRequirementsRevision++;
             declareDesiredResources();
             state.tryRun(
                     ResourceListener.class,
@@ -875,6 +881,11 @@ public class AdaptiveScheduler
 
     @Override
     public JustinResourceRequirements requestJustinResourceRequirements() {
+        return requestJustinResourceRequirements(false);
+    }
+
+    @Override
+    public JustinResourceRequirements requestJustinResourceRequirements(boolean includeExecutionToken) {
         final ExecutionGraph runningGraph =
                 state.as(Executing.class).map(Executing::getExecutionGraph).orElse(null);
         final Map<AllocationID, ResourceProfile> exclusiveSlots =
@@ -901,7 +912,38 @@ public class AdaptiveScheduler
                             requestedProfile,
                             appliedProfile));
         }
-        return new JustinResourceRequirements(requirements);
+        final String token = includeExecutionToken ? currentExecutionToken(runningGraph) : null;
+        final Boolean statefulRescaleAvailable =
+                includeExecutionToken ? token != null && hasRecoveryCheckpoint(runningGraph) : null;
+        return new JustinResourceRequirements(requirements, token, statefulRescaleAvailable);
+    }
+
+    @Nullable
+    private String currentExecutionToken(@Nullable ExecutionGraph graph) {
+        if (graph == null
+                || graph.getState() != JobStatus.RUNNING
+                || executionMode == SchedulerExecutionMode.REACTIVE) {
+            return null;
+        }
+        final List<String> attempts = new ArrayList<>();
+        for (ExecutionVertex task : graph.getAllExecutionVertices()) {
+            final LogicalSlot slot = task.getCurrentAssignedResource();
+            if (task.getExecutionState() != ExecutionState.RUNNING
+                    || task.getCurrentExecutions().size() != 1
+                    || slot == null
+                    || !slot.isAlive()) {
+                return null;
+            }
+            attempts.add(
+                    task.getCurrentExecutionAttempt().getAttemptId() + "/" + slot.getAllocationId());
+        }
+        if (attempts.isEmpty()) {
+            return null;
+        }
+        Collections.sort(attempts);
+        final String identity =
+                graph.getJobID() + "/" + resourceRequirementsRevision + "/" + attempts;
+        return UUID.nameUUIDFromBytes(identity.getBytes(StandardCharsets.UTF_8)).toString();
     }
 
     private Map<AllocationID, ResourceProfile> getExclusiveSlotProfiles(ExecutionGraph graph) {
@@ -950,11 +992,31 @@ public class AdaptiveScheduler
         return appliedProfile;
     }
 
+    private static boolean hasRecoveryCheckpoint(@Nullable ExecutionGraph graph) {
+        final CheckpointCoordinator coordinator =
+                graph == null ? null : graph.getCheckpointCoordinator();
+        return coordinator != null && coordinator.getNumberOfRetainedSuccessfulCheckpoints() > 0;
+    }
+
     @Override
     public void updateJustinResourceRequirements(
             JustinResourceRequirements justinResourceRequirements) {
-        this.justinRescale = true;
-        this.justinResourceRequirements = justinResourceRequirements;
+        final String expectedToken = justinResourceRequirements.getExecutionToken().orElse(null);
+        if (expectedToken != null) {
+            final ExecutionGraph graph =
+                    state.as(Executing.class).map(Executing::getExecutionGraph).orElse(null);
+            // Compare and apply in the same scheduler main-thread call.
+            if (!expectedToken.equals(currentExecutionToken(graph))) {
+                throw new StaleJustinExecutionException();
+            }
+            if (!hasRecoveryCheckpoint(graph)) {
+                throw new StaleJustinExecutionException(
+                        "No completed checkpoint is retained for the conditional Justin rescale.");
+            }
+        } else {
+            this.justinRescale = true;
+            this.justinResourceRequirements = justinResourceRequirements;
+        }
         /*
         if (!(slotAllocator instanceof JustinSlotAllocator)) {
             SlotSharingSlotAllocator slotSharingSlotAllocator = (SlotSharingSlotAllocator) slotAllocator;
@@ -974,6 +1036,9 @@ public class AdaptiveScheduler
                         jobInformation.getVertexParallelismStore(), justinResourceRequirements);
 
         if (maybeUpdateVertexParallelismStore.isPresent()) {
+            this.justinRescale = true;
+            this.justinResourceRequirements = justinResourceRequirements;
+            resourceRequirementsRevision++;
             // A graph that is already waiting for resources will use the updated requirements.
             firstJustinRescale = !(state instanceof WaitingForResources);
             updateJustinGraphJobInformation(maybeUpdateVertexParallelismStore.get());

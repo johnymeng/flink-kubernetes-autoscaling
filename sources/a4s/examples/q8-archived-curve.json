@@ -1,0 +1,217 @@
+{
+  "schemaVersion": 1,
+  "snapshot": {
+    "jobId": "nexmark-q8",
+    "snapshotId": "q8-archived-curve-example",
+    "executionGeneration": "generation-7",
+    "measuredAtMillis": 10000,
+    "windowStartMillis": 1000,
+    "windowEndMillis": 10000,
+    "metricsComplete": true,
+    "operators": [
+      {
+        "operatorId": "join",
+        "operatorType": "join",
+        "stateful": true,
+        "current": {
+          "parallelism": 4,
+          "managedMemoryPerTaskBytes": 134217728,
+          "cpuCoresPerTask": 1
+        },
+        "minParallelism": 1,
+        "maxParallelism": 24,
+        "permittedParallelisms": [],
+        "startingParallelism": 4,
+        "cacheSensitive": true,
+        "targetRecordsPerSecond": 60000,
+        "upstreamOperators": [],
+        "capacityAxis": "NOMINAL_BLOCK_BYTES",
+        "missRateCurve": [
+          {
+            "capacityBytes": 524288,
+            "missRate": 0.9262720141321296
+          },
+          {
+            "capacityBytes": 1048576,
+            "missRate": 0.921453953862552
+          },
+          {
+            "capacityBytes": 1572864,
+            "missRate": 0.9116356980953709
+          },
+          {
+            "capacityBytes": 2097152,
+            "missRate": 0.8869989910634056
+          },
+          {
+            "capacityBytes": 2621440,
+            "missRate": 0.8721805397986213
+          },
+          {
+            "capacityBytes": 3145728,
+            "missRate": 0.8623622840314403
+          },
+          {
+            "capacityBytes": 3670016,
+            "missRate": 0.8277251860042685
+          },
+          {
+            "capacityBytes": 4194304,
+            "missRate": 0.7886342981635701
+          },
+          {
+            "capacityBytes": 4718592,
+            "missRate": 0.7688156514011826
+          },
+          {
+            "capacityBytes": 5242880,
+            "missRate": 0.7688156514011826
+          },
+          {
+            "capacityBytes": 5767168,
+            "missRate": 0.7588152604059759
+          },
+          {
+            "capacityBytes": 6291456,
+            "missRate": 0.7441789443692172
+          },
+          {
+            "capacityBytes": 6815744,
+            "missRate": 0.7341785533740105
+          },
+          {
+            "capacityBytes": 7340032,
+            "missRate": 0.7243602976068295
+          },
+          {
+            "capacityBytes": 7864320,
+            "missRate": 0.7193601021092262
+          },
+          {
+            "capacityBytes": 8388608,
+            "missRate": 0.699359320118813
+          },
+          {
+            "capacityBytes": 8912896,
+            "missRate": 0.689541064351632
+          },
+          {
+            "capacityBytes": 9437184,
+            "missRate": 0.679722808584451
+          },
+          {
+            "capacityBytes": 9961472,
+            "missRate": 0.6749047483148732
+          },
+          {
+            "capacityBytes": 10485760,
+            "missRate": 0.660086297050089
+          },
+          {
+            "capacityBytes": 11010048,
+            "missRate": 0.6550861015524857
+          },
+          {
+            "capacityBytes": 11534336,
+            "missRate": 0.6550861015524857
+          },
+          {
+            "capacityBytes": 12058624,
+            "missRate": 0.6502680412829079
+          },
+          {
+            "capacityBytes": 12582912,
+            "missRate": 0.6452678457853047
+          },
+          {
+            "capacityBytes": 13107200,
+            "missRate": 0.635267454790098
+          },
+          {
+            "capacityBytes": 13631488,
+            "missRate": 0.6254491990229171
+          },
+          {
+            "capacityBytes": 14155776,
+            "missRate": 0.6154488080277105
+          },
+          {
+            "capacityBytes": 14680064,
+            "missRate": 0.6058126874885551
+          },
+          {
+            "capacityBytes": 15204352,
+            "missRate": 0.6058126874885551
+          },
+          {
+            "capacityBytes": 15728640,
+            "missRate": 0.6058126874885551
+          },
+          {
+            "capacityBytes": 16252928,
+            "missRate": 0.6008124919909518
+          },
+          {
+            "capacityBytes": 16777216,
+            "missRate": 0.6008124919909518
+          },
+          {
+            "capacityBytes": 17301504,
+            "missRate": 0.5958122964933484
+          },
+          {
+            "capacityBytes": 17825792,
+            "missRate": 0.5958122964933484
+          },
+          {
+            "capacityBytes": 18350080,
+            "missRate": 0.5958122964933484
+          },
+          {
+            "capacityBytes": 18874368,
+            "missRate": 0.5861761759541931
+          },
+          {
+            "capacityBytes": 19398656,
+            "missRate": 0.5861761759541931
+          },
+          {
+            "capacityBytes": 19922944,
+            "missRate": 0.5811759804565898
+          }
+        ]
+      }
+    ],
+    "workers": [],
+    "stateBackend": "embedded",
+    "reconfigurationInProgress": false,
+    "capabilities": {
+      "actions": {
+        "PARALLELISM": "WITH_RESTART",
+        "STATEFUL_RECOVERY": "WITH_RESTART",
+        "MANAGED_MEMORY_PER_TASK": "WITH_RESTART"
+      }
+    }
+  },
+  "constraints": {
+    "minCachePerTaskBytes": 0,
+    "maxCachePerTaskBytes": 9223372036854775807,
+    "totalCacheBudgetBytes": null,
+    "cpuBudgetCores": null,
+    "cooldownMillis": 0,
+    "maxSnapshotAgeMillis": 30000,
+    "requiresPlacement": false,
+    "maxManagedMemoryPerTaskBytes": 629145600
+  },
+  "policy": {
+    "mode": "LEGACY_SLOT_RESERVATION",
+    "maxAttempts": 20,
+    "hitSeconds": 5e-06,
+    "missSeconds": 0.005,
+    "managedMemoryBaseBytes": 16777216
+  },
+  "previousState": {
+    "version": 1
+  },
+  "evaluatedAtMillis": 10001
+}

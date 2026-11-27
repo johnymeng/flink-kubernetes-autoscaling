@@ -23,11 +23,14 @@ import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.a4s.core.StackDistanceHistogram;
 import org.apache.flink.a4s.logging.A4SMetricsFlowStep;
 import org.apache.flink.api.common.JobID;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.common.time.Time;
 import org.apache.flink.runtime.execution.ExecutionState;
 import org.apache.flink.runtime.executiongraph.AccessExecutionJobVertex;
 import org.apache.flink.runtime.executiongraph.AccessExecutionVertex;
+import org.apache.flink.runtime.executiongraph.ArchivedExecutionGraph;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.rest.handler.AbstractRestHandler;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.RestHandlerException;
@@ -37,8 +40,12 @@ import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
 import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.StateAccessTiming;
+import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedVertexMetricsHeaders;
 import org.apache.flink.runtime.rest.messages.job.metrics.AggregatedSubtaskMetricsParameters;
+import org.apache.flink.runtime.rest.messages.job.metrics.MetricsFilterParameter;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
 
@@ -47,9 +54,14 @@ import org.apache.flink.shaded.netty4.io.netty.handler.codec.http.HttpResponseSt
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
@@ -92,30 +104,118 @@ public class A4SAggregatingVertexMetricsHandler
             throws RestHandlerException {
         JobID jobId = request.getPathParameter(JobIDPathParameter.class);
         JobVertexID vertexID = request.getPathParameter(JobVertexIdPathParameter.class);
+        boolean includeBacklog =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG);
+        boolean includeCacheCapacity =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_CAPACITY);
+        boolean includeCacheUsage =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_USAGE);
+        boolean includeCacheCounters =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COUNTERS);
+        boolean includeStateSize =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_SIZE);
+        boolean includeTaskTimes =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_TASK_TIMES);
+        boolean includeStateAccessTiming =
+                request.getQueryParameter(MetricsFilterParameter.class)
+                        .contains(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_ACCESS_TIMING);
 
         return CompletableFuture.supplyAsync(
-                () -> {
-                    try {
-                        return processRequest(jobId, vertexID, gateway);
-                    } catch (Exception e) {
-                        log.warn(
-                                "A4S [{}]: jobId={} vertexId={} message={}",
-                                A4SMetricsFlowStep.HANDLER_FAILED.name(),
-                                jobId,
-                                vertexID,
-                                e.getMessage(),
-                                e);
-                        throw new CompletionException(
-                                new RestHandlerException(
-                                        "Could not retrieve A4S metrics.",
-                                        HttpResponseStatus.INTERNAL_SERVER_ERROR));
-                    }
-                },
-                this.executor).thenCompose(response -> response);
+                        () -> {
+                            try {
+                                CompletableFuture<ArchivedExecutionGraph> graph =
+                                        includeBacklog
+                                                        || includeCacheCapacity
+                                                        || includeCacheUsage
+                                                        || includeCacheCounters
+                                                        || includeStateSize
+                                                        || includeTaskTimes
+                                                        || includeStateAccessTiming
+                                                ? gateway.requestJob(jobId, timeout)
+                                                : null;
+                                CompletableFuture<A4SAggregatedMetricsResponseBody> curve =
+                                        processRequest(jobId, vertexID, gateway, graph);
+                                if (graph == null) {
+                                    return curve;
+                                }
+                                return curve.thenCombine(
+                                        graph.exceptionally(failure -> null),
+                                        (response, liveGraph) -> {
+                                            CurrentAttemptMetrics observed =
+                                                    liveGraph == null
+                                                            ? null
+                                                            : currentAttemptMetrics(
+                                                                    fetcher.getMetricStore(),
+                                                                    jobId,
+                                                                    vertexID,
+                                                                    liveGraph.getJobVertex(
+                                                                            vertexID),
+                                                                    includeTaskTimes);
+                                            List<Map<String, String>> attempts =
+                                                    observed == null ? null : observed.samples;
+                                            return new A4SAggregatedMetricsResponseBody(
+                                                    response.getMrcStatus(),
+                                                    response.getCurve().orElse(null),
+                                                    includeBacklog
+                                                            ? aggregateBacklog(attempts)
+                                                            : null,
+                                                    includeCacheCapacity
+                                                            ? aggregateScopedBytes(
+                                                                    attempts,
+                                                                    MetricNames
+                                                                            .A4S_SLOT_BLOCK_CACHE)
+                                                            : null,
+                                                    includeCacheUsage
+                                                            ? aggregateScopedBytes(
+                                                                    attempts,
+                                                                    MetricNames
+                                                                            .A4S_SLOT_BLOCK_CACHE_USAGE)
+                                                            : null,
+                                                    includeCacheCounters
+                                                            ? aggregateCacheCounters(attempts)
+                                                            : null,
+                                                    includeStateSize
+                                                            ? aggregateScopedBytes(
+                                                                    attempts,
+                                                                    MetricNames
+                                                                            .A4S_ROCKSDB_STATE_SIZE)
+                                                            : null,
+                                                    includeTaskTimes
+                                                            ? aggregateTaskTimes(observed)
+                                                            : null,
+                                                    includeStateAccessTiming
+                                                            ? aggregateStateAccessTiming(attempts)
+                                                            : null);
+                                        });
+                            } catch (Exception e) {
+                                log.warn(
+                                        "A4S [{}]: jobId={} vertexId={} message={}",
+                                        A4SMetricsFlowStep.HANDLER_FAILED.name(),
+                                        jobId,
+                                        vertexID,
+                                        e.getMessage(),
+                                        e);
+                                throw new CompletionException(
+                                        new RestHandlerException(
+                                                "Could not retrieve A4S metrics.",
+                                                HttpResponseStatus.INTERNAL_SERVER_ERROR));
+                            }
+                        },
+                        this.executor)
+                .thenCompose(response -> response);
     }
 
     private CompletableFuture<A4SAggregatedMetricsResponseBody> processRequest(
-            JobID jobId, JobVertexID vertexID, RestfulGateway gateway) {
+            JobID jobId,
+            JobVertexID vertexID,
+            RestfulGateway gateway,
+            @Nullable CompletableFuture<ArchivedExecutionGraph> graph) {
         this.fetcher.update();
         MetricStore store = this.fetcher.getMetricStore();
 
@@ -153,15 +253,309 @@ public class A4SAggregatingVertexMetricsHandler
             }
 
             if (subtaskHistograms.stream().anyMatch(histogram -> histogram.getShards() != null)) {
-                return gateway.requestJob(jobId, timeout)
+                return (graph == null ? gateway.requestJob(jobId, timeout) : graph)
                         .thenApply(
-                                graph -> buildShardsResponse(
-                                        store, jobId, vertexID, graph.getJobVertex(vertexID)));
+                                liveGraph ->
+                                        buildShardsResponse(
+                                                store,
+                                                jobId,
+                                                vertexID,
+                                                liveGraph.getJobVertex(vertexID)));
             }
             return completedFuture(buildResponse(jobId, vertexID, subtaskHistograms, 0));
         } catch (IllegalArgumentException | ArithmeticException e) {
             return completedFuture(invalidHistogram(jobId, vertexID, e));
         }
+    }
+
+    @Nullable
+    private static CurrentAttemptMetrics currentAttemptMetrics(
+            MetricStore store,
+            JobID jobId,
+            JobVertexID vertexId,
+            @Nullable AccessExecutionJobVertex vertex,
+            boolean identifyRoster) {
+        if (vertex == null
+                || vertex.getParallelism() <= 0
+                || vertex.getTaskVertices().length != vertex.getParallelism()) {
+            return null;
+        }
+        List<Map<String, String>> attempts = new ArrayList<>();
+        TreeMap<Integer, String> identities = identifyRoster ? new TreeMap<>() : null;
+        HashSet<Integer> indices = new HashSet<>();
+        for (AccessExecutionVertex task : vertex.getTaskVertices()) {
+            int index = task.getParallelSubtaskIndex();
+            if (index < 0
+                    || index >= vertex.getParallelism()
+                    || !indices.add(index)
+                    || task.getExecutionState() != ExecutionState.RUNNING
+                    || task.getCurrentExecutions().size() != 1) {
+                return null;
+            }
+            MetricStore.ComponentMetricStore attempt =
+                    store.getSubtaskAttemptMetricStore(
+                            jobId.toString(),
+                            vertexId.toString(),
+                            index,
+                            task.getCurrentExecutionAttempt().getAttemptNumber());
+            if (attempt == null) {
+                return null;
+            }
+            attempts.add(attempt.metrics);
+            if (identities != null) {
+                if (task.getCurrentExecutionAttempt().getAttemptId() == null) {
+                    identities = null;
+                } else {
+                    identities.put(
+                            index, task.getCurrentExecutionAttempt().getAttemptId().toString());
+                }
+            }
+        }
+        String rosterId =
+                identities == null
+                        ? null
+                        : UUID.nameUUIDFromBytes(
+                                        identities.toString().getBytes(StandardCharsets.UTF_8))
+                                .toString();
+        return new CurrentAttemptMetrics(attempts, rosterId);
+    }
+
+    private static final class CurrentAttemptMetrics {
+        final List<Map<String, String>> samples;
+        @Nullable final String rosterId;
+
+        private CurrentAttemptMetrics(
+                List<Map<String, String>> samples, @Nullable String rosterId) {
+            this.samples = samples;
+            this.rosterId = rosterId;
+        }
+    }
+
+    @Nullable
+    private static TaskTimeTotals aggregateTaskTimes(@Nullable CurrentAttemptMetrics observed) {
+        if (observed == null || observed.rosterId == null) {
+            return null;
+        }
+        double busy = 0;
+        long idle = 0;
+        long backpressured = 0;
+        try {
+            for (Map<String, String> metrics : observed.samples) {
+                String reading = metrics.get(MetricNames.A4S_TASK_TIME_TOTALS);
+                if (reading == null) {
+                    return null;
+                }
+                String[] parts = reading.split(":", -1);
+                if (parts.length != 3) {
+                    return null;
+                }
+                double taskBusy = Double.parseDouble(parts[0]);
+                long taskIdle = Long.parseLong(parts[1]);
+                long taskBackpressured = Long.parseLong(parts[2]);
+                if (!Double.isFinite(taskBusy)
+                        || taskBusy < 0
+                        || taskIdle < 0
+                        || taskBackpressured < 0) {
+                    return null;
+                }
+                busy += taskBusy;
+                idle = Math.addExact(idle, taskIdle);
+                backpressured = Math.addExact(backpressured, taskBackpressured);
+            }
+        } catch (NumberFormatException | ArithmeticException e) {
+            return null;
+        }
+        return Double.isFinite(busy)
+                ? new TaskTimeTotals(observed.rosterId, busy, idle, backpressured)
+                : null;
+    }
+
+    @Nullable
+    private static Long aggregateBacklog(@Nullable List<Map<String, String>> attempts) {
+        if (attempts == null) {
+            return null;
+        }
+        long total = 0;
+        for (Map<String, String> attempt : attempts) {
+            Long pending = readPendingRecords(attempt);
+            if (pending == null || pending > Long.MAX_VALUE - total) {
+                return null;
+            }
+            total += pending;
+        }
+        return total;
+    }
+
+    @Nullable
+    private static Long aggregateScopedBytes(
+            @Nullable List<Map<String, String>> attempts, String metricName) {
+        if (attempts == null) {
+            return null;
+        }
+        boolean capacity = MetricNames.A4S_SLOT_BLOCK_CACHE.equals(metricName);
+        boolean perDatabase = MetricNames.A4S_ROCKSDB_STATE_SIZE.equals(metricName);
+        long total = 0;
+        HashSet<UUID> owners = new HashSet<>();
+        for (Map<String, String> attempt : attempts) {
+            Map<UUID, TreeMap<Long, Long>> readings = new HashMap<>();
+            for (Map.Entry<String, String> entry : attempt.entrySet()) {
+                if (!metricName.equals(entry.getKey())
+                        && !entry.getKey().endsWith("." + metricName)) {
+                    continue;
+                }
+                String value = entry.getValue();
+                if (value == null) {
+                    return null;
+                }
+                String[] parts = value.split(":", -1);
+                if (parts.length != (capacity ? 2 : 3) || parts[0].length() != 36) {
+                    return null;
+                }
+                try {
+                    UUID id = UUID.fromString(parts[0]);
+                    long sequence = capacity ? 0 : Long.parseLong(parts[1]);
+                    long bytes = Long.parseLong(parts[parts.length - 1]);
+                    if (capacity ? bytes <= 0 : sequence <= 0 || bytes < 0) {
+                        return null;
+                    }
+                    Long previous =
+                            readings.computeIfAbsent(id, ignored -> new TreeMap<>())
+                                    .putIfAbsent(sequence, bytes);
+                    if (previous != null && previous != bytes) {
+                        return null;
+                    }
+                } catch (IllegalArgumentException e) {
+                    return null;
+                }
+            }
+            // A task can contain several databases, but its slot-cache attribution
+            // must identify exactly one physical cache.
+            if (readings.isEmpty() || (!perDatabase && readings.size() != 1)) {
+                return null;
+            }
+            for (Map.Entry<UUID, TreeMap<Long, Long>> reading : readings.entrySet()) {
+                long bytes = reading.getValue().lastEntry().getValue();
+                if (!owners.add(reading.getKey()) || bytes > Long.MAX_VALUE - total) {
+                    return null;
+                }
+                total += bytes;
+            }
+        }
+        return total;
+    }
+
+    @Nullable
+    private static CacheCounters aggregateCacheCounters(
+            @Nullable List<Map<String, String>> attempts) {
+        Tuple2<Long, Long> totals = aggregateDatabaseCounters(
+                attempts, MetricNames.A4S_BLOCK_CACHE_COUNTERS, false);
+        return totals == null ? null : new CacheCounters(totals.f0, totals.f1);
+    }
+
+    @Nullable
+    private static StateAccessTiming aggregateStateAccessTiming(
+            @Nullable List<Map<String, String>> attempts) {
+        Tuple2<Long, Long> totals = aggregateDatabaseCounters(
+                attempts, MetricNames.A4S_ROCKSDB_GET_TIMING, true);
+        return totals == null ? null : new StateAccessTiming(totals.f0, totals.f1);
+    }
+
+    @Nullable
+    private static Tuple2<Long, Long> aggregateDatabaseCounters(
+            @Nullable List<Map<String, String>> attempts,
+            String metricName,
+            boolean durationAndCount) {
+        if (attempts == null) {
+            return null;
+        }
+        long firstTotal = 0;
+        long secondTotal = 0;
+        HashSet<UUID> databases = new HashSet<>();
+        for (Map<String, String> attempt : attempts) {
+            Map<UUID, TreeMap<Long, Tuple2<Long, Long>>> samplesByDatabase = new HashMap<>();
+            for (Map.Entry<String, String> metric : attempt.entrySet()) {
+                String name = metric.getKey();
+                if (!metricName.equals(name)
+                        && !name.endsWith("." + metricName)) {
+                    continue;
+                }
+                String value = metric.getValue();
+                String[] parts = value == null ? new String[0] : value.split(":", -1);
+                if (parts.length != 4 || parts[0].length() != 36) {
+                    return null;
+                }
+                try {
+                    UUID database = UUID.fromString(parts[0]);
+                    long sequence = Long.parseLong(parts[1]);
+                    long first = Long.parseLong(parts[2]);
+                    long second = Long.parseLong(parts[3]);
+                    if (sequence <= 0 || first < 0 || second < 0
+                            || durationAndCount && second == 0 && first != 0) {
+                        return null;
+                    }
+                    Tuple2<Long, Long> previous =
+                            samplesByDatabase
+                                    .computeIfAbsent(database, ignored -> new TreeMap<>())
+                                    .putIfAbsent(
+                                            sequence, Tuple2.of(first, second));
+                    if (previous != null
+                            && (previous.f0 != first || previous.f1 != second)) {
+                        return null;
+                    }
+                } catch (IllegalArgumentException e) {
+                    return null;
+                }
+            }
+            if (samplesByDatabase.isEmpty()) {
+                return null;
+            }
+            for (Map.Entry<UUID, TreeMap<Long, Tuple2<Long, Long>>> database :
+                    samplesByDatabase.entrySet()) {
+                if (!databases.add(database.getKey())) {
+                    return null;
+                }
+                Tuple2<Long, Long> latest = null;
+                for (Tuple2<Long, Long> sample : database.getValue().values()) {
+                    if (latest != null
+                            && (sample.f0 < latest.f0 || sample.f1 < latest.f1)) {
+                        return null;
+                    }
+                    latest = sample;
+                }
+                if (latest.f0 > Long.MAX_VALUE - firstTotal
+                        || latest.f1 > Long.MAX_VALUE - secondTotal) {
+                    return null;
+                }
+                firstTotal += latest.f0;
+                secondTotal += latest.f1;
+            }
+        }
+        return Tuple2.of(firstTotal, secondTotal);
+    }
+
+    @Nullable
+    private static Long readPendingRecords(Map<String, String> metrics) {
+        Long pending = null;
+        for (Map.Entry<String, String> metric : metrics.entrySet()) {
+            String name = metric.getKey();
+            if (!"pendingRecords".equals(name) && !name.endsWith(".pendingRecords")) {
+                continue;
+            }
+            // A vertex may expose connector-specific aliases or multiple readers.
+            // Only an unambiguous counter is safe to attribute to this subtask.
+            if (pending != null) {
+                return null;
+            }
+            try {
+                pending = Long.parseLong(metric.getValue());
+                if (pending < 0) {
+                    return null;
+                }
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return pending;
     }
 
     private A4SAggregatedMetricsResponseBody buildShardsResponse(

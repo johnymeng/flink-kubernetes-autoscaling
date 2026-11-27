@@ -158,6 +158,13 @@ public class TimerGauge implements Gauge<Long>, View {
         return accumulatedCount;
     }
 
+    /** Returns the accumulated time including an in-progress measurement. */
+    public synchronized long getAccumulatedCountAt(long timestamp) {
+        return currentMeasurementStartTS == 0
+                ? accumulatedCount
+                : accumulatedCount + Math.max(0, timestamp - currentUpdateTS);
+    }
+
     @VisibleForTesting
     public synchronized long getCount() {
         return currentCount;

@@ -35,6 +35,9 @@ import org.apache.flink.runtime.rest.messages.JobVertexIdPathParameter;
 import org.apache.flink.runtime.rest.messages.job.metrics.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.runtime.rest.util.RestMapperUtils;
 
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.JsonNode;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.databind.ObjectMapper;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -75,7 +78,7 @@ class A4SMissRateCurvePublicationTest {
 
     @Test
     void missingSourceAndColdJoinAreAbsentUntilMeasurementsArrive() throws Exception {
-        var mapper = RestMapperUtils.getStrictObjectMapper();
+        ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
         assertUnavailable(source, "TASK_METRICS_UNAVAILABLE");
         addGauge(source, 0, "other-metric", "1");
         assertUnavailable(source, "HISTOGRAM_UNAVAILABLE");
@@ -136,7 +139,7 @@ class A4SMissRateCurvePublicationTest {
                 "TumblingEventTimeWindows.rocksdb_stack-distance-histogram",
                 new StackDistanceHistogram(new long[] {3, 1}, 4, 1, 1L, 4096L).toMetricString());
 
-        var observation = response(join);
+        A4SAggregatedMetricsResponseBody observation = response(join);
         assertEquals(Status.AVAILABLE, observation.getMrcStatus());
         assertEquals(2, observation.getCurve().orElseThrow().getPoints().size());
     }
@@ -163,7 +166,7 @@ class A4SMissRateCurvePublicationTest {
                 1,
                 "stack-distance-histogram",
                 new StackDistanceHistogram(new long[0], 2, 1, 1L, 4096L).toMetricString());
-        var curve = response(join).getCurve().orElseThrow();
+        MissRateCurve curve = response(join).getCurve().orElseThrow();
         assertEquals(8192L, curve.getPoints().get(0).getCacheSizeBytes());
         assertEquals(0.7, curve.getPoints().get(0).getMissRate(), 1.0e-9);
     }
@@ -178,8 +181,8 @@ class A4SMissRateCurvePublicationTest {
     }
 
     private void assertUnavailable(JobVertexID vertex, String status) throws Exception {
-        var mapper = RestMapperUtils.getStrictObjectMapper();
-        var json = mapper.readTree(mapper.writeValueAsString(response(vertex)));
+        ObjectMapper mapper = RestMapperUtils.getStrictObjectMapper();
+        JsonNode json = mapper.readTree(mapper.writeValueAsString(response(vertex)));
         assertEquals(status, json.path("mrcStatus").asText());
         assertFalse(json.has("scaledMrc"), "Do not publish a null or empty curve");
     }

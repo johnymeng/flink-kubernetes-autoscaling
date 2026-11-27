@@ -18,11 +18,12 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.api.common.JobID;
-import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.a4s.core.MissRateCurveObservation.Status;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedVertexMetricsHeaders;
+import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.FlinkMetric;
+import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
@@ -47,6 +48,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
@@ -88,18 +90,25 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
     }
 
     @Override
-    protected Map<JobVertexID, MissRateCurve> queryAllMissRateCurves(
-            Context ctx, Collection<JobVertexID> jobVertexIds) {
-        var curves = new HashMap<JobVertexID, MissRateCurve>();
+    protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
+            Context ctx, JobTopology topology, Collection<JobVertexID> jobVertexIds) {
+        boolean captureBacklog = AutoScalerOptions.usesStandaloneA4s(ctx.getConfiguration());
+        var observations = new HashMap<JobVertexID, A4SAggregatedMetricsResponseBody>();
         for (JobVertexID vertex : jobVertexIds) {
-            var observation = queryVertexMissRateCurve(ctx, ctx.getJobID(), vertex);
-            observation.getCurve().ifPresent(curve -> curves.put(vertex, curve));
+            var observation =
+                    captureBacklog && topology.isSource(vertex)
+                            ? queryVertexA4sMetrics(ctx, ctx.getJobID(), vertex, true)
+                            : queryVertexMissRateCurve(ctx, ctx.getJobID(), vertex);
+            observations.put(vertex, observation);
             if (observation.getMrcStatus() != Status.AVAILABLE) {
-                LOG.debug("QuickMRC status for job {}, vertex {}: {}",
-                        ctx.getJobID(), vertex, observation.getMrcStatus());
+                LOG.debug(
+                        "QuickMRC status for job {}, vertex {}: {}",
+                        ctx.getJobID(),
+                        vertex,
+                        observation.getMrcStatus());
             }
         }
-        return curves;
+        return observations;
     }
 
     @SneakyThrows
@@ -136,10 +145,57 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
 
     protected A4SAggregatedMetricsResponseBody queryVertexMissRateCurve(
             Context ctx, JobID jobId, JobVertexID jobVertexID) {
+        return queryVertexA4sMetrics(ctx, jobId, jobVertexID, false);
+    }
+
+    protected A4SAggregatedMetricsResponseBody queryVertexA4sMetrics(
+            Context ctx, JobID jobId, JobVertexID jobVertexID, boolean includeBacklog) {
         var parameters = new AggregatedSubtaskMetricsParameters();
         var pathIt = parameters.getPathParameters().iterator();
         ((JobIDPathParameter) pathIt.next()).resolve(jobId);
         ((JobVertexIdPathParameter) pathIt.next()).resolve(jobVertexID);
+        var conf = ctx.getConfiguration();
+        boolean a4s = AutoScalerOptions.usesStandaloneA4s(conf);
+        boolean includeCacheCapacity =
+                a4s && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-capacity", false);
+        boolean includeCacheUsage =
+                a4s && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-usage", false);
+        boolean includeCacheCounters =
+                a4s
+                        && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-hit", false)
+                        && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-miss", false);
+        boolean includeStateSize =
+                a4s
+                        && conf.getBoolean(
+                                "state.backend.rocksdb.metrics.estimate-live-data-size", false);
+        boolean includeStateAccessTiming =
+                a4s && conf.getBoolean("state.backend.rocksdb.metrics.a4s-db-get-timing", false);
+        if (includeBacklog || a4s) {
+            var filter = (MetricsFilterParameter) parameters.getQueryParameters().iterator().next();
+            var fields = new ArrayList<String>();
+            if (includeBacklog) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_OBSERVED_BACKLOG);
+            }
+            if (includeCacheCapacity) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_CAPACITY);
+            }
+            if (includeCacheUsage) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_USAGE);
+            }
+            if (includeCacheCounters) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_CACHE_COUNTERS);
+            }
+            if (includeStateSize) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_SIZE);
+            }
+            if (includeStateAccessTiming) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_STATE_ACCESS_TIMING);
+            }
+            if (a4s) {
+                fields.add(A4SAggregatedMetricsResponseBody.FIELD_NAME_TASK_TIMES);
+            }
+            filter.resolve(fields);
+        }
 
         try (var restClient = ctx.getRestClusterClient()) {
             A4SAggregatedMetricsResponseBody responseBody =

@@ -25,8 +25,11 @@ import org.apache.flink.autoscaler.exceptions.NotReadyException;
 import org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
+import org.apache.flink.autoscaler.realizer.ScalingRealizer.A4sIntentResult;
+import org.apache.flink.autoscaler.state.A4sScalingIntent;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
+import org.apache.flink.autoscaler.utils.CalendarUtils;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.util.Preconditions;
 
@@ -36,10 +39,15 @@ import org.slf4j.LoggerFactory;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.JUSTIN_ENABLED;
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.SCALING_ENABLED;
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.usesStandaloneA4s;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.initRecommendedParallelism;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.resetRecommendedParallelism;
 import static org.apache.flink.autoscaler.metrics.ScalingHistoryUtils.getTrimmedScalingHistory;
@@ -86,8 +94,25 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
     @Override
     public void scale(Context ctx) throws Exception {
         var autoscalerMetrics = getOrInitAutoscalerFlinkMetrics(ctx);
+        var conf = ctx.getConfiguration();
+        boolean standaloneA4s = false;
+        boolean reconcileConditional = false;
+        boolean realizeOverrides = false;
         try {
-            if (!ctx.getConfiguration().getBoolean(AUTOSCALER_ENABLED)) {
+            standaloneA4s = usesStandaloneA4s(conf);
+            boolean autoscalerEnabled = conf.getBoolean(AUTOSCALER_ENABLED);
+            boolean allowNewIntent =
+                    autoscalerEnabled && standaloneA4s && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
+            reconcileConditional = allowNewIntent;
+            var pending = stateStore.getA4sScalingIntent(ctx);
+            reconcileConditional |= pending.isPresent();
+            realizeOverrides = !reconcileConditional;
+            if (reconcileConditional) {
+                scaleConditionally(ctx, autoscalerMetrics, pending, allowNewIntent);
+                return;
+            }
+
+            if (!autoscalerEnabled) {
                 LOG.debug("Autoscaler is disabled");
                 stateStore.clearAll(ctx);
                 stateStore.flush(ctx);
@@ -105,20 +130,81 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         } catch (NotReadyException e) {
             LOG.debug("Not ready for scaling", e);
         } catch (Throwable e) {
+            if (standaloneA4s || reconcileConditional) {
+                // A failed reconciliation can leave one half of an A4S decision in the
+                // state-store cache. Discard it before any subsequent reconciliation.
+                realizeOverrides = false;
+                stateStore.removeInfoFromCache(ctx.getJobKey());
+            }
             onError(ctx, autoscalerMetrics, e);
+            if (reconcileConditional) {
+                // Let the controller retry without interpreting an incomplete status overlay
+                // as a user-initiated spec change.
+                throw e;
+            }
         } finally {
-            try {
-                if (ctx.getConfiguration().getBoolean(JUSTIN_ENABLED)) {
-                    applyResourceProfileOverrides(ctx);
-                } else {
-                    applyParallelismOverrides(ctx);
+            if (realizeOverrides) {
+                try {
+                    if (conf.getBoolean(JUSTIN_ENABLED)) {
+                        applyResourceProfileOverrides(ctx);
+                    } else {
+                        applyParallelismOverrides(ctx);
+                    }
+                    applyConfigOverrides(ctx);
+                } catch (Exception e) {
+                    LOG.error("Error applying overrides.", e);
+                    onError(ctx, autoscalerMetrics, e);
                 }
-                applyConfigOverrides(ctx);
-            } catch (Exception e) {
-                LOG.error("Error applying overrides.", e);
-                onError(ctx, autoscalerMetrics, e);
             }
         }
+    }
+
+    private void scaleConditionally(
+            Context ctx,
+            AutoscalerFlinkMetrics autoscalerMetrics,
+            Optional<A4sScalingIntent> pending,
+            boolean allowNewIntent)
+            throws Exception {
+        var jobId = Objects.toString(ctx.getJobID(), "");
+        if (pending.isPresent() && pending.get().getJobId().equals(jobId)) {
+            scalingRealizer.restoreA4sOverrides(
+                    ctx, pending.get().getParallelism(), pending.get().getResourceProfiles());
+        }
+        scalingRealizer.restoreA4sOverrides(
+                ctx, getParallelismOverrides(ctx), getResourceProfileOverrides(ctx));
+
+        if (ctx.getJobStatus() != JobStatus.RUNNING) {
+            lastEvaluatedMetrics.remove(ctx.getJobKey());
+            return;
+        }
+        if (pending.isEmpty()) {
+            runScalingLogic(ctx, autoscalerMetrics);
+            stateStore.flush(ctx);
+            pending = stateStore.getA4sScalingIntent(ctx);
+        }
+        if (pending.isEmpty()) {
+            return;
+        }
+        var intent = pending.get();
+        var conf = ctx.getConfiguration();
+        boolean allowSubmission =
+                allowNewIntent
+                        && conf.get(SCALING_ENABLED)
+                        && intent.matchesConfiguration(conf)
+                        && !CalendarUtils.inExcludedPeriods(conf, clock.instant());
+        var result =
+                intent.getJobId().equals(jobId)
+                        ? scalingRealizer.reconcileA4sIntent(ctx, intent, clock, allowSubmission)
+                        : A4sIntentResult.DISCARDED;
+        if (result == A4sIntentResult.PENDING) {
+            return;
+        }
+        if (result == A4sIntentResult.APPLIED) {
+            stateStore.storeParallelismOverrides(ctx, intent.getParallelism());
+            stateStore.storeResourceProfileOverrides(ctx, intent.getResourceProfiles());
+        }
+        stateStore.removeA4sScalingIntent(ctx);
+        stateStore.flush(ctx);
     }
 
     @Override
@@ -183,6 +269,10 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         if (parallelismOverrides.isEmpty() && resourceProfileOverrides.isEmpty()) {
             return;
         }
+        if (usesStandaloneA4s(ctx.getConfiguration())
+                && !parallelismOverrides.keySet().equals(resourceProfileOverrides.keySet())) {
+            throw new IllegalStateException("Incomplete A4S parallelism and resource-profile overrides");
+        }
         LOG.debug("Applying parallelism overrides: {}, {}", parallelismOverrides, resourceProfileOverrides);
 
         scalingRealizer.realizeParallelismOverrides(ctx, parallelismOverrides, resourceProfileOverrides);
@@ -190,7 +280,9 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
 
     @VisibleForTesting
     void applyConfigOverrides(Context ctx) throws Exception {
-        if (!ctx.getConfiguration().get(AutoScalerOptions.MEMORY_TUNING_ENABLED)) {
+        var conf = ctx.getConfiguration();
+        if (!conf.get(AutoScalerOptions.MEMORY_TUNING_ENABLED)
+                || usesStandaloneA4s(conf)) {
             return;
         }
 

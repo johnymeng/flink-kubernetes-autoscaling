@@ -37,6 +37,7 @@ import org.apache.flink.core.fs.Path;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.memory.OpaqueMemoryResource;
+import org.apache.flink.runtime.metrics.MetricNames;
 import org.apache.flink.runtime.query.TaskKvStateRegistry;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
 import org.apache.flink.runtime.state.AbstractManagedMemoryStateBackend;
@@ -510,7 +511,26 @@ public class EmbeddedRocksDBStateBackend extends AbstractManagedMemoryStateBacke
                                 resourceContainer.getMemoryWatcherOptions(nativeMetricOptions))
                         .setWriteBatchSize(getWriteBatchSize())
                         .setOverlapFractionThreshold(getOverlapFractionThreshold());
-        return builder.build();
+        final RocksDBSharedResources slotCache =
+                sharedResources != null
+                                && RocksDBSharedResourcesFactory.from(memoryConfiguration, env)
+                                        .isSlotScoped()
+                        ? sharedResources.getResourceHandle()
+                        : null;
+        if (slotCache != null
+                && nativeMetricOptions
+                        .getProperties()
+                        .contains(RocksDBProperty.BlockCacheCapacity.getRocksDBProperty())) {
+            builder.setSlotCacheId(slotCache.getCacheId());
+        }
+        final RocksDBKeyedStateBackend<K> backend = builder.build();
+        if (slotCache != null
+                && nativeMetricOptions
+                        .getProperties()
+                        .contains(RocksDBProperty.BlockCacheUsage.getRocksDBProperty())) {
+            metricGroup.gauge(MetricNames.A4S_SLOT_BLOCK_CACHE_USAGE, slotCache::sampleCacheUsage);
+        }
+        return backend;
     }
 
     @Override

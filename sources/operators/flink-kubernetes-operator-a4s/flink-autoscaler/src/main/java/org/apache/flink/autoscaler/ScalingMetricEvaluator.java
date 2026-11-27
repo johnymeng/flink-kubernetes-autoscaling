@@ -18,20 +18,22 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
+import org.apache.flink.autoscaler.metrics.EvaluatedMetrics.TaskTimeFractions;
 import org.apache.flink.autoscaler.metrics.EvaluatedScalingMetric;
 import org.apache.flink.autoscaler.metrics.MetricAggregator;
 import org.apache.flink.autoscaler.metrics.ScalingMetric;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.utils.AutoScalerUtils;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.TaskTimeTotals;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import org.apache.flink.a4s.core.MissRateCurve;
-import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -61,22 +63,29 @@ public class ScalingMetricEvaluator {
             Configuration conf, CollectedMetricHistory collectedMetrics, Duration restartTime) {
         LOG.debug("Restart time used in metrics evaluation: {}", restartTime);
         var scalingOutput = new HashMap<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>>();
-        var memoryParallelismCurves = new HashMap<JobVertexID, MemoryParallelismCurve>();
         var metricsHistory = collectedMetrics.getMetricHistory();
         var topology = collectedMetrics.getJobTopology();
         CollectedMetrics latestCollectedMetrics = metricsHistory.get(metricsHistory.lastKey());
+        boolean standaloneA4s = AutoScalerOptions.usesStandaloneA4s(conf);
+        boolean legacyA4s =
+                conf.get(AutoScalerOptions.JUSTIN_ENABLED)
+                        && conf.get(AutoScalerOptions.A4S_ENABLED)
+                        && !standaloneA4s;
         Map<JobVertexID, MissRateCurve> collectedMissRateCurves =
                 latestCollectedMetrics.getMissRateCurves() == null
                         ? Map.of()
                         : latestCollectedMetrics.getMissRateCurves();
-        double hitLatencySec = conf.getDouble(AutoScalerOptions.A4S_HIT_LATENCY_SEC);
-        double missLatencySec = conf.getDouble(AutoScalerOptions.A4S_MISS_LATENCY_SEC);
-        int vertexMinParallelism = conf.get(AutoScalerOptions.VERTEX_MIN_PARALLELISM);
-        int vertexMaxParallelism = conf.get(AutoScalerOptions.VERTEX_MAX_PARALLELISM);
-
+        var memoryParallelismCurves = new HashMap<JobVertexID, MemoryParallelismCurve>();
         boolean processingBacklog = isProcessingBacklog(topology, metricsHistory, conf);
 
+        var taskTimeFractions = new HashMap<JobVertexID, TaskTimeFractions>();
         for (var vertex : topology.getVerticesInTopologicalOrder()) {
+            if (standaloneA4s) {
+                var fractions = computeTaskTimeFractions(vertex, metricsHistory);
+                if (fractions != null) {
+                    taskTimeFractions.put(vertex, fractions);
+                }
+            }
             scalingOutput.put(
                     vertex,
                     evaluateMetrics(
@@ -88,31 +97,37 @@ public class ScalingMetricEvaluator {
                             processingBacklog,
                             restartTime));
 
-            // This relies on target data rate first being calculated       
-            LOG.debug("A4S: Evaluating metrics for vertex {}", vertex);
-            MissRateCurve missRateCurve = collectedMissRateCurves.get(vertex);
-            if (missRateCurve == null) {
-                continue;
-            }
-            MemoryParallelismCurve mpc = MemoryParallelismCurve.fromMissRateCurve(
-                scalingOutput.get(vertex).get(TARGET_DATA_RATE).getAverage(),
-                missLatencySec, 
-                hitLatencySec, 
-                vertexMinParallelism,
-                vertexMaxParallelism,
-                missRateCurve);
-            if (mpc != null) {
-                memoryParallelismCurves.put(vertex, mpc);
+            var curve = collectedMissRateCurves.get(vertex);
+            if (legacyA4s && curve != null) {
+                var mpc =
+                        MemoryParallelismCurve.fromMissRateCurve(
+                                scalingOutput.get(vertex).get(TARGET_DATA_RATE).getAverage(),
+                                conf.get(AutoScalerOptions.A4S_MISS_LATENCY_SEC),
+                                conf.get(AutoScalerOptions.A4S_HIT_LATENCY_SEC),
+                                conf.get(AutoScalerOptions.VERTEX_MIN_PARALLELISM),
+                                conf.get(AutoScalerOptions.VERTEX_MAX_PARALLELISM),
+                                curve);
+                if (mpc != null) {
+                    memoryParallelismCurves.put(vertex, mpc);
+                }
             }
         }
 
-        var globalMetrics = evaluateGlobalMetrics(metricsHistory);
-
         return new EvaluatedMetrics(
-                scalingOutput, 
-                globalMetrics, 
-                memoryParallelismCurves, 
-                collectedMissRateCurves);
+                scalingOutput,
+                evaluateGlobalMetrics(metricsHistory),
+                collectedMissRateCurves,
+                memoryParallelismCurves,
+                metricsHistory.firstKey(),
+                metricsHistory.lastKey(),
+                collectedMetrics.getJobRunningTs(),
+                collectedMetrics.getObservedSourceBacklogs(),
+                collectedMetrics.getObservedBlockCacheCapacities(),
+                collectedMetrics.getObservedBlockCacheUsage(),
+                collectedMetrics.getObservedBlockCacheCounters(),
+                collectedMetrics.getObservedStateSizes(),
+                Map.copyOf(taskTimeFractions),
+                collectedMetrics.getObservedStateAccessTiming());
     }
 
     @VisibleForTesting
@@ -174,6 +189,13 @@ public class ScalingMetricEvaluator {
                 computeBusyTimeAvg(conf, metricsHistory, vertex, vertexInfo.getParallelism());
 
         evaluatedMetrics.put(INPUT_RATE, EvaluatedScalingMetric.avg(inputRateAvg));
+        if (latestVertexMetrics.containsKey(OBSERVED_NUM_RECORDS_OUT)
+                && AutoScalerOptions.usesStandaloneA4s(conf)) {
+            double outputRate = getCompleteOutputRate(vertex, metricsHistory);
+            if (Double.isFinite(outputRate)) {
+                evaluatedMetrics.put(OUTPUT_RATE, EvaluatedScalingMetric.avg(outputRate));
+            }
+        }
         evaluatedMetrics.put(
                 TRUE_PROCESSING_RATE,
                 EvaluatedScalingMetric.avg(
@@ -184,7 +206,6 @@ public class ScalingMetricEvaluator {
 
         Optional.ofNullable(latestVertexMetrics.get(LAG))
                 .ifPresent(l -> evaluatedMetrics.put(LAG, EvaluatedScalingMetric.of(l)));
-
         evaluatedMetrics.put(PARALLELISM, EvaluatedScalingMetric.of(vertexInfo.getParallelism()));
 
         evaluatedMetrics.put(
@@ -206,6 +227,66 @@ public class ScalingMetricEvaluator {
 
         computeProcessingRateThresholds(evaluatedMetrics, conf, processingBacklog, restartTime);
         return evaluatedMetrics;
+    }
+
+    @Nullable
+    private static TaskTimeFractions computeTaskTimeFractions(
+            JobVertexID vertex, SortedMap<Instant, CollectedMetrics> metricsHistory) {
+        TaskTimeTotals first = null;
+        TaskTimeTotals previous = null;
+        for (CollectedMetrics sample : metricsHistory.values()) {
+            TaskTimeTotals current =
+                    sample.getTaskTimeTotals() == null
+                            ? null
+                            : sample.getTaskTimeTotals().get(vertex);
+            if (current == null
+                    || current.rosterId == null
+                    || current.rosterId.isBlank()
+                    || !Double.isFinite(current.busyMillis)
+                    || current.busyMillis < 0
+                    || current.idleMillis < 0
+                    || current.backpressuredMillis < 0) {
+                return null;
+            }
+            if (previous != null
+                    && (!current.rosterId.equals(previous.rosterId)
+                            || current.busyMillis < previous.busyMillis
+                            || current.idleMillis < previous.idleMillis
+                            || current.backpressuredMillis < previous.backpressuredMillis)) {
+                return null;
+            }
+            if (first == null) {
+                first = current;
+            }
+            previous = current;
+        }
+        if (first == null) {
+            return null;
+        }
+        double busy = previous.busyMillis - first.busyMillis;
+        long idle = previous.idleMillis - first.idleMillis;
+        long backpressured = previous.backpressuredMillis - first.backpressuredMillis;
+        double total = busy + idle + backpressured;
+        return Double.isFinite(total) && total > 0
+                ? new TaskTimeFractions(busy / total, idle / total, backpressured / total)
+                : null;
+    }
+
+    private static double getCompleteOutputRate(
+            JobVertexID vertex, SortedMap<Instant, CollectedMetrics> metricsHistory) {
+        double previous = 0;
+        for (var sample : metricsHistory.values()) {
+            var metrics = sample.getVertexMetrics().get(vertex);
+            double counter =
+                    metrics == null
+                            ? Double.NaN
+                            : metrics.getOrDefault(OBSERVED_NUM_RECORDS_OUT, Double.NaN);
+            if (!Double.isFinite(counter) || counter < previous) {
+                return Double.NaN;
+            }
+            previous = counter;
+        }
+        return getRate(OBSERVED_NUM_RECORDS_OUT, vertex, metricsHistory);
     }
 
     /**

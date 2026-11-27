@@ -89,7 +89,15 @@ public class ScalingMetrics {
                 getNumRecordsInAccumulated(flinkMetrics, ioMetrics, jobVertexID, isSource);
 
         scalingMetrics.put(ScalingMetric.NUM_RECORDS_IN, numRecordsIn);
-        scalingMetrics.put(ScalingMetric.NUM_RECORDS_OUT, (double) ioMetrics.getNumRecordsOut());
+        long numRecordsOut = ioMetrics.getNumRecordsOut();
+        scalingMetrics.put(ScalingMetric.NUM_RECORDS_OUT, (double) numRecordsOut);
+        if (AutoScalerOptions.usesStandaloneA4s(conf)
+                && ioMetrics.isNumRecordsOutComplete()
+                && numRecordsOut >= 0
+                && numRecordsOut <= (1L << 53)) {
+            // The metric history stores doubles. Larger counters cannot be differenced exactly.
+            scalingMetrics.put(ScalingMetric.OBSERVED_NUM_RECORDS_OUT, (double) numRecordsOut);
+        }
 
         if (isSource) {
             double numRecordsInPerSecond =
@@ -269,8 +277,13 @@ public class ScalingMetrics {
             Map<FlinkMetric, AggregatedMetric> flinkMetrics,
             Map<ScalingMetric, Double> scalingMetrics) {
 
-        double cacheHits = flinkMetrics.get(FlinkMetric.ROCKS_DB_BLOCK_CACHE_HIT).getSum();
-        double cacheMisses = flinkMetrics.get(FlinkMetric.ROCKS_DB_BLOCK_CACHE_MISS).getSum();
+        var hits = flinkMetrics.get(FlinkMetric.ROCKS_DB_BLOCK_CACHE_HIT);
+        var misses = flinkMetrics.get(FlinkMetric.ROCKS_DB_BLOCK_CACHE_MISS);
+        if (hits == null || misses == null || hits.getSum() == null || misses.getSum() == null) {
+            return;
+        }
+        double cacheHits = hits.getSum();
+        double cacheMisses = misses.getSum();
 
         double rate = 0.0;
         if (cacheHits != 0 && cacheMisses != 0) {

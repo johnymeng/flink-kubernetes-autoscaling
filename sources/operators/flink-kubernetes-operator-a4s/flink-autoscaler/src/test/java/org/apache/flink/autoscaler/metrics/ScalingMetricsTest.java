@@ -24,9 +24,11 @@ import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.rest.messages.job.metrics.AggregatedMetric;
+import org.apache.flink.runtime.rest.messages.job.metrics.IOMetricsInfo;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import java.util.Collections;
@@ -43,6 +45,18 @@ public class ScalingMetricsTest {
 
     private static final double PREV_TPR = 123;
     private static final JobVertexID SOURCE = new JobVertexID();
+
+    @ParameterizedTest
+    @EnumSource(
+            value = FlinkMetric.class,
+            names = {"ROCKS_DB_BLOCK_CACHE_HIT", "ROCKS_DB_BLOCK_CACHE_MISS"})
+    void leavesCacheRateUnavailableWhenACounterIsMissing(FlinkMetric available) {
+        Map<ScalingMetric, Double> scalingMetrics = new HashMap<>();
+        ScalingMetrics.computeCacheRateMetrics(
+                Map.of(FlinkMetric.ROCKS_DB_BLOCK_CACHE_USAGE, aggSum(256.), available, aggSum(8.)),
+                scalingMetrics);
+        assertTrue(scalingMetrics.isEmpty());
+    }
 
     @Test
     public void testProcessingAndOutputMetrics() {
@@ -97,6 +111,31 @@ public class ScalingMetricsTest {
         assertEquals(
                 Map.of(ScalingMetric.NUM_RECORDS_IN, 1., ScalingMetric.NUM_RECORDS_OUT, 2.),
                 scalingMetrics);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true, 123, 123", "false, 123,", "true, 9007199254740993,"})
+    void carriesOnlyCompleteAndExactlyRepresentableOutputCountersToA4s(
+            boolean complete, long count, Double expected) {
+        var source = new JobVertexID();
+        var sink = new JobVertexID();
+        var ioMetrics =
+                IOMetrics.from(
+                        new IOMetricsInfo(0, true, 0, true, 100, true, count, complete, 0, 0, 0));
+        var topology =
+                new JobTopology(
+                        new VertexInfo(source, Map.of(), 1, 8),
+                        new VertexInfo(sink, Map.of(source, REBALANCE), 1, 8, ioMetrics));
+        var metrics = new HashMap<ScalingMetric, Double>();
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+
+        ScalingMetrics.computeDataRateMetrics(sink, Map.of(), metrics, topology, conf, () -> 0.0);
+
+        assertEquals((double) count, metrics.get(ScalingMetric.NUM_RECORDS_OUT));
+        assertEquals(expected, metrics.get(ScalingMetric.OBSERVED_NUM_RECORDS_OUT));
     }
 
     @ParameterizedTest

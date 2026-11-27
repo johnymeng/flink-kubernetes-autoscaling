@@ -1,0 +1,5 @@
+**
+!Dockerfile
+!a4s-runner/
+!a4s-runner/target/
+!a4s-runner/target/a4s-runner.jar

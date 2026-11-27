@@ -17,14 +17,18 @@
 
 package org.apache.flink.autoscaler.metrics;
 
-import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import lombok.Value;
 
+import java.time.Instant;
 import java.util.Map;
 
 /** Collected scaling metrics. */
@@ -34,19 +38,61 @@ import java.util.Map;
 public class EvaluatedMetrics {
     private Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics;
     private Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics;
-    private Map<JobVertexID, MemoryParallelismCurve> memoryParallelismCurves;
-    private Map<JobVertexID, MissRateCurve> missRateCurves;
+    private Map<JobVertexID, MissRateCurve> missRateCurves = Map.of();
+    private Map<JobVertexID, MemoryParallelismCurve> memoryParallelismCurves = Map.of();
+    private Instant windowStart;
+    private Instant windowEnd;
+    private Instant jobRunningSince;
+    private Map<JobVertexID, Long> observedSourceBacklogs = Map.of();
+    private Map<JobVertexID, Long> observedBlockCacheCapacities = Map.of();
+    private Map<JobVertexID, Long> observedBlockCacheUsage = Map.of();
+    private Map<JobVertexID, CacheCounters> observedBlockCacheCounters = Map.of();
+    private Map<JobVertexID, Long> observedStateSizes = Map.of();
+    private Map<JobVertexID, TaskTimeFractions> taskTimeFractions = Map.of();
+    private Map<JobVertexID, StateAccessTiming> observedStateAccessTiming = Map.of();
+
+    /** Fractions of the classified task time over the metrics window. */
+    @Value
+    public static class TaskTimeFractions {
+        double busy;
+        double idle;
+        double backpressured;
+    }
 
     public EvaluatedMetrics(
-        Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics, 
-        Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics) {
-        this(vertexMetrics, globalMetrics, null, null);
+            Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
+            Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics) {
+        this(vertexMetrics, globalMetrics, Map.of());
     }
 
     public EvaluatedMetrics(
             Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
             Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics,
-            Map<JobVertexID, MemoryParallelismCurve> memoryParallelismCurves) {
-        this(vertexMetrics, globalMetrics, memoryParallelismCurves, null);
+            Map<JobVertexID, MissRateCurve> missRateCurves) {
+        this(vertexMetrics, globalMetrics, missRateCurves, null, null, null);
+    }
+
+    public EvaluatedMetrics(
+            Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics,
+            Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics,
+            Map<JobVertexID, MissRateCurve> missRateCurves,
+            Instant windowStart,
+            Instant windowEnd,
+            Instant jobRunningSince) {
+        this(
+                vertexMetrics,
+                globalMetrics,
+                missRateCurves,
+                Map.of(),
+                windowStart,
+                windowEnd,
+                jobRunningSince,
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of(),
+                Map.of());
     }
 }

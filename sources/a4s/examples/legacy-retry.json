@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "snapshot": {
+    "jobId": "nexmark-q8",
+    "snapshotId": "legacy-retry-example",
+    "executionGeneration": "generation-7",
+    "measuredAtMillis": 10000,
+    "windowStartMillis": 1000,
+    "windowEndMillis": 10000,
+    "metricsComplete": true,
+    "operators": [
+      {
+        "operatorId": "join",
+        "operatorType": "join",
+        "stateful": true,
+        "current": {
+          "parallelism": 1,
+          "managedMemoryPerTaskBytes": 134217728,
+          "cpuCoresPerTask": 1
+        },
+        "minParallelism": 1,
+        "maxParallelism": 8,
+        "permittedParallelisms": [],
+        "startingParallelism": 1,
+        "cacheSensitive": true,
+        "targetRecordsPerSecond": 70,
+        "upstreamOperators": [],
+        "capacityAxis": "LEGACY_AGGREGATE_BYTES",
+        "missRateCurve": [
+          {
+            "capacityBytes": 104857600,
+            "missRate": 0.6
+          },
+          {
+            "capacityBytes": 734003200,
+            "missRate": 0.1
+          }
+        ]
+      }
+    ],
+    "workers": [],
+    "stateBackend": "embedded",
+    "reconfigurationInProgress": false,
+    "capabilities": {
+      "actions": {
+        "PARALLELISM": "WITH_RESTART",
+        "STATEFUL_RECOVERY": "WITH_RESTART",
+        "MANAGED_MEMORY_PER_TASK": "WITH_RESTART"
+      }
+    }
+  },
+  "constraints": {
+    "minCachePerTaskBytes": 0,
+    "maxCachePerTaskBytes": 9223372036854775807,
+    "totalCacheBudgetBytes": null,
+    "cpuBudgetCores": 6,
+    "cooldownMillis": 0,
+    "maxSnapshotAgeMillis": 30000,
+    "requiresPlacement": false,
+    "maxManagedMemoryPerTaskBytes": 629145600
+  },
+  "policy": {
+    "mode": "LEGACY_SLOT_RESERVATION",
+    "maxAttempts": 20,
+    "hitSeconds": 5e-06,
+    "missSeconds": 0.025,
+    "managedMemoryBaseBytes": 16777216
+  },
+  "previousState": {
+    "version": 1
+  },
+  "evaluatedAtMillis": 10001
+}

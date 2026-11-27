@@ -57,9 +57,8 @@ public class A4STest {
         EvaluatedMetrics evaluatedMetrics =
                 new EvaluatedMetrics(
                         Map.of(operator, operatorMetrics),
-                        Map.of(),
-                        Map.of(operator, mpc),
                         Map.of());
+        evaluatedMetrics.setMemoryParallelismCurves(Map.of(operator, mpc));
 
         Map<JobVertexID, ScalingSummary> scalingSummaries = Map.of(operator, new ScalingSummary(1, 3, Map.of()));
         Configuration conf = new Configuration();

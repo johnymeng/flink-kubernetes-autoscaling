@@ -45,6 +45,7 @@ import org.apache.flink.runtime.client.DuplicateJobSubmissionException;
 import org.apache.flink.runtime.client.JobSubmissionException;
 import org.apache.flink.runtime.clusterframework.ApplicationStatus;
 import org.apache.flink.runtime.clusterframework.types.ResourceID;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.dispatcher.cleanup.CleanupRunnerFactory;
 import org.apache.flink.runtime.dispatcher.cleanup.DispatcherResourceCleanerFactory;
 import org.apache.flink.runtime.dispatcher.cleanup.ResourceCleaner;
@@ -64,6 +65,7 @@ import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.OperatorID;
 import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.jobmanager.JobGraphWriter;
+import org.apache.flink.runtime.jobmanager.scheduler.SlotSharingGroup;
 import org.apache.flink.runtime.jobmaster.JobManagerRunner;
 import org.apache.flink.runtime.jobmaster.JobManagerRunnerResult;
 import org.apache.flink.runtime.jobmaster.JobManagerSharedServices;
@@ -147,6 +149,11 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
     public static final String DISPATCHER_NAME = "dispatcher";
 
     private static final int INITIAL_JOB_MANAGER_RUNNER_REGISTRY_CAPACITY = 16;
+
+    private static final ConfigOption<Boolean> EXCLUSIVE_VERTEX_SLOTS =
+            ConfigOptions.key("pipeline.exclusive-vertex-slots")
+                    .booleanType()
+                    .defaultValue(false);
 
     private final Configuration configuration;
 
@@ -539,11 +546,38 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
                                 "Currently jobs is not supported if parts of the vertices have "
                                         + "resources configured. The limitation will be removed in future versions."));
             } else {
+                isolateDefaultSlotGroups(jobGraph, configuration);
                 return internalSubmitJob(jobGraph);
             }
         } catch (FlinkException e) {
             return FutureUtils.completedExceptionally(e);
         }
+    }
+
+    @VisibleForTesting
+    static void isolateDefaultSlotGroups(JobGraph graph, Configuration clusterConfiguration)
+            throws JobSubmissionException {
+        if (!graph.getJobConfiguration()
+                .getOptional(EXCLUSIVE_VERTEX_SLOTS)
+                .orElseGet(() -> clusterConfiguration.get(EXCLUSIVE_VERTEX_SLOTS))) {
+            return;
+        }
+
+        final List<JobVertex> sharedVertices = new ArrayList<>();
+        for (JobVertex vertex : graph.getVertices()) {
+            final SlotSharingGroup group = vertex.getSlotSharingGroup();
+            if (group != null && group.getJobVertexIds().size() > 1) {
+                if (!ResourceProfile.UNKNOWN.equals(group.getResourceProfile())) {
+                    throw new JobSubmissionException(
+                            graph.getJobID(),
+                            "Exclusive startup slots cannot duplicate the shared resource budget for "
+                                    + vertex.getName());
+                }
+                sharedVertices.add(vertex);
+            }
+        }
+
+        sharedVertices.forEach(vertex -> vertex.setSlotSharingGroup(new SlotSharingGroup()));
     }
 
     @Override
@@ -1230,6 +1264,13 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
     }
 
     @Override
+    public CompletableFuture<JustinResourceRequirements> requestJustinResourceRequirements(
+            JobID jobId, boolean includeExecutionToken) {
+        return performOperationOnJobMasterGateway(
+                jobId, gateway -> gateway.requestJustinResourceRequirements(includeExecutionToken));
+    }
+
+    @Override
     public CompletableFuture<Acknowledge> updateJustinResourceRequirements(
             JobID jobId, JustinResourceRequirements justinResourceRequirements) {
         if (!pendingJobResourceRequirementsUpdates.add(jobId)) {
@@ -1238,52 +1279,73 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId>
                             "Another update to the job [%s] resource requirements is in progress.",
                             HttpResponseStatus.CONFLICT));
         }
-        return performOperationOnJobMasterGateway(jobId, gateway -> gateway.requestJob(webTimeout))
-                .thenApply(
-                        job -> {
-                            final Map<JobVertexID, Integer> maxParallelismPerJobVertex =
-                                    new HashMap<>();
-                            for (ArchivedExecutionJobVertex vertex :
-                                    job.getArchivedExecutionGraph().getVerticesTopologically()) {
-                                maxParallelismPerJobVertex.put(
-                                        vertex.getJobVertexId(), vertex.getMaxParallelism());
-                            }
-                            return maxParallelismPerJobVertex;
-                        })
-                .thenAccept(
-                        maxParallelismPerJobVertex ->
-                                validateMaxParallelism(
-                                        justinResourceRequirements, maxParallelismPerJobVertex))
-                .thenRunAsync(
-                        () -> {
-                            try {
-                                jobGraphWriter.putJustinResourceRequirements(
-                                        jobId, justinResourceRequirements);
-                            } catch (Exception e) {
-                                throw new CompletionException(
-                                        new RestHandlerException(
-                                                "The resource requirements could not be persisted and have not been applied. Please retry.",
-                                                HttpResponseStatus.INTERNAL_SERVER_ERROR,
-                                                e));
-                            }
-                        },
-                        ioExecutor)
-                .thenComposeAsync(
-                        ignored ->
-                                performOperationOnJobMasterGateway(
-                                        jobId,
-                                        jobMasterGateway ->
-                                                jobMasterGateway.updateJustinResourceRequirements(
-                                                        justinResourceRequirements)),
-                        getMainThreadExecutor())
-                .whenComplete(
-                        (ack, error) -> {
-                            if (error != null) {
-                                log.debug(
-                                        "Failed to update requirements for job {}.", jobId, error);
-                            }
-                            pendingJobResourceRequirementsUpdates.remove(jobId);
-                        });
+        final CompletableFuture<Void> validated =
+                performOperationOnJobMasterGateway(jobId, gateway -> gateway.requestJob(webTimeout))
+                        .thenAccept(
+                                job -> {
+                                    final Map<JobVertexID, Integer> maxParallelismPerJobVertex =
+                                            new HashMap<>();
+                                    for (ArchivedExecutionJobVertex vertex :
+                                            job.getArchivedExecutionGraph().getVerticesTopologically()) {
+                                        maxParallelismPerJobVertex.put(
+                                                vertex.getJobVertexId(), vertex.getMaxParallelism());
+                                    }
+                                    validateMaxParallelism(
+                                            justinResourceRequirements, maxParallelismPerJobVertex);
+                                });
+
+        final CompletableFuture<Acknowledge> updated;
+        if (justinResourceRequirements.getExecutionToken().isPresent()) {
+            // A rejected guard must not leave the speculative target in the JobGraph store.
+            final JustinResourceRequirements accepted =
+                    new JustinResourceRequirements(justinResourceRequirements.getJobVertexParallelisms());
+            updated =
+                    applyJustinRequirements(jobId, justinResourceRequirements, validated)
+                            .thenCompose(
+                                    ack -> persistJustinRequirements(jobId, accepted, true)
+                                            .thenApply(ignored -> ack));
+        } else {
+            updated =
+                    applyJustinRequirements(
+                            jobId,
+                            justinResourceRequirements,
+                            validated.thenCompose(ignored -> persistJustinRequirements(
+                                    jobId, justinResourceRequirements, false)));
+        }
+
+        return updated.whenComplete(
+                (ack, error) -> {
+                    if (error != null) {
+                        log.debug("Failed to update requirements for job {}.", jobId, error);
+                    }
+                    pendingJobResourceRequirementsUpdates.remove(jobId);
+                });
+    }
+
+    private CompletableFuture<Acknowledge> applyJustinRequirements(
+            JobID jobId, JustinResourceRequirements requirements, CompletableFuture<Void> ready) {
+        return ready.thenComposeAsync(
+                ignored -> performOperationOnJobMasterGateway(
+                        jobId, gateway -> gateway.updateJustinResourceRequirements(requirements)),
+                getMainThreadExecutor());
+    }
+
+    private CompletableFuture<Void> persistJustinRequirements(
+            JobID jobId, JustinResourceRequirements requirements, boolean applied) {
+        return CompletableFuture.runAsync(
+                () -> {
+                    try {
+                        jobGraphWriter.putJustinResourceRequirements(jobId, requirements);
+                    } catch (Exception error) {
+                        throw new CompletionException(new RestHandlerException(
+                                applied
+                                        ? "The resource requirements were accepted by the scheduler but could not be persisted."
+                                        : "The resource requirements could not be persisted and have not been applied. Please retry.",
+                                HttpResponseStatus.INTERNAL_SERVER_ERROR,
+                                error));
+                    }
+                },
+                ioExecutor);
     }
 
     private static void validateMaxParallelism(

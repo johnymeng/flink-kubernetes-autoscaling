@@ -45,7 +45,8 @@ fi
 OPERATOR_SOURCE="${REPO_ROOT}/${OPERATOR_SOURCE_DIR}"
 
 cmd=(docker build --platform linux/amd64
-  --build-context "flink-src=${FLINK_RUNTIME_A4S_SOURCE}")
+  --build-context "flink-src=${FLINK_RUNTIME_A4S_SOURCE}"
+  --build-context "a4s-src=${REPO_ROOT}/sources/a4s")
 if [[ "${NO_CACHE}" == "true" ]]; then
   cmd+=(--no-cache)
 fi

@@ -18,11 +18,15 @@
 package org.apache.flink.autoscaler.metrics;
 
 import org.apache.flink.autoscaler.topology.JobTopology;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
+import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 
 import lombok.Data;
 import lombok.Setter;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.SortedMap;
 
 /** Topology and collected metric history. */
@@ -31,5 +35,13 @@ public class CollectedMetricHistory {
     final JobTopology jobTopology;
     final SortedMap<Instant, CollectedMetrics> metricHistory;
     final Instant jobRunningTs;
+    /** Latest verified source counters. These do not belong to the persisted rate history. */
+    @Setter private Map<JobVertexID, Long> observedSourceBacklogs = Map.of();
+
+    @Setter private Map<JobVertexID, Long> observedBlockCacheCapacities = Map.of();
+    @Setter private Map<JobVertexID, Long> observedBlockCacheUsage = Map.of();
+    @Setter private Map<JobVertexID, CacheCounters> observedBlockCacheCounters = Map.of();
+    @Setter private Map<JobVertexID, StateAccessTiming> observedStateAccessTiming = Map.of();
+    @Setter private Map<JobVertexID, Long> observedStateSizes = Map.of();
     @Setter private boolean fullyCollected;
 }
