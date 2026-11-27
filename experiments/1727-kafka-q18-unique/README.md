@@ -28,3 +28,9 @@ Each policy has a complete standalone manifest:
 
 - `jobs/justin/experiment.yaml`
 - `jobs/ds2/experiment.yaml`
+
+## Plot Results
+
+Run `experiments/1727-kafka-q18-unique/plot.py --results-root <archive-root> --latest`.
+See [plotting results](../../docs/experiment-flow.md#export-and-plot-results) for
+direct CSV inputs, comparisons, and metric selection.

@@ -209,6 +209,10 @@ experiments/1724-kafka-q20-unique/analysis/export-experiment-data.py \
   --prom-url "http://localhost:${PROMETHEUS_LOCAL_PORT:-19091}"
 ```
 
+Plot the exported directory with `experiments/1724-kafka-q20-unique/plot.py
+--run-dir <export-directory>`. See [plotting results](../../docs/experiment-flow.md#export-and-plot-results)
+for run comparisons and metric selection.
+
 ## Stop A Run
 
 After exporting, stop the producer, consumer, and port-forwards:

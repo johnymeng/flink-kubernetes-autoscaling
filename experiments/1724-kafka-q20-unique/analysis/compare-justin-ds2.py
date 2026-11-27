@@ -4,37 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 
-
-def load_series(path: Path) -> tuple[list[float], list[float]]:
-    xs: list[float] = []
-    ys: list[float] = []
-    if not path.exists():
-        return xs, ys
-    with path.open(encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        first_ts: float | None = None
-        for row in reader:
-            value = row.get("value", "")
-            if value in ("", "NaN", "nan"):
-                continue
-            ts = float(row["timestamp"])
-            if first_ts is None:
-                first_ts = ts
-            xs.append((ts - first_ts) / 60.0)
-            ys.append(float(value))
-    return xs, ys
-
-
-def label_for(path: Path) -> str:
-    metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
-    return metadata["autoscaler"]
+from plot_data import elapsed_minutes, load_series, run_start
 
 
 def main() -> None:
@@ -49,19 +24,23 @@ def main() -> None:
 
     fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
     for path, color in [(left, "tab:blue"), (right, "tab:orange")]:
-        label = label_for(path)
-        x, y = load_series(path / "throughput_total_source.csv")
-        axes[0].plot(x, y, label=label, color=color)
+        metadata = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+        label = metadata["autoscaler"]
+        throughput_t, throughput_v = load_series(path / "throughput_total_source.csv")
+        busy_t, busy_v = load_series(path / "join_busy_pct.csv")
+        bid_t, bid_v = load_series(path / "kafka_lag_bid.csv")
+        auction_t, auction_v = load_series(path / "kafka_lag_auction.csv")
+        start = run_start(metadata, throughput_t, busy_t, bid_t, auction_t)
 
-        x, y = load_series(path / "join_busy_pct.csv")
-        axes[1].plot(x, y, label=f"{label} busy%", color=color)
-
-        x1, y1 = load_series(path / "kafka_lag_bid.csv")
-        x2, y2 = load_series(path / "kafka_lag_auction.csv")
-        if y1:
-            axes[2].plot(x1, y1, label=f"{label} bid lag", color=color, linestyle="-")
-        if y2:
-            axes[2].plot(x2, y2, label=f"{label} auction lag", color=color, linestyle=":")
+        axes[0].plot([elapsed_minutes(t, start) for t in throughput_t], throughput_v, label=label, color=color)
+        axes[1].plot([elapsed_minutes(t, start) for t in busy_t], busy_v, label=f"{label} busy%", color=color)
+        if bid_v:
+            axes[2].plot([elapsed_minutes(t, start) for t in bid_t], bid_v, label=f"{label} bid lag", color=color)
+        if auction_v:
+            axes[2].plot(
+                [elapsed_minutes(t, start) for t in auction_t], auction_v,
+                label=f"{label} auction lag", color=color, linestyle=":",
+            )
 
     axes[0].set_title("Total Source Throughput")
     axes[0].set_ylabel("events/s")
@@ -75,9 +54,13 @@ def main() -> None:
 
     axes[2].set_title("Kafka Lag")
     axes[2].set_ylabel("events")
-    axes[2].set_xlabel("Minutes since experiment start")
+    axes[2].set_xlabel("Elapsed time (min)")
     axes[2].legend()
     axes[2].grid(True, alpha=0.3)
+
+    axes[2].set_xlim(left=0)
+    for ax in axes:
+        ax.set_ylim(bottom=0)
 
     fig.tight_layout()
     output = Path(args.output).resolve() if args.output else Path.cwd() / "compare_justin_ds2.png"

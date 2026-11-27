@@ -6,29 +6,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 
-import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-
-
-def load_series(path: Path) -> tuple[list[datetime], list[float]]:
-    times: list[datetime] = []
-    values: list[float] = []
-    if not path.exists():
-        return times, values
-    with path.open(encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        for row in reader:
-            value = row.get("value", "")
-            if value in ("", "NaN", "nan"):
-                continue
-            times.append(datetime.fromtimestamp(float(row["timestamp"]), tz=timezone.utc))
-            values.append(float(value))
-    return times, values
+from plot_data import elapsed_minutes, load_series, run_start
 
 
 def load_rows(path: Path) -> list[dict[str, str]]:
@@ -36,15 +18,6 @@ def load_rows(path: Path) -> list[dict[str, str]]:
         return []
     with path.open(encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
-
-
-def step_series(rows: list[dict[str, str]], value_key: str) -> tuple[list[datetime], list[float]]:
-    times: list[datetime] = []
-    values: list[float] = []
-    for row in rows:
-        times.append(datetime.fromtimestamp(float(row["timestamp"]), tz=timezone.utc))
-        values.append(float(row[value_key]))
-    return times, values
 
 
 def value_at(rows: list[dict[str, str]], timestamp: float, value_key: str) -> str:
@@ -94,7 +67,9 @@ def main() -> None:
     lag_auc_t, lag_auc_v = load_series(experiment_dir / "kafka_lag_auction.csv")
 
     memory_rows = load_rows(experiment_dir / "memory_timeline.csv")
-    rescale_rows = load_rows(experiment_dir / "rescale_windows.csv")
+    mem_t = [float(row["timestamp"]) for row in memory_rows]
+    mem_v = [float(row["memory_mb"]) for row in memory_rows]
+    start = run_start(metadata, throughput_t, tm_t, join_p_t, busy_t, hit_t, lag_bid_t, lag_auc_t, mem_t)
 
     fig, axes = plt.subplots(4, 1, figsize=(18, 13), sharex=True)
     fig.suptitle(
@@ -104,23 +79,23 @@ def main() -> None:
         fontweight="bold",
     )
 
-    axes[0].plot(throughput_t, throughput_v, label="Total throughput")
+    axes[0].plot([elapsed_minutes(t, start) for t in throughput_t], throughput_v, label="Total throughput")
     axes[0].set_ylabel("Throughput (events/s)", fontsize=15)
-    axes[0].set_ylim(bottom=0)
     axes[0].legend(loc="upper right", fontsize=12)
     axes[0].grid(True, alpha=0.3)
 
     axes[1].set_title("CPU & Memory Usage", fontsize=20)
-    axes[1].plot(tm_t, tm_v, label="CPU (# TMs)", linewidth=2)
+    axes[1].plot([elapsed_minutes(t, start) for t in tm_t], tm_v, label="CPU (# TMs)", linewidth=2)
     axes[1].set_ylabel("CPU count (# task managers)", fontsize=15)
-    axes[1].set_ylim(bottom=0)
     axes[1].grid(True, alpha=0.3)
-    mem_t, mem_v = step_series(memory_rows, "memory_mb")
     if mem_t:
         mem_ax = axes[1].twinx()
         uses_memory_levels = metadata.get("autoscaler") in ("justin", "a4s")
         mem_label = "Memory Level" if uses_memory_levels else "Memory (MB)"
-        mem_ax.step(mem_t, mem_v, where="post", linestyle=":", linewidth=2, label=mem_label)
+        mem_ax.step(
+            [elapsed_minutes(t, start) for t in mem_t], mem_v,
+            where="post", linestyle=":", linewidth=2, label=mem_label,
+        )
         mem_ax.set_ylabel(mem_label, fontsize=15)
         left_handles, left_labels = axes[1].get_legend_handles_labels()
         right_handles, right_labels = mem_ax.get_legend_handles_labels()
@@ -129,31 +104,32 @@ def main() -> None:
         axes[1].legend(loc="upper left", fontsize=12)
 
     axes[2].set_title("Kafka Source Lag", fontsize=20)
-    axes[2].plot(lag_auc_t, lag_auc_v, label="Source: auction_kafka")
-    axes[2].plot(lag_bid_t, lag_bid_v, label="Source: bid_kafka")
+    axes[2].plot([elapsed_minutes(t, start) for t in lag_auc_t], lag_auc_v, label="Source: auction_kafka")
+    axes[2].plot([elapsed_minutes(t, start) for t in lag_bid_t], lag_bid_v, label="Source: bid_kafka")
     axes[2].set_ylabel("Lag (events)", fontsize=15)
-    axes[2].set_ylim(bottom=0)
     axes[2].legend(loc="upper right", fontsize=12)
     axes[2].grid(True, alpha=0.3)
 
     axes[3].set_title("Join Busy Time", fontsize=20)
-    axes[3].plot(busy_t, busy_v, color="tab:green", label="busy%")
+    axes[3].plot([elapsed_minutes(t, start) for t in busy_t], busy_v, color="tab:green", label="busy%")
     axes[3].set_ylabel("Busy (%)", fontsize=15)
-    axes[3].set_ylim(bottom=0)
     axes[3].grid(True, alpha=0.3)
     cache_ax = axes[3].twinx()
-    cache_ax.plot(hit_t, hit_v, color="tab:orange", linestyle=":", label="cache hit rate")
+    cache_ax.plot(
+        [elapsed_minutes(t, start) for t in hit_t], hit_v,
+        color="tab:orange", linestyle=":", label="cache hit rate",
+    )
     cache_ax.set_ylabel("Cache hit rate (%)", fontsize=15)
     handles, labels = axes[3].get_legend_handles_labels()
     handles2, labels2 = cache_ax.get_legend_handles_labels()
     axes[3].legend(handles + handles2, labels + labels2, loc="upper right", fontsize=12)
 
     if throughput_t:
-        end_ts = throughput_t[-1].timestamp()
+        end_ts = throughput_t[-1]
         join_rows = drop_short_segments(
             compress_value_rows(
                 [
-                    {"timestamp": str(point.timestamp()), "value": str(value)}
+                    {"timestamp": str(point), "value": str(value)}
                     for point, value in zip(join_p_t, join_p_v)
                 ],
                 "value",
@@ -165,20 +141,20 @@ def main() -> None:
             {
                 *[float(row["timestamp"]) for row in join_rows],
                 *[float(row["timestamp"]) for row in memory_segments],
-                throughput_t[-1].timestamp(),
+                end_ts,
             }
         )
 
         # vertical dotted line at each parallelism transition (all join_rows except the first,
         # which is just the initial state at start_ts)
         for row in join_rows[1:]:
-            t = datetime.fromtimestamp(float(row["timestamp"]), tz=timezone.utc)
+            t = elapsed_minutes(float(row["timestamp"]), start)
             for ax in axes:
                 ax.axvline(t, color="black", linestyle=":", linewidth=1.2, alpha=0.6, zorder=1)
 
         y_max = max(throughput_v) if throughput_v else 1.0
         for left, right in zip(segment_points[:-1], segment_points[1:]):
-            if right <= left:
+            if elapsed_minutes(left, start) == elapsed_minutes(right, start):
                 continue
             mid = (left + right) / 2
             p_value = value_at(join_rows, mid, "value")
@@ -186,7 +162,7 @@ def main() -> None:
             if memory_segments:
                 label += f" ml={value_at(memory_segments, mid, 'memory_level')}"
             axes[0].text(
-                datetime.fromtimestamp(mid, tz=timezone.utc),
+                elapsed_minutes(mid, start),
                 y_max * 0.97,
                 label,
                 ha="center",
@@ -195,9 +171,10 @@ def main() -> None:
                 bbox={"boxstyle": "round,pad=0.2", "facecolor": "white", "alpha": 0.8},
             )
 
-    axes[3].xaxis.set_major_formatter(mdates.DateFormatter("%H:%M", tz=timezone.utc))
-    axes[3].set_xlabel("Time (UTC)", fontsize=15)
-    fig.autofmt_xdate()
+    axes[3].set_xlabel("Elapsed time (min)", fontsize=15)
+    axes[3].set_xlim(left=0)
+    for ax in fig.axes:
+        ax.set_ylim(bottom=0)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
 
     output = Path(args.output).resolve() if args.output else experiment_dir / "plot.png"
