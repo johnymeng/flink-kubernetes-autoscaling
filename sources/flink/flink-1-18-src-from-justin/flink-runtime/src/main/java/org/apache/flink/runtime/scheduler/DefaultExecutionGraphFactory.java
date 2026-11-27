@@ -19,6 +19,8 @@
 package org.apache.flink.runtime.scheduler;
 
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.WebOptions;
 import org.apache.flink.runtime.blob.BlobWriter;
@@ -47,6 +49,7 @@ import org.apache.flink.util.function.CachingSupplier;
 import org.slf4j.Logger;
 
 import java.util.HashSet;
+import java.util.Optional;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.function.Supplier;
@@ -55,6 +58,10 @@ import static org.apache.flink.util.Preconditions.checkNotNull;
 
 /** Default {@link ExecutionGraphFactory} implementation. */
 public class DefaultExecutionGraphFactory implements ExecutionGraphFactory {
+
+    /** Transient correlation ID carried by the scheduler's execution graph snapshot. */
+    public static final ConfigOption<Long> NATIVE_RESCALE_GENERATION =
+            ConfigOptions.key("$internal.native-rescale.generation").longType().noDefaultValue();
 
     private final Configuration configuration;
     private final ClassLoader userCodeClassLoader;
@@ -188,10 +195,17 @@ public class DefaultExecutionGraphFactory implements ExecutionGraphFactory {
                         nonFinishedHybridPartitionShouldBeUnknown,
                         jobManagerJobMetricGroup);
 
+        final Optional<Long> generation =
+                jobGraph.getJobConfiguration().getOptional(NATIVE_RESCALE_GENERATION);
+        generation.ifPresent(
+                id -> logNativeRescale(log, jobGraph, id, "REPLACEMENT_GRAPH_CREATED"));
+
         final CheckpointCoordinator checkpointCoordinator =
                 newExecutionGraph.getCheckpointCoordinator();
 
         if (checkpointCoordinator != null) {
+            generation.ifPresent(
+                    id -> logNativeRescale(log, jobGraph, id, "CHECKPOINT_RESTORE_START"));
             // check whether we find a valid checkpoint
             if (!checkpointCoordinator.restoreInitialCheckpointIfPresent(
                     new HashSet<>(newExecutionGraph.getAllVertices().values()))) {
@@ -200,9 +214,21 @@ public class DefaultExecutionGraphFactory implements ExecutionGraphFactory {
                 tryRestoreExecutionGraphFromSavepoint(
                         newExecutionGraph, jobGraph.getSavepointRestoreSettings());
             }
+            generation.ifPresent(
+                    id -> logNativeRescale(log, jobGraph, id, "CHECKPOINT_RESTORE_END"));
         }
 
         return newExecutionGraph;
+    }
+
+    private static void logNativeRescale(
+            Logger log, JobGraph jobGraph, long generation, String event) {
+        log.info(
+                "NATIVE_RESCALE_{} jobId={} generation={} timestampMs={}",
+                event,
+                jobGraph.getJobID(),
+                generation,
+                System.currentTimeMillis());
     }
 
     /**

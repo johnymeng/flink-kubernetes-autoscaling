@@ -3,7 +3,10 @@ package org.apache.flink.runtime.jobgraph.justin;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonCreator;
+import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonInclude;
 import org.apache.flink.shaded.jackson2.com.fasterxml.jackson.annotation.JsonProperty;
+
+import javax.annotation.Nullable;
 
 import java.io.Serializable;
 import java.util.Objects;
@@ -16,6 +19,7 @@ public class JustinVertexResourceRequirements implements Serializable {
 
     private static final String FIELD_NAME_PARALLELISM = "parallelism";
     private static final String FIELD_NAME_RESOURCE_PROFILE = "resourceProfile";
+    private static final String FIELD_NAME_APPLIED_RESOURCE_PROFILE = "appliedResourceProfile";
 
     public static class Parallelism implements Serializable {
 
@@ -73,11 +77,38 @@ public class JustinVertexResourceRequirements implements Serializable {
     @JsonProperty(FIELD_NAME_RESOURCE_PROFILE)
     private final ResourceProfile resourceProfile;
 
+    @Nullable private final ResourceProfile appliedResourceProfile;
+    @Nullable private final Integer appliedParallelism;
+    @Nullable private final String nativeRescaleStatus;
+    @Nullable private final Long nativeRescaleGeneration;
+
+    public JustinVertexResourceRequirements(
+            Parallelism parallelism, ResourceProfile resourceProfile) {
+        this(parallelism, resourceProfile, null);
+    }
+
+    public JustinVertexResourceRequirements(
+            Parallelism parallelism,
+            ResourceProfile resourceProfile,
+            @Nullable ResourceProfile appliedResourceProfile) {
+        this(parallelism, resourceProfile, appliedResourceProfile, null, null, null);
+    }
+
+    @JsonCreator
     public JustinVertexResourceRequirements(
             @JsonProperty(FIELD_NAME_PARALLELISM) Parallelism parallelism,
-            @JsonProperty(FIELD_NAME_RESOURCE_PROFILE) ResourceProfile resourceProfile) {
+            @JsonProperty(FIELD_NAME_RESOURCE_PROFILE) ResourceProfile resourceProfile,
+            @JsonProperty(FIELD_NAME_APPLIED_RESOURCE_PROFILE) @Nullable
+                    ResourceProfile appliedResourceProfile,
+            @JsonProperty("appliedParallelism") @Nullable Integer appliedParallelism,
+            @JsonProperty("nativeRescaleStatus") @Nullable String nativeRescaleStatus,
+            @JsonProperty("nativeRescaleGeneration") @Nullable Long nativeRescaleGeneration) {
         this.parallelism = checkNotNull(parallelism);
         this.resourceProfile = resourceProfile;
+        this.appliedResourceProfile = appliedResourceProfile;
+        this.appliedParallelism = appliedParallelism;
+        this.nativeRescaleStatus = nativeRescaleStatus;
+        this.nativeRescaleGeneration = nativeRescaleGeneration;
     }
 
     public Parallelism getParallelism() {
@@ -86,6 +117,35 @@ public class JustinVertexResourceRequirements implements Serializable {
 
     public ResourceProfile getResourceProfile() {
         return resourceProfile;
+    }
+
+    /** Slot profile confirmed for all running subtasks, when available on a GET response. */
+    @Nullable
+    @JsonProperty(FIELD_NAME_APPLIED_RESOURCE_PROFILE)
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public ResourceProfile getAppliedResourceProfile() {
+        return appliedResourceProfile;
+    }
+
+    @Nullable
+    @JsonProperty("appliedParallelism")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Integer getAppliedParallelism() {
+        return appliedParallelism;
+    }
+
+    @Nullable
+    @JsonProperty("nativeRescaleStatus")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getNativeRescaleStatus() {
+        return nativeRescaleStatus;
+    }
+
+    @Nullable
+    @JsonProperty("nativeRescaleGeneration")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Long getNativeRescaleGeneration() {
+        return nativeRescaleGeneration;
     }
 
     @Override
@@ -97,7 +157,8 @@ public class JustinVertexResourceRequirements implements Serializable {
             return false;
         }
         final JustinVertexResourceRequirements that = (JustinVertexResourceRequirements) o;
-        return parallelism.equals(that.parallelism);
+        return parallelism.equals(that.parallelism)
+                && Objects.equals(resourceProfile, that.resourceProfile);
     }
 
     @Override

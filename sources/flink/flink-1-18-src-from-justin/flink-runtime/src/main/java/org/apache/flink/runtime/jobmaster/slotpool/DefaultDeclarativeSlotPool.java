@@ -49,6 +49,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -486,6 +487,11 @@ public class DefaultDeclarativeSlotPool implements DeclarativeSlotPool {
 
     @Override
     public void releaseIdleSlots(long currentTimeMillis) {
+        releaseIdleSlots(currentTimeMillis, Collections.emptySet());
+    }
+
+    @Override
+    public void releaseIdleSlots(long currentTimeMillis, Set<AllocationID> retainedAllocations) {
         final Collection<AllocatedSlotPool.FreeSlotInfo> freeSlotsInformation =
                 slotPool.getFreeSlotInfoTracker().getFreeSlotsWithIdleSinceInformation();
 
@@ -500,7 +506,9 @@ public class DefaultDeclarativeSlotPool implements DeclarativeSlotPool {
         while (!excessResources.isEmpty() && freeSlotIterator.hasNext()) {
             final AllocatedSlotPool.FreeSlotInfo idleSlot = freeSlotIterator.next();
 
-            if (currentTimeMillis >= idleSlot.getFreeSince() + idleSlotTimeout.toMilliseconds()) {
+            if (!retainedAllocations.contains(idleSlot.getAllocationId())
+                    && currentTimeMillis
+                            >= idleSlot.getFreeSince() + idleSlotTimeout.toMilliseconds()) {
                 final ResourceProfile matchingProfile =
                         getMatchingResourceProfile(idleSlot.getAllocationId());
 

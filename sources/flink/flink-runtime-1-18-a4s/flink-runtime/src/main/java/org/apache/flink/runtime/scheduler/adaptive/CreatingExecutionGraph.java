@@ -92,7 +92,9 @@ public class CreatingExecutionGraph implements State {
     private void handleExecutionGraphCreation(
             @Nullable ExecutionGraphWithVertexParallelism executionGraphWithVertexParallelism,
             @Nullable Throwable throwable) {
-        if (throwable != null) {
+        if (!context.isExecutionGraphCreationCurrent()) {
+            context.goToWaitingForResources(previousExecutionGraph);
+        } else if (throwable != null) {
             logger.info(
                     "Failed to go from {} to {} because the ExecutionGraph creation failed.",
                     CreatingExecutionGraph.class.getSimpleName(),
@@ -223,6 +225,10 @@ public class CreatingExecutionGraph implements State {
          *     slots to resources
          * @return {@link AssignmentResult} representing the result of the assignment
          */
+        default boolean isExecutionGraphCreationCurrent() {
+            return true;
+        }
+
         AssignmentResult tryToAssignSlots(
                 ExecutionGraphWithVertexParallelism executionGraphWithVertexParallelism);
 

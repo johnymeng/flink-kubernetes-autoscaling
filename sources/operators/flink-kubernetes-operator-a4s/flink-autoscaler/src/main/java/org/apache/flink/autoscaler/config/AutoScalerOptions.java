@@ -66,6 +66,13 @@ public class AutoScalerOptions {
                     .withFallbackKeys(oldOperatorConfigKey("justin.enabled"))
                     .withDescription("Enable Justin Autoscaler.");
 
+    public static final ConfigOption<Boolean> NATIVE_RESCALE_PREALLOCATION_ENABLED =
+            autoScalerConfig("native-rescale.preallocation.enabled")
+                    .booleanType()
+                    .defaultValue(false)
+                    .withDescription(
+                            "Enable native slot preparation in a compatible Adaptive Scheduler.");
+
     public static final ConfigOption<Duration> METRICS_WINDOW =
             autoScalerConfig("metrics.window")
                     .durationType()

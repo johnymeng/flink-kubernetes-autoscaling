@@ -1,0 +1,16 @@
+{
+  "run": "live-dba9146b",
+  "timed_decision_timestamps_ms": [
+    1795663502228,
+    1795663808785
+  ],
+  "first_applied_managed_memory_mib": 33,
+  "first_applied_parallelism": 1,
+  "first_tracking_status": "APPLIED",
+  "second_requested_parallelism": 24,
+  "configured_slot_cap": 16,
+  "second_status_at_cutoff": "COMMITTING",
+  "second_tasks_running_event": null,
+  "job_state_at_cutoff": "CREATED",
+  "last_sample_offset_seconds": 599.0001029223204
+}

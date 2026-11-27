@@ -78,10 +78,20 @@ public class JustinVertexResourceRequirements implements Serializable {
     private final ResourceProfile resourceProfile;
 
     @Nullable private final ResourceProfile appliedResourceProfile;
+    @Nullable private final Integer appliedParallelism;
+    @Nullable private final String nativeRescaleStatus;
+    @Nullable private final Long nativeRescaleGeneration;
 
     public JustinVertexResourceRequirements(
             Parallelism parallelism, ResourceProfile resourceProfile) {
         this(parallelism, resourceProfile, null);
+    }
+
+    public JustinVertexResourceRequirements(
+            Parallelism parallelism,
+            ResourceProfile resourceProfile,
+            @Nullable ResourceProfile appliedResourceProfile) {
+        this(parallelism, resourceProfile, appliedResourceProfile, null, null, null);
     }
 
     @JsonCreator
@@ -89,10 +99,16 @@ public class JustinVertexResourceRequirements implements Serializable {
             @JsonProperty(FIELD_NAME_PARALLELISM) Parallelism parallelism,
             @JsonProperty(FIELD_NAME_RESOURCE_PROFILE) ResourceProfile resourceProfile,
             @JsonProperty(FIELD_NAME_APPLIED_RESOURCE_PROFILE) @Nullable
-                    ResourceProfile appliedResourceProfile) {
+                    ResourceProfile appliedResourceProfile,
+            @JsonProperty("appliedParallelism") @Nullable Integer appliedParallelism,
+            @JsonProperty("nativeRescaleStatus") @Nullable String nativeRescaleStatus,
+            @JsonProperty("nativeRescaleGeneration") @Nullable Long nativeRescaleGeneration) {
         this.parallelism = checkNotNull(parallelism);
         this.resourceProfile = resourceProfile;
         this.appliedResourceProfile = appliedResourceProfile;
+        this.appliedParallelism = appliedParallelism;
+        this.nativeRescaleStatus = nativeRescaleStatus;
+        this.nativeRescaleGeneration = nativeRescaleGeneration;
     }
 
     public Parallelism getParallelism() {
@@ -109,6 +125,27 @@ public class JustinVertexResourceRequirements implements Serializable {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public ResourceProfile getAppliedResourceProfile() {
         return appliedResourceProfile;
+    }
+
+    @Nullable
+    @JsonProperty("appliedParallelism")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Integer getAppliedParallelism() {
+        return appliedParallelism;
+    }
+
+    @Nullable
+    @JsonProperty("nativeRescaleStatus")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public String getNativeRescaleStatus() {
+        return nativeRescaleStatus;
+    }
+
+    @Nullable
+    @JsonProperty("nativeRescaleGeneration")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Long getNativeRescaleGeneration() {
+        return nativeRescaleGeneration;
     }
 
     @Override

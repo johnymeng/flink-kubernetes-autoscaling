@@ -26,6 +26,7 @@ import org.apache.flink.core.execution.SavepointFormatType;
 import org.apache.flink.queryablestate.KvStateID;
 import org.apache.flink.runtime.accumulators.AccumulatorSnapshot;
 import org.apache.flink.runtime.checkpoint.CheckpointMetrics;
+import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.checkpoint.CheckpointStatsSnapshot;
 import org.apache.flink.runtime.checkpoint.CompletedCheckpoint;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
@@ -73,6 +74,9 @@ import java.util.concurrent.CompletableFuture;
  * invocations will originate from a thread in the {@link ComponentMainThreadExecutor}.
  */
 public interface SchedulerNG extends GlobalFailureHandler, AutoCloseableAsync {
+
+    /** Notifies the scheduler of a successful TaskManager registration with this JobMaster. */
+    default void notifyTaskManagerRegistered(ResourceID taskManagerId) {}
 
     void startScheduling();
 

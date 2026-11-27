@@ -16,31 +16,37 @@
  * limitations under the License.
  */
 package org.apache.flink.runtime.rest.handler.job.justin;
+
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.time.Time;
+import org.apache.flink.runtime.jobgraph.justin.JustinResourceRequirements;
 import org.apache.flink.runtime.rest.handler.AbstractRestHandler;
 import org.apache.flink.runtime.rest.handler.HandlerRequest;
 import org.apache.flink.runtime.rest.handler.RestHandlerException;
 import org.apache.flink.runtime.rest.messages.EmptyRequestBody;
 import org.apache.flink.runtime.rest.messages.JobIDPathParameter;
-import org.apache.flink.runtime.rest.messages.JobMessageParameters;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsBody;
 import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsHeaders;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters;
+import org.apache.flink.runtime.rest.messages.job.justin.JustinResourceRequirementsMessageParameters.IncludeAppliedProfileParameter;
 import org.apache.flink.runtime.webmonitor.RestfulGateway;
 import org.apache.flink.runtime.webmonitor.retriever.GatewayRetriever;
+
 import javax.annotation.Nonnull;
+
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+
 /**
  * Rest handler for reading current {@link org.apache.flink.runtime.jobgraph.JobResourceRequirements
  * resource requirements} of a given job.
  */
 public class JustinResourceRequirementsHandler
         extends AbstractRestHandler<
-        RestfulGateway,
-        EmptyRequestBody,
-        JustinResourceRequirementsBody,
-        JobMessageParameters> {
+                RestfulGateway,
+                EmptyRequestBody,
+                JustinResourceRequirementsBody,
+                JustinResourceRequirementsMessageParameters> {
     public JustinResourceRequirementsHandler(
             GatewayRetriever<? extends RestfulGateway> leaderRetriever,
             Time timeout,
@@ -51,12 +57,35 @@ public class JustinResourceRequirementsHandler
                 responseHeaders,
                 JustinResourceRequirementsHeaders.INSTANCE);
     }
+
     @Override
     protected CompletableFuture<JustinResourceRequirementsBody> handleRequest(
             @Nonnull HandlerRequest<EmptyRequestBody> request, @Nonnull RestfulGateway gateway)
             throws RestHandlerException {
         final JobID jobId = request.getPathParameter(JobIDPathParameter.class);
+        final boolean includeApplied =
+                request.getQueryParameter(IncludeAppliedProfileParameter.class).contains(true);
         return gateway.requestJustinResourceRequirements(jobId)
-                .thenApply(JustinResourceRequirementsBody::new);
+                .thenApply(
+                        requirements ->
+                                new JustinResourceRequirementsBody(
+                                        includeApplied
+                                                ? requirements
+                                                : requestedOnly(requirements)));
+    }
+
+    private static JustinResourceRequirements requestedOnly(
+            JustinResourceRequirements requirements) {
+        final JustinResourceRequirements.Builder builder = JustinResourceRequirements.newBuilder();
+        requirements
+                .getJobVertexParallelisms()
+                .forEach(
+                        (vertexId, requirement) ->
+                                builder.setParallelismForJobVertex(
+                                        vertexId,
+                                        requirement.getParallelism().getLowerBound(),
+                                        requirement.getParallelism().getUpperBound(),
+                                        requirement.getResourceProfile()));
+        return builder.build();
     }
 }

@@ -27,7 +27,10 @@ import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
 import org.apache.flink.autoscaler.realizer.ScalingRealizer;
 import org.apache.flink.autoscaler.state.AutoScalerStateStore;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
+import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
+import org.apache.flink.autoscaler.utils.justin.ResourceProfileParser;
 import org.apache.flink.configuration.PipelineOptions;
+import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.util.Preconditions;
 
 import org.slf4j.Logger;
@@ -36,10 +39,12 @@ import org.slf4j.LoggerFactory;
 import java.time.Clock;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.JUSTIN_ENABLED;
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.NATIVE_RESCALE_PREALLOCATION_ENABLED;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.initRecommendedParallelism;
 import static org.apache.flink.autoscaler.metrics.AutoscalerFlinkMetrics.resetRecommendedParallelism;
 import static org.apache.flink.autoscaler.metrics.ScalingHistoryUtils.getTrimmedScalingHistory;
@@ -210,11 +215,38 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         var now = clock.instant();
         var scalingTracking = getTrimmedScalingTracking(stateStore, ctx, now);
         var scalingHistory = getTrimmedScalingHistory(stateStore, ctx, now);
-        // A scaling tracking without an end time gets created whenever a scaling decision is
-        // applied. Here, we record the end time for it (runScalingLogic is only called when the job
-        // transitions back into the RUNNING state).
-        if (scalingTracking.recordRestartDurationIfTrackedAndParallelismMatches(
-                collectedMetrics.getJobRunningTs(), jobTopology, scalingHistory)) {
+        boolean trackingChanged = false;
+        boolean canRecordRestart = true;
+        if (justinEnabled && ctx.getConfiguration().get(NATIVE_RESCALE_PREALLOCATION_ENABLED)) {
+            var unresolved =
+                    scalingTracking
+                            .getLatestScalingRecordEntry()
+                            .filter(entry -> entry.getValue().getRestartDuration() == null);
+            canRecordRestart = false;
+            if (unresolved.isPresent()) {
+                var entry = unresolved.get();
+                var requirements = scalingExecutor.readResourceRequirements(ctx);
+                String status =
+                        observedNativeRescaleStatus(
+                                requirements,
+                                getParallelismOverrides(ctx),
+                                getResourceProfileOverrides(ctx));
+                if (status != null) {
+                    trackingChanged = !status.equals(entry.getValue().getNativeRescaleStatus());
+                    entry.getValue().setNativeRescaleStatus(status);
+                    // A no-op or an older, still-running graph cannot complete this decision.
+                    canRecordRestart =
+                            "APPLIED".equals(status)
+                                    && !collectedMetrics.getJobRunningTs().isBefore(entry.getKey());
+                }
+            }
+        }
+        if (canRecordRestart) {
+            trackingChanged |=
+                    scalingTracking.recordRestartDurationIfTrackedAndParallelismMatches(
+                            collectedMetrics.getJobRunningTs(), jobTopology, scalingHistory);
+        }
+        if (trackingChanged) {
             stateStore.storeScalingTracking(ctx, scalingTracking);
         }
 
@@ -263,6 +295,46 @@ public class JobAutoScalerImpl<KEY, Context extends JobAutoScalerContext<KEY>>
         } else {
             autoscalerMetrics.incrementBalanced();
         }
+    }
+
+    @VisibleForTesting
+    static String observedNativeRescaleStatus(
+            Map<JobVertexID, JustinVertexResourceRequirements> requirements,
+            Map<String, String> parallelismOverrides,
+            Map<String, String> profileOverrides) {
+        if (requirements.isEmpty()
+                || (parallelismOverrides.isEmpty() && profileOverrides.isEmpty())) {
+            return null;
+        }
+        if (!parallelismOverrides.entrySet().stream()
+                        .allMatch(
+                                entry -> {
+                                    var vertex =
+                                            requirements.get(
+                                                    JobVertexID.fromHexString(entry.getKey()));
+                                    return vertex != null
+                                            && vertex.getParallelism().getUpperBound()
+                                                    == Integer.parseInt(entry.getValue());
+                                })
+                || !profileOverrides.entrySet().stream()
+                        .allMatch(
+                                entry -> {
+                                    var vertex =
+                                            requirements.get(
+                                                    JobVertexID.fromHexString(entry.getKey()));
+                                    return vertex != null
+                                            && Objects.equals(
+                                                    vertex.getResourceProfile(),
+                                                    ResourceProfileParser.parse(entry.getValue()));
+                                })) {
+            return null;
+        }
+        var statuses =
+                requirements.values().stream()
+                        .map(JustinVertexResourceRequirements::getNativeRescaleStatus)
+                        .distinct()
+                        .collect(java.util.stream.Collectors.toList());
+        return statuses.size() == 1 ? statuses.get(0) : null;
     }
 
     private void onError(Context ctx, AutoscalerFlinkMetrics autoscalerMetrics, Throwable e) {

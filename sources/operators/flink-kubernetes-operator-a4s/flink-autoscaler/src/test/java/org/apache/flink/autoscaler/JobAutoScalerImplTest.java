@@ -32,6 +32,7 @@ import org.apache.flink.autoscaler.state.InMemoryAutoScalerStateStore;
 import org.apache.flink.autoscaler.topology.JobTopology;
 import org.apache.flink.autoscaler.topology.VertexInfo;
 import org.apache.flink.autoscaler.tuning.ConfigChanges;
+import org.apache.flink.autoscaler.utils.justin.JustinVertexResourceRequirements;
 import org.apache.flink.client.program.rest.RestClusterClient;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.configuration.TaskManagerOptions;
@@ -39,6 +40,7 @@ import org.apache.flink.metrics.Gauge;
 import org.apache.flink.metrics.Metric;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.mock.Whitebox;
+import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.metrics.groups.GenericMetricGroup;
 
@@ -82,6 +84,38 @@ public class JobAutoScalerImplTest {
         scalingRealizer = new TestingScalingRealizer<>();
         eventCollector = new TestingEventCollector<>();
         stateStore = new InMemoryAutoScalerStateStore<>();
+    }
+
+    @Test
+    void observesNativeStatusOnlyForTheMatchingRequestedTarget() {
+        var vertex = new JobVertexID();
+        var profile = ResourceProfile.newBuilder().setCpuCores(1).setManagedMemoryMB(32).build();
+        var parallelism = new JustinVertexResourceRequirements.Parallelism(1, 4);
+        var preparing =
+                Map.of(
+                        vertex,
+                        new JustinVertexResourceRequirements(
+                                parallelism, profile, profile, 2, "PREPARING", 3L));
+        var deferred =
+                Map.of(
+                        vertex,
+                        new JustinVertexResourceRequirements(
+                                parallelism, profile, profile, 2, "DEFERRED", 3L));
+        var parallelismOverrides = Map.of(vertex.toHexString(), "4");
+        var profileOverrides = Map.of(vertex.toHexString(), profile.toString());
+
+        assertThat(
+                        JobAutoScalerImpl.observedNativeRescaleStatus(
+                                preparing, parallelismOverrides, profileOverrides))
+                .isEqualTo("PREPARING");
+        assertThat(
+                        JobAutoScalerImpl.observedNativeRescaleStatus(
+                                deferred, parallelismOverrides, profileOverrides))
+                .isEqualTo("DEFERRED");
+        assertThat(
+                        JobAutoScalerImpl.observedNativeRescaleStatus(
+                                preparing, Map.of(vertex.toHexString(), "2"), profileOverrides))
+                .isNull();
     }
 
     @Test

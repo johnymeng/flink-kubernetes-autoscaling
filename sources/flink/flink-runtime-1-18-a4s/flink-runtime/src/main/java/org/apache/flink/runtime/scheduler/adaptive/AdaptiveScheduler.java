@@ -21,6 +21,8 @@ package org.apache.flink.runtime.scheduler.adaptive;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.configuration.ConfigOption;
+import org.apache.flink.configuration.ConfigOptions;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.JobManagerOptions;
 import org.apache.flink.configuration.MemorySize;
@@ -48,6 +50,7 @@ import org.apache.flink.runtime.checkpoint.CompletedCheckpointStore;
 import org.apache.flink.runtime.checkpoint.TaskStateSnapshot;
 import org.apache.flink.runtime.client.JobExecutionException;
 import org.apache.flink.runtime.clusterframework.types.AllocationID;
+import org.apache.flink.runtime.clusterframework.types.ResourceID;
 import org.apache.flink.runtime.clusterframework.types.ResourceProfile;
 import org.apache.flink.runtime.concurrent.ComponentMainThreadExecutor;
 import org.apache.flink.runtime.deployment.TaskDeploymentDescriptorFactory;
@@ -96,6 +99,7 @@ import org.apache.flink.runtime.query.KvStateLocation;
 import org.apache.flink.runtime.query.UnknownKvStateLocation;
 import org.apache.flink.runtime.rpc.FatalErrorHandler;
 import org.apache.flink.runtime.scheduler.DefaultVertexParallelismInfo;
+import org.apache.flink.runtime.scheduler.DefaultExecutionGraphFactory;
 import org.apache.flink.runtime.scheduler.DefaultVertexParallelismStore;
 import org.apache.flink.runtime.scheduler.ExecutionGraphFactory;
 import org.apache.flink.runtime.scheduler.ExecutionGraphHandler;
@@ -111,6 +115,7 @@ import org.apache.flink.runtime.scheduler.VertexParallelismStore;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.JobAllocationsInformation;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.JobInformation;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.JustinSlotAssigner;
+import org.apache.flink.runtime.scheduler.adaptive.allocator.JustinSlotMatching;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.ReservedSlots;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.SlotAllocator;
 import org.apache.flink.runtime.scheduler.adaptive.allocator.SlotAssigner;
@@ -139,6 +144,7 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
+import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -146,7 +152,6 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -188,6 +193,26 @@ public class AdaptiveScheduler
                 StopWithSavepoint.Context {
 
     private static final Logger LOG = LoggerFactory.getLogger(AdaptiveScheduler.class);
+
+    static final ConfigOption<Boolean> NATIVE_RESCALE_PREALLOCATION_ENABLED =
+            ConfigOptions.key("job.autoscaler.native-rescale.preallocation.enabled")
+                    .booleanType()
+                    .defaultValue(false);
+
+    static final ConfigOption<Duration> NATIVE_RESCALE_PREALLOCATION_TIMEOUT =
+            ConfigOptions.key("job.autoscaler.native-rescale.preallocation.timeout")
+                    .durationType()
+                    .defaultValue(Duration.ofSeconds(15));
+
+    static final ConfigOption<TimeoutAction> NATIVE_RESCALE_PREALLOCATION_TIMEOUT_ACTION =
+            ConfigOptions.key("job.autoscaler.native-rescale.preallocation.timeout-action")
+                    .enumType(TimeoutAction.class)
+                    .defaultValue(TimeoutAction.FALLBACK);
+
+    enum TimeoutAction {
+        FALLBACK,
+        DEFER
+    }
 
     private final JobGraph jobGraph;
     private final VertexParallelismStore initialParallelismStore;
@@ -243,6 +268,7 @@ public class AdaptiveScheduler
     private final BoundedFIFOQueue<RootExceptionHistoryEntry> exceptionHistory;
     private JobGraphJobInformation jobInformation;
     private ResourceCounter desiredResources = ResourceCounter.empty();
+    private ResourceCounter declaredResources = ResourceCounter.empty();
 
     private final JobManagerJobMetricGroup jobManagerJobMetricGroup;
 
@@ -253,6 +279,44 @@ public class AdaptiveScheduler
     private boolean justinRescale = false;
 
     private boolean firstJustinRescale = true;
+
+    private final boolean preallocationEnabled;
+    private final Duration preparationTimeout;
+    private final TimeoutAction preparationTimeoutAction;
+    private long nativeRescaleGeneration;
+    private long graphCreationGeneration;
+    @Nullable private NativeRescalePreparation preparation;
+    @Nullable private JustinResourceRequirements latestNativeTarget;
+    @Nullable private NativeRescaleStatus nativeRescaleStatus;
+    private Set<AllocationID> retainedNativeAllocations = Collections.emptySet();
+
+    private enum NativeRescaleStatus {
+        PREPARING,
+        COMMITTING,
+        APPLIED,
+        DEFERRED,
+        ABORTED
+    }
+
+    /** A preparation window has one deadline even when its target is replaced. */
+    private static final class NativeRescalePreparation {
+        final long startedNanos = System.nanoTime();
+        final Set<AllocationID> initialAllocations;
+        JustinResourceRequirements target;
+        NativeRescalePreparationPlanner.Plan plan;
+        ScheduledFuture<?> deadline;
+        boolean firstNewSlotLogged;
+        boolean firstNewTaskManagerLogged;
+
+        NativeRescalePreparation(
+                JustinResourceRequirements target,
+                NativeRescalePreparationPlanner.Plan plan,
+                Set<AllocationID> initialAllocations) {
+            this.target = target;
+            this.plan = plan;
+            this.initialAllocations = initialAllocations;
+        }
+    }
 
     public AdaptiveScheduler(
             JobGraph jobGraph,
@@ -350,6 +414,29 @@ public class AdaptiveScheduler
         this.jobManagerJobMetricGroup = jobManagerJobMetricGroup;
         this.slotIdleTimeout =
                 Duration.ofMillis(configuration.get(JobManagerOptions.SLOT_IDLE_TIMEOUT));
+        this.preallocationEnabled = configuration.get(NATIVE_RESCALE_PREALLOCATION_ENABLED);
+        this.preparationTimeout = configuration.get(NATIVE_RESCALE_PREALLOCATION_TIMEOUT);
+        this.preparationTimeoutAction =
+                configuration.get(NATIVE_RESCALE_PREALLOCATION_TIMEOUT_ACTION);
+        Preconditions.checkArgument(
+                !preallocationEnabled || preparationTimeout.toMillis() > 0,
+                "Native rescale preparation timeout must be at least 1 ms.");
+
+        if (preallocationEnabled && executionMode != SchedulerExecutionMode.REACTIVE) {
+            try {
+                JustinResourceRequirements.readFromJobGraph(jobGraph)
+                        .ifPresent(
+                                target -> {
+                                    latestNativeTarget = normalizeNativeTarget(target);
+                                    nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
+                                    applyJustinTarget(latestNativeTarget);
+                                    firstJustinRescale = false;
+                                });
+            } catch (IOException e) {
+                throw new JobExecutionException(
+                        jobGraph.getJobID(), "Cannot read native target.", e);
+            }
+        }
     }
 
     private static void assertPreconditions(JobGraph jobGraph) throws RuntimeException {
@@ -471,7 +558,29 @@ public class AdaptiveScheduler
                 jobGraph.getVertices(), defaultMaxParallelismFunc);
     }
 
+    @Override
+    public void notifyTaskManagerRegistered(ResourceID taskManagerId) {
+        if (preparation != null && !preparation.firstNewTaskManagerLogged) {
+            preparation.firstNewTaskManagerLogged = true;
+            logNativeRescale("FIRST_NEW_TASKMANAGER_REGISTERED", "taskManagerId=" + taskManagerId);
+        }
+    }
+
     private void newResourcesAvailable(Collection<? extends PhysicalSlot> physicalSlots) {
+        if (preparation != null && !preparation.firstNewSlotLogged) {
+            for (PhysicalSlot slot : physicalSlots) {
+                if (!preparation.initialAllocations.contains(slot.getAllocationId())) {
+                    preparation.firstNewSlotLogged = true;
+                    logNativeRescale(
+                            "FIRST_NEW_SLOT_AVAILABLE",
+                            "allocationId="
+                                    + slot.getAllocationId()
+                                    + " taskManagerId="
+                                    + slot.getTaskManagerLocation().getResourceID());
+                    break;
+                }
+            }
+        }
         state.tryRun(
                 ResourceListener.class,
                 ResourceListener::onNewResourcesAvailable,
@@ -576,13 +685,32 @@ public class AdaptiveScheduler
 
     @Override
     public boolean updateTaskExecutionState(TaskExecutionStateTransition taskExecutionState) {
-        return state.tryCall(
-                        StateWithExecutionGraph.class,
-                        stateWithExecutionGraph ->
-                                stateWithExecutionGraph.updateTaskExecutionState(
-                                        taskExecutionState, labelFailure(taskExecutionState)),
-                        "updateTaskExecutionState")
-                .orElse(false);
+        final boolean updated =
+                state.tryCall(
+                                StateWithExecutionGraph.class,
+                                stateWithExecutionGraph ->
+                                        stateWithExecutionGraph.updateTaskExecutionState(
+                                                taskExecutionState,
+                                                labelFailure(taskExecutionState)),
+                                "updateTaskExecutionState")
+                        .orElse(false);
+        if (updated
+                && taskExecutionState.getExecutionState() == ExecutionState.RUNNING
+                && nativeRescaleStatus == NativeRescaleStatus.COMMITTING
+                && state instanceof Executing) {
+            recordNativeRescaleCompletion(((Executing) state).getExecutionGraph());
+        }
+        return updated;
+    }
+
+    private void recordNativeRescaleCompletion(ExecutionGraph graph) {
+        for (ExecutionVertex vertex : graph.getAllExecutionVertices()) {
+            if (vertex.getExecutionState() != ExecutionState.RUNNING) {
+                return;
+            }
+        }
+        nativeRescaleStatus = NativeRescaleStatus.APPLIED;
+        logNativeRescale("ALL_TARGET_TASKS_RUNNING", "");
     }
 
     @Override
@@ -881,6 +1009,7 @@ public class AdaptiveScheduler
                 runningGraph == null
                         ? Collections.emptyMap()
                         : getExclusiveSlotProfiles(runningGraph);
+        final NativeRescaleStatus requestStatus = preallocationEnabled ? nativeRescaleStatus : null;
         final Map<JobVertexID, JustinVertexResourceRequirements> requirements = new HashMap<>();
         for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
             final JobVertexID vertexId = vertex.getJobVertexID();
@@ -888,18 +1017,30 @@ public class AdaptiveScheduler
             if (requestedProfile.equals(ResourceProfile.UNKNOWN)) {
                 requestedProfile = getLegacyFallbackResourceProfile(configuration);
             }
+            final ExecutionJobVertex runningVertex =
+                    runningGraph == null ? null : runningGraph.getJobVertex(vertexId);
             final ResourceProfile appliedProfile =
-                    runningGraph == null
-                            ? null
-                            : getAppliedResourceProfile(
-                                    runningGraph.getJobVertex(vertexId), exclusiveSlots);
+                    getAppliedResourceProfile(runningVertex, exclusiveSlots);
+            final JustinVertexResourceRequirements.Parallelism requestedParallelism;
+            if (preallocationEnabled && latestNativeTarget != null) {
+                requestedParallelism = latestNativeTarget.getParallelism(vertexId);
+                requestedProfile = latestNativeTarget.getResourceProfile(vertexId);
+            } else {
+                requestedParallelism =
+                        new JustinVertexResourceRequirements.Parallelism(
+                                vertex.getMinParallelism(), vertex.getParallelism());
+            }
             requirements.put(
                     vertexId,
                     new JustinVertexResourceRequirements(
-                            new JustinVertexResourceRequirements.Parallelism(
-                                    vertex.getMinParallelism(), vertex.getParallelism()),
+                            requestedParallelism,
                             requestedProfile,
-                            appliedProfile));
+                            appliedProfile,
+                            requestStatus == null || runningVertex == null
+                                    ? null
+                                    : runningVertex.getParallelism(),
+                            requestStatus == null ? null : requestStatus.name(),
+                            requestStatus == null ? null : nativeRescaleGeneration));
         }
         return new JustinResourceRequirements(requirements);
     }
@@ -951,41 +1092,320 @@ public class AdaptiveScheduler
     }
 
     @Override
-    public void updateJustinResourceRequirements(
-            JustinResourceRequirements justinResourceRequirements) {
-        this.justinRescale = true;
-        this.justinResourceRequirements = justinResourceRequirements;
-        /*
-        if (!(slotAllocator instanceof JustinSlotAllocator)) {
-            SlotSharingSlotAllocator slotSharingSlotAllocator = (SlotSharingSlotAllocator) slotAllocator;
-            slotAllocator = JustinSlotAllocator.createJustinSlotAllocator(
-                    slotSharingSlotAllocator.reserveSlotFunction,
-                    slotSharingSlotAllocator.freeSlotFunction,
-                    slotSharingSlotAllocator.isSlotAvailableAndFreeFunction
-            );
-        }
-         */
+    public void updateJustinResourceRequirements(JustinResourceRequirements target) {
         if (executionMode == SchedulerExecutionMode.REACTIVE) {
             throw new UnsupportedOperationException(
                     "Cannot change the parallelism of a job running in reactive mode.");
         }
-        final Optional<VertexParallelismStore> maybeUpdateVertexParallelismStore =
-                DefaultVertexParallelismStore.applyJustinResourceRequirements(
-                        jobInformation.getVertexParallelismStore(), justinResourceRequirements);
-
-        if (maybeUpdateVertexParallelismStore.isPresent()) {
-            // A graph that is already waiting for resources will use the updated requirements.
-            firstJustinRescale = !(state instanceof WaitingForResources);
-            updateJustinGraphJobInformation(maybeUpdateVertexParallelismStore.get());
-            declareJustinDesiredResources();
-            if (state instanceof WaitingForResources) {
-                releaseSlotsExceedingDesiredResources();
+        componentMainThreadExecutor.assertRunningInMainThread();
+        if (preallocationEnabled) {
+            if (handleNativePreparationRequest(target)) {
+                return;
             }
-            state.tryRun(
-                    ResourceListener.class,
-                    ResourceListener::onNewResourceRequirements,
-                    "Current state does not react to desired parallelism changes.");
+        } else {
+            registerNativeRequest(target);
+            nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
         }
+        applyJustinTarget(Preconditions.checkNotNull(latestNativeTarget));
+        notifyResourceRequirementsChanged();
+    }
+
+    private void notifyResourceRequirementsChanged() {
+        if (state instanceof WaitingForResources) {
+            releaseSlotsExceedingDesiredResources();
+        }
+        state.tryRun(
+                ResourceListener.class,
+                ResourceListener::onNewResourceRequirements,
+                "Current state does not react to desired parallelism changes.");
+    }
+
+    private void applyJustinTarget(JustinResourceRequirements target) {
+        final VertexParallelismStore targetStore =
+                DefaultVertexParallelismStore.applyJustinResourceRequirements(
+                                jobInformation.getVertexParallelismStore(), target)
+                        .orElseThrow(IllegalStateException::new);
+        justinRescale = true;
+        justinResourceRequirements = target;
+        firstJustinRescale = state instanceof Executing;
+        updateJustinGraphJobInformation(targetStore);
+        if (!(state instanceof Created)) {
+            final ResourceCounter previousDeclaration = declaredResources;
+            declareJustinDesiredResources();
+            if (!declaredResources.equals(previousDeclaration)) {
+                logNativeRescale("RESOURCES_DECLARED", "demand=" + declaredResources);
+            }
+        }
+    }
+
+    private boolean handleNativePreparationRequest(JustinResourceRequirements target) {
+        if (target.equals(latestNativeTarget)) {
+            return true;
+        }
+        target = normalizeNativeTarget(target);
+        if (target.equals(latestNativeTarget)) {
+            return true;
+        }
+
+        if (preparation != null) {
+            logNativeRescale(
+                    "PREPARATION_SUPERSEDED",
+                    "previousTarget=" + preparation.target + " replacementTarget=" + target);
+        }
+        registerNativeRequest(target);
+
+        if (!(state instanceof Executing)) {
+            retainedNativeAllocations = Collections.emptySet();
+            nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
+            return false;
+        }
+        final Executing executing = (Executing) state;
+        if (matchesAppliedTarget(target, executing.getExecutionGraph())) {
+            clearNativePreparation();
+            declareJustinDesiredResources();
+            nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
+            recordNativeRescaleCompletion(executing.getExecutionGraph());
+            logNativeRescale("PREPARATION_CANCELLED", "reason=already-applied");
+            return true;
+        }
+
+        final NativeRescalePreparationPlanner.Plan plan =
+                planNativePreparation(executing.getExecutionGraph(), target);
+        if (plan == null || plan.fallback != null) {
+            clearNativePreparation();
+            final String reason =
+                    plan == null ? "unsupported-running-configuration" : plan.fallback;
+            if ("configured-resource-limit".equals(reason)
+                    && preparationTimeoutAction == TimeoutAction.DEFER) {
+                deferNativeRescale(reason);
+                return true;
+            }
+            nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
+            logNativeRescale("PREPARATION_FALLBACK", "reason=" + reason);
+            return false;
+        }
+
+        nativeRescaleStatus = NativeRescaleStatus.PREPARING;
+        if (preparation == null) {
+            final Set<AllocationID> initialAllocations =
+                    declarativeSlotPool.getAllSlotsInformation().stream()
+                            .map(SlotInfo::getAllocationId)
+                            .collect(Collectors.toSet());
+            final NativeRescalePreparation window =
+                    new NativeRescalePreparation(target, plan, initialAllocations);
+            preparation = window;
+            if (!plan.missing.isEmpty()) {
+                window.deadline =
+                        runIfState(
+                                executing, () -> onPreparationTimeout(window), preparationTimeout);
+                logNativeRescale("PREPARATION_STARTED", describePreparation(plan));
+            }
+        } else {
+            preparation.target = target;
+            preparation.plan = plan;
+        }
+        setDeclaredResourceRequirements(plan.demand);
+        logNativeRescale("RESOURCES_DECLARED", "demand=" + plan.demand);
+        notifyResourceRequirementsChanged();
+        return true;
+    }
+
+    private void registerNativeRequest(JustinResourceRequirements target) {
+        final JustinResourceRequirements.Builder previous = JustinResourceRequirements.newBuilder();
+        for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
+            previous.setParallelismForJobVertex(
+                    vertex.getJobVertexID(),
+                    vertex.getMinParallelism(),
+                    vertex.getParallelism(),
+                    vertex.getSlotSharingGroup().getResourceProfile());
+        }
+        nativeRescaleGeneration++;
+        latestNativeTarget = target;
+        logNativeRescale("REQUEST_RECEIVED", "previous=" + previous.build() + " target=" + target);
+    }
+
+    private JustinResourceRequirements normalizeNativeTarget(JustinResourceRequirements target) {
+        final Map<JobVertexID, Integer> maxima = new HashMap<>();
+        for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
+            maxima.put(vertex.getJobVertexID(), vertex.getMaxParallelism());
+        }
+        final List<String> errors = JustinResourceRequirements.validate(target, maxima);
+        Preconditions.checkArgument(errors.isEmpty(), "Invalid native target: %s", errors);
+        // The REST validator accepts sentinel bounds. Resolve them before comparing or counting.
+        final JustinResourceRequirements.Builder normalized =
+                JustinResourceRequirements.newBuilder();
+        for (JobVertexID vertex : target.getJobVertices()) {
+            int lower = target.getParallelism(vertex).getLowerBound();
+            int upper = target.getParallelism(vertex).getUpperBound();
+            normalized.setParallelismForJobVertex(
+                    vertex,
+                    lower == -1 ? 1 : lower,
+                    upper == -1 ? maxima.get(vertex) : upper,
+                    target.getResourceProfile(vertex));
+        }
+        return normalized.build();
+    }
+
+    private boolean matchesAppliedTarget(JustinResourceRequirements target, ExecutionGraph graph) {
+        for (ExecutionJobVertex vertex : graph.getVerticesTopologically()) {
+            final JobVertexID id = vertex.getJobVertexId();
+            final SlotSharingGroup group = vertex.getJobVertex().getSlotSharingGroup();
+            if (group.getJobVertexIds().size() != 1
+                    || vertex.getParallelism() != target.getParallelism(id).getUpperBound()
+                    || jobInformation.getVertexInformation(id).getMinParallelism()
+                            != target.getParallelism(id).getLowerBound()
+                    || !group.getResourceProfile().equals(target.getResourceProfile(id))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    @Nullable
+    private NativeRescalePreparationPlanner.Plan planNativePreparation(
+            ExecutionGraph graph, JustinResourceRequirements target) {
+        final Map<AllocationID, ResourceProfile> occupied = new HashMap<>();
+        final Set<AllocationID> free =
+                declarativeSlotPool.getFreeSlotInfoTracker().getAvailableSlots();
+        for (ExecutionJobVertex vertex : graph.getVerticesTopologically()) {
+            final JobVertexID id = vertex.getJobVertexId();
+            final SlotSharingGroup group = vertex.getJobVertex().getSlotSharingGroup();
+            final ResourceProfile profile = group.getResourceProfile();
+            if (group.getJobVertexIds().size() != 1
+                    || !profile.equals(target.getResourceProfile(id))
+                    || target.getParallelism(id).getUpperBound() < vertex.getParallelism()) {
+                return null;
+            }
+            for (ExecutionVertex task : vertex.getTaskVertices()) {
+                final LogicalSlot slot = task.getCurrentAssignedResource();
+                if (task.getExecutionState() != ExecutionState.RUNNING
+                        || slot == null
+                        || !slot.isAlive()
+                        || free.contains(slot.getAllocationId())
+                        || occupied.putIfAbsent(slot.getAllocationId(), profile) != null) {
+                    return null;
+                }
+            }
+        }
+        final Collection<? extends SlotInfo> inventory =
+                declarativeSlotPool.getAllSlotsInformation();
+        for (SlotInfo slot : inventory) {
+            if (!occupied.containsKey(slot.getAllocationId())
+                    && !free.contains(slot.getAllocationId())) {
+                return null;
+            }
+        }
+        return NativeRescalePreparationPlanner.plan(
+                desiredResources,
+                calculateJustinTargetResources(target),
+                occupied,
+                inventory,
+                configuration);
+    }
+
+    private boolean isPreparedToRescale(ExecutionGraph graph) {
+        final NativeRescalePreparation window = preparation;
+        if (window == null) {
+            return false;
+        }
+        final NativeRescalePreparationPlanner.Plan plan =
+                planNativePreparation(graph, window.target);
+        if (plan == null || plan.fallback != null) {
+            // A loss or task failure invalidates the previous snapshot. Failure recovery or the
+            // original bounded deadline will resolve the request.
+            return false;
+        }
+        final boolean progress = !plan.free.equals(window.plan.free);
+        window.plan = plan;
+        if (progress) {
+            final Map<AllocationID, ResourceID> acquired = new HashMap<>();
+            for (SlotInfo slot : declarativeSlotPool.getAllSlotsInformation()) {
+                final AllocationID id = slot.getAllocationId();
+                if (plan.free.contains(id) && !window.initialAllocations.contains(id)) {
+                    acquired.put(id, slot.getTaskManagerLocation().getResourceID());
+                }
+            }
+            logNativeRescale(
+                    "PREPARATION_PROGRESS",
+                    describePreparation(plan)
+                            + " newAllocationCount="
+                            + acquired.size()
+                            + " allocationTaskManagers="
+                            + acquired);
+        }
+        if (!plan.missing.isEmpty()) {
+            return false;
+        }
+
+        logNativeRescale("PREPARATION_READY", describePreparation(plan));
+        retainedNativeAllocations = new HashSet<>(plan.reusable);
+        retainedNativeAllocations.addAll(plan.free);
+        clearNativePreparation();
+        nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
+        applyJustinTarget(window.target);
+        logNativeRescale(
+                "PREPARATION_COMMITTED",
+                "durationMs="
+                        + TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - window.startedNanos));
+        return true;
+    }
+
+    private void onPreparationTimeout(NativeRescalePreparation window) {
+        if (preparation != window) {
+            return;
+        }
+        logNativeRescale("PREPARATION_TIMEOUT", describePreparation(window.plan));
+        clearNativePreparation();
+        if (preparationTimeoutAction == TimeoutAction.DEFER) {
+            deferNativeRescale("deadline");
+        } else {
+            nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
+            retainedNativeAllocations = window.plan.free;
+            logNativeRescale("PREPARATION_FALLBACK", "reason=deadline");
+            applyJustinTarget(window.target);
+            notifyResourceRequirementsChanged();
+        }
+    }
+
+    private void deferNativeRescale(String reason) {
+        declareJustinDesiredResources();
+        nativeRescaleStatus = NativeRescaleStatus.DEFERRED;
+        logNativeRescale("PREPARATION_DEFERRED", "reason=" + reason);
+    }
+
+    private void clearNativePreparation() {
+        final NativeRescalePreparation window = preparation;
+        preparation = null;
+        if (window != null && window.deadline != null) {
+            window.deadline.cancel(false);
+        }
+    }
+
+    private void logNativeRescale(String event, String details) {
+        LOG.info(
+                "NATIVE_RESCALE_{} jobId={} generation={} timestampMs={} {}",
+                event,
+                jobGraph.getJobID(),
+                nativeRescaleGeneration,
+                System.currentTimeMillis(),
+                details);
+    }
+
+    private static String describePreparation(NativeRescalePreparationPlanner.Plan plan) {
+        return "reusableCount="
+                + plan.reusable.size()
+                + " reusable="
+                + plan.reusable
+                + " freeCount="
+                + plan.free.size()
+                + " free="
+                + plan.free
+                + " missingCount="
+                + plan.missing.getTotalResourceCount()
+                + " missing="
+                + plan.missing
+                + " incompatible="
+                + plan.incompatible;
     }
 
     private void updateJustinGraphJobInformation(VertexParallelismStore vertexParallelismStore) {
@@ -1015,24 +1435,7 @@ public class AdaptiveScheduler
     @VisibleForTesting
     static boolean hasDesiredResources(
             ResourceCounter desiredResources, Collection<? extends SlotInfo> freeSlots) {
-        ResourceCounter outstandingResources = desiredResources;
-        final Iterator<? extends SlotInfo> slotIterator = freeSlots.iterator();
-        int wildcardSlots = 0;
-
-        while (!outstandingResources.isEmpty() && slotIterator.hasNext()) {
-            final SlotInfo slotInfo = slotIterator.next();
-            final ResourceProfile resourceProfile = slotInfo.getResourceProfile();
-
-            if (resourceProfile.equals(ResourceProfile.ANY)) {
-                wildcardSlots++;
-            } else if (outstandingResources.containsResource(resourceProfile)) {
-                outstandingResources = outstandingResources.subtract(resourceProfile, 1);
-            } else {
-                outstandingResources = outstandingResources.subtract(ResourceProfile.UNKNOWN, 1);
-            }
-        }
-
-        return outstandingResources.getTotalResourceCount() <= wildcardSlots;
+        return JustinSlotMatching.match(desiredResources, freeSlots).getMissing().isEmpty();
     }
 
     @Override
@@ -1106,6 +1509,9 @@ public class AdaptiveScheduler
 
     @Override
     public void goToWaitingForResources(@Nullable ExecutionGraph previousExecutionGraph) {
+        if (nativeRescaleStatus == NativeRescaleStatus.COMMITTING && state instanceof Restarting) {
+            logNativeRescale("OLD_TASKS_TERMINATED", "");
+        }
         declareJustinDesiredResources();
         firstJustinRescale = false;
         releaseSlotsExceedingDesiredResources();
@@ -1122,21 +1528,16 @@ public class AdaptiveScheduler
     private void releaseSlotsExceedingDesiredResources() {
         // Take a snapshot because returning an allocation changes the slot pool.
         final List<SlotInfo> slots = new ArrayList<>(declarativeSlotPool.getAllSlotsInformation());
-        // Keep exact matches first, then use wildcard slots for remaining requirements.
-        slots.sort(
-                Comparator.comparing(
-                        slot -> slot.getResourceProfile().equals(ResourceProfile.ANY)));
-        ResourceCounter remaining = desiredResources;
+        if (!retainedNativeAllocations.isEmpty()) {
+            slots.sort(
+                    Comparator.comparing(
+                            slot -> !retainedNativeAllocations.contains(slot.getAllocationId())));
+        }
+        final Set<AllocationID> matched =
+                JustinSlotMatching.match(desiredResources, slots).getAllocations().keySet();
         final FlinkException cause = new FlinkException("Slot is no longer needed after restart.");
         for (SlotInfo slot : slots) {
-            final ResourceProfile profile = slot.getResourceProfile();
-            if (remaining.containsResource(profile)) {
-                remaining = remaining.subtract(profile, 1);
-            } else if (remaining.containsResource(ResourceProfile.UNKNOWN)) {
-                remaining = remaining.subtract(ResourceProfile.UNKNOWN, 1);
-            } else if (profile.equals(ResourceProfile.ANY) && !remaining.isEmpty()) {
-                remaining = remaining.subtract(remaining.getResources().iterator().next(), 1);
-            } else {
+            if (!matched.contains(slot.getAllocationId())) {
                 declarativeSlotPool.releaseSlot(slot.getAllocationId(), cause);
             }
         }
@@ -1145,10 +1546,8 @@ public class AdaptiveScheduler
     private void declareDesiredResources() {
         final ResourceCounter newDesiredResources = calculateDesiredResources();
 
-        if (!newDesiredResources.equals(this.desiredResources)) {
-            this.desiredResources = newDesiredResources;
-            declarativeSlotPool.setResourceRequirements(this.desiredResources);
-        }
+        this.desiredResources = newDesiredResources;
+        setDeclaredResourceRequirements(newDesiredResources);
     }
 
     private ResourceCounter calculateDesiredResources() {
@@ -1158,33 +1557,44 @@ public class AdaptiveScheduler
     private void declareJustinDesiredResources() {
         final ResourceCounter newDesiredResources = calculateJustinDesiredResources();
 
-        if (!newDesiredResources.equals(this.desiredResources)) {
-            this.desiredResources = newDesiredResources;
-            declarativeSlotPool.setResourceRequirements(this.desiredResources);
+        this.desiredResources = newDesiredResources;
+        setDeclaredResourceRequirements(newDesiredResources);
+    }
+
+    private void setDeclaredResourceRequirements(ResourceCounter resources) {
+        if (!resources.equals(declaredResources)) {
+            declaredResources = resources;
+            declarativeSlotPool.setResourceRequirements(resources);
         }
     }
 
     private ResourceCounter calculateJustinDesiredResources() {
-        ResourceCounter resourceCounter = ResourceCounter.empty();
-
-        if (this.justinResourceRequirements != null) {
-            for (JobVertex vertex : jobGraph.getVertices()) {
-                resourceCounter =
-                        resourceCounter.add(
-                                this.justinResourceRequirements.getResourceProfile(vertex.getID()),
-                                this.justinResourceRequirements
-                                        .getParallelism(vertex.getID())
-                                        .getUpperBound());
-            }
-        } else {
-            for (JobVertex vertex : jobGraph.getVertices()) {
-                resourceCounter =
-                        resourceCounter.add(
-                                vertex.getSlotSharingGroup().getResourceProfile(),
-                                vertex.getParallelism());
-            }
+        if (justinResourceRequirements != null) {
+            return calculateJustinTargetResources(justinResourceRequirements);
         }
-        return resourceCounter;
+
+        ResourceCounter resources = ResourceCounter.empty();
+        // Preserve the startup declaration. Preparation requires dedicated, concrete groups.
+        for (JobInformation.VertexInformation vertex : jobInformation.getVertices()) {
+            resources =
+                    resources.add(
+                            vertex.getSlotSharingGroup().getResourceProfile(),
+                            vertex.getParallelism());
+        }
+        return resources;
+    }
+
+    private static ResourceCounter calculateJustinTargetResources(
+            JustinResourceRequirements target) {
+        ResourceCounter resources = ResourceCounter.empty();
+        // Native requests replace the current sharing groups with one group per JobVertex.
+        for (JobVertexID id : target.getJobVertices()) {
+            resources =
+                    resources.add(
+                            target.getResourceProfile(id),
+                            target.getParallelism(id).getUpperBound());
+        }
+        return resources;
     }
 
     @Override
@@ -1230,6 +1640,10 @@ public class AdaptiveScheduler
             Duration backoffTime,
             List<ExceptionHistoryEntry> failureCollection) {
 
+        if (latestNativeTarget != null
+                && (preparation != null || nativeRescaleStatus == NativeRescaleStatus.COMMITTING)) {
+            logNativeRescale("RESTART_START", "");
+        }
         for (ExecutionVertex executionVertex : executionGraph.getAllExecutionVertices()) {
             final int attemptNumber =
                     executionVertex.getCurrentExecutionAttempt().getAttemptNumber();
@@ -1319,10 +1733,20 @@ public class AdaptiveScheduler
                     @Nullable ExecutionGraph previousExecutionGraph) {
         final JobSchedulingPlan schedulingPlan;
         final VertexParallelismStore adjustedParallelismStore;
+        final JobGraph adjustedJobGraph;
+        graphCreationGeneration = nativeRescaleGeneration;
 
         try {
             schedulingPlan = determineParallelism(slotAllocator, previousExecutionGraph);
-            JobGraph adjustedJobGraph = jobInformation.copyJobGraph();
+            adjustedJobGraph = jobInformation.copyJobGraph();
+            if (nativeRescaleStatus == NativeRescaleStatus.COMMITTING) {
+                adjustedJobGraph
+                        .getJobConfiguration()
+                        .set(
+                                DefaultExecutionGraphFactory.NATIVE_RESCALE_GENERATION,
+                                graphCreationGeneration);
+                logNativeRescale("GRAPH_CREATE_REQUESTED", "");
+            }
 
             for (JobVertex vertex : adjustedJobGraph.getVertices()) {
                 JobVertexID id = vertex.getID();
@@ -1347,11 +1771,16 @@ public class AdaptiveScheduler
             return FutureUtils.completedExceptionally(exception);
         }
 
-        return createExecutionGraphAndRestoreStateAsync(adjustedParallelismStore)
+        return createExecutionGraphAndRestoreStateAsync(adjustedJobGraph, adjustedParallelismStore)
                 .thenApply(
                         executionGraph ->
                                 CreatingExecutionGraph.ExecutionGraphWithVertexParallelism.create(
                                         executionGraph, schedulingPlan));
+    }
+
+    @Override
+    public boolean isExecutionGraphCreationCurrent() {
+        return !preallocationEnabled || graphCreationGeneration == nativeRescaleGeneration;
     }
 
     @Override
@@ -1403,12 +1832,14 @@ public class AdaptiveScheduler
     }
 
     private CompletableFuture<ExecutionGraph> createExecutionGraphAndRestoreStateAsync(
-            VertexParallelismStore adjustedParallelismStore) {
+            JobGraph adjustedJobGraph, VertexParallelismStore adjustedParallelismStore) {
         backgroundTask.abort();
 
         backgroundTask =
                 backgroundTask.runAfter(
-                        () -> createExecutionGraphAndRestoreState(adjustedParallelismStore),
+                        () ->
+                                createExecutionGraphAndRestoreState(
+                                        adjustedJobGraph, adjustedParallelismStore),
                         ioExecutor);
 
         return FutureUtils.switchExecutor(
@@ -1417,9 +1848,10 @@ public class AdaptiveScheduler
 
     @Nonnull
     private ExecutionGraph createExecutionGraphAndRestoreState(
-            VertexParallelismStore adjustedParallelismStore) throws Exception {
+            JobGraph adjustedJobGraph, VertexParallelismStore adjustedParallelismStore)
+            throws Exception {
         return executionGraphFactory.createAndRestoreExecutionGraph(
-                jobInformation.copyJobGraph(),
+                adjustedJobGraph,
                 completedCheckpointStore,
                 checkpointsCleaner,
                 checkpointIdCounter,
@@ -1437,6 +1869,9 @@ public class AdaptiveScheduler
 
     @Override
     public boolean shouldRescale(ExecutionGraph executionGraph) {
+        if (preparation != null && !isPreparedToRescale(executionGraph)) {
+            return false;
+        }
         if (justinRescale) {
             if (firstJustinRescale) {
                 firstJustinRescale = false;
@@ -1571,7 +2006,33 @@ public class AdaptiveScheduler
 
             final JobStatus previousJobStatus = state.getJobStatus();
 
-            state.onLeave(targetState.getStateClass());
+            final Class<T> next = targetState.getStateClass();
+            if (preparation != null) {
+                final JustinResourceRequirements target = preparation.target;
+                clearNativePreparation();
+                if (Restarting.class.equals(next)) {
+                    nativeRescaleStatus = NativeRescaleStatus.COMMITTING;
+                    applyJustinTarget(target);
+                    firstJustinRescale = false;
+                    logNativeRescale("PREPARATION_FALLBACK", "reason=execution-failure");
+                } else {
+                    setDeclaredResourceRequirements(desiredResources);
+                    nativeRescaleStatus = NativeRescaleStatus.ABORTED;
+                    logNativeRescale("PREPARATION_CANCELLED", "reason=leaving-executing");
+                }
+            }
+            if (!Restarting.class.equals(next)
+                    && !WaitingForResources.class.equals(next)
+                    && !CreatingExecutionGraph.class.equals(next)) {
+                retainedNativeAllocations = Collections.emptySet();
+            }
+            if (nativeRescaleStatus == NativeRescaleStatus.COMMITTING
+                    && (Finished.class.equals(next)
+                            || Canceling.class.equals(next)
+                            || Failing.class.equals(next))) {
+                nativeRescaleStatus = NativeRescaleStatus.ABORTED;
+            }
+            state.onLeave(next);
             T targetStateInstance = targetState.getState();
             state = targetStateInstance;
 
@@ -1619,7 +2080,14 @@ public class AdaptiveScheduler
             // it re-acquires leadership
             return;
         }
-        declarativeSlotPool.releaseIdleSlots(System.currentTimeMillis());
+        if (preparation != null) {
+            declarativeSlotPool.releaseIdleSlots(System.currentTimeMillis(), preparation.plan.free);
+        } else if (!retainedNativeAllocations.isEmpty()) {
+            declarativeSlotPool.releaseIdleSlots(
+                    System.currentTimeMillis(), retainedNativeAllocations);
+        } else {
+            declarativeSlotPool.releaseIdleSlots(System.currentTimeMillis());
+        }
         getMainThreadExecutor()
                 .schedule(
                         this::checkIdleSlotTimeout,
