@@ -71,7 +71,10 @@ public abstract class FlinkResourceContext<CR extends AbstractFlinkResource<?, ?
                 resource instanceof FlinkDeployment
                         && resource.getSpec().getJob() != null
                         && getDeploymentMode() == KubernetesDeploymentMode.NATIVE;
-        conf.set(conditionalJustin, conf.getOptional(conditionalJustin).orElse(nativeApplication));
+        conf.set(
+                conditionalJustin,
+                AutoScalerOptions.usesStandaloneA4s(conf)
+                        && conf.getOptional(conditionalJustin).orElse(nativeApplication));
         conf.set(
                 AutoScalerOptions.FLINK_CLIENT_TIMEOUT,
                 getOperatorConfig().getFlinkClientTimeout());

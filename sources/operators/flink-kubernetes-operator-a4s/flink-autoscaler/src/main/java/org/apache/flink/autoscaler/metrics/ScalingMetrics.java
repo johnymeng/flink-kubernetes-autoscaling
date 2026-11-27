@@ -91,8 +91,7 @@ public class ScalingMetrics {
         scalingMetrics.put(ScalingMetric.NUM_RECORDS_IN, numRecordsIn);
         long numRecordsOut = ioMetrics.getNumRecordsOut();
         scalingMetrics.put(ScalingMetric.NUM_RECORDS_OUT, (double) numRecordsOut);
-        if (conf.get(AutoScalerOptions.JUSTIN_ENABLED)
-                && conf.get(AutoScalerOptions.A4S_ENABLED)
+        if (AutoScalerOptions.usesStandaloneA4s(conf)
                 && ioMetrics.isNumRecordsOutComplete()
                 && numRecordsOut >= 0
                 && numRecordsOut <= (1L << 53)) {

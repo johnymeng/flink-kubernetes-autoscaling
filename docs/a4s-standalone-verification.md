@@ -2,6 +2,10 @@
 
 The comparison baseline is GitHub main at `a285fcf4453d38feff9c80b53bf57c8207d30930`. The implementation and its lab artifact pins are separate from the unmerged online-calibration branch.
 
+## Engine selection
+
+The default `LEGACY` path uses the original Flink policy and memory-parallelism curve implementation. The operator requires an explicit engine setting for standalone evaluation. The focused Maven reactor passed 135 autoscaler and 16 Kubernetes operator tests. The tests cover the legacy default with a runner URL present, embedded and remote selection, a missing remote URL, and disabling new conditional submissions when switching a job back to legacy. The Q20 renderer explicitly selects each standalone engine and keeps the original benchmark arm on its legacy image and configuration.
+
 ## Verified locally
 
 | Area | Result |

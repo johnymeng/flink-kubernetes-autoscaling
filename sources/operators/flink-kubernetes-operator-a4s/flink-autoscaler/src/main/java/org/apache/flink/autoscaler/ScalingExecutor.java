@@ -20,6 +20,7 @@ package org.apache.flink.autoscaler;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.JobStatus;
+import org.apache.flink.autoscaler.a4s.A4S;
 import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.AutoScalerEventHandler;
@@ -141,7 +142,8 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
         boolean justinEnabled = conf.get(JUSTIN_ENABLED);
         boolean a4sEnabled = justinEnabled && conf.get(A4S_ENABLED);
-        boolean conditionalJustin = a4sEnabled && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
+        boolean standaloneA4s = usesStandaloneA4s(conf);
+        boolean conditionalJustin = standaloneA4s && conf.get(A4S_CONDITIONAL_JUSTIN_ENABLED);
         String configurationFingerprint =
                 conditionalJustin ? A4sScalingIntent.fingerprint(conf) : null;
 
@@ -164,7 +166,68 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         Map<JobVertexID, JustinVertexResourceRequirements> a4sRequirements = null;
         ScalingPlan plan = null;
         long evaluationStart = System.nanoTime();
-        if (a4sEnabled) {
+        if (a4sEnabled && !standaloneA4s) {
+            var decisions =
+                    new A4S(jobTopology, evaluatedMetrics, scalingSummaries).makeDecision(conf);
+            if (!decisions.isEmpty() || !scalingSummaries.isEmpty()) {
+                var currentRequirements = readResourceRequirements(context);
+                var excluded = conf.get(VERTEX_EXCLUDE_IDS);
+                for (var entry : evaluatedMetrics.getVertexMetrics().entrySet()) {
+                    var id = entry.getKey();
+                    var metrics = entry.getValue();
+                    var current = currentRequirements.get(id);
+                    var currentProfile =
+                            current == null ? null : current.getAppliedResourceProfile();
+                    if (currentProfile == null
+                            || currentProfile.equals(ResourceProfile.UNKNOWN)
+                            || currentProfile.equals(ResourceProfile.ANY)
+                            || !currentProfile.equals(
+                                    ResourceProfileParser.parse(currentProfile.toString()))) {
+                        LOG.warn(
+                                "A4S: Deferring rescale because the applied resource profile for vertex {} cannot be preserved",
+                                id);
+                        return false;
+                    }
+                    var profile = currentProfile;
+                    var decision = decisions.get(id);
+                    if (decision != null && !excluded.contains(id.toHexString())) {
+                        int currentParallelism = (int) metrics.get(PARALLELISM).getCurrent();
+                        int targetParallelism = decision.getParallelism();
+                        if (currentParallelism == targetParallelism) {
+                            scalingSummaries.remove(id);
+                        } else {
+                            metrics.put(
+                                    EXPECTED_PROCESSING_RATE,
+                                    EvaluatedScalingMetric.of(
+                                            evaluatedMetrics
+                                                    .getMemoryParallelismCurves()
+                                                    .get(id)
+                                                    .getTargetThroughput()));
+                            scalingSummaries.put(
+                                    id,
+                                    new ScalingSummary(
+                                            currentParallelism, targetParallelism, metrics));
+                        }
+                        double memoryMb =
+                                conf.get(A4S_MANAGED_MEMORY_OVERRIDE_ENABLED)
+                                        ? conf.get(A4S_MANAGED_MEMORY_OVERRIDE_MB)
+                                        : decision.getMemoryMB() + conf.get(A4S_MEMORY_BASE_MB);
+                        if (!Double.isFinite(memoryMb) || memoryMb <= 0) {
+                            throw new IllegalArgumentException(
+                                    "Invalid A4S managed memory: " + memoryMb);
+                        }
+                        profile =
+                                ResourceProfile.newBuilder(currentProfile)
+                                        .setManagedMemory(
+                                                MemorySize.ofMebiBytes((long) Math.ceil(memoryMb)))
+                                        .build();
+                    }
+                    // Vertices without a usable A4S decision retain their deployed resources.
+                    a4sProfiles.put(id, profile);
+                    memoryChanged |= !profile.equals(currentProfile);
+                }
+            }
+        } else if (standaloneA4s) {
             if (evaluatedMetrics.getWindowEnd() == null
                     || (scalingSummaries.isEmpty() && evaluatedMetrics.getMissRateCurves().isEmpty())) {
                 return false;
@@ -272,7 +335,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
         // A4S changes vertex slot profiles through Justin. Deployment-wide memory tuning
         // creates an upgrade alongside the slot overrides and can discard job state.
         var configOverrides =
-                a4sEnabled
+                standaloneA4s
                         ? new ConfigChanges()
                         : MemoryTuning.tuneTaskManagerMemory(
                                 context,
@@ -281,7 +344,7 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                                 scalingSummaries,
                                 autoScalerEventHandler);
 
-        var memoryTuningEnabled = !a4sEnabled && conf.get(AutoScalerOptions.MEMORY_TUNING_ENABLED);
+        var memoryTuningEnabled = !standaloneA4s && conf.get(AutoScalerOptions.MEMORY_TUNING_ENABLED);
         if (scalingWouldExceedMaxResources(
                 memoryTuningEnabled ? configOverrides.newConfigWithOverrides(conf) : conf,
                 jobTopology,
@@ -745,7 +808,12 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
                 tunedConfig, evaluatedMetrics, scalingSummaries, ctx)) {
             return true;
         }
-        if (scalingWouldExceedResourceQuota(tunedConfig, jobTopology, scalingSummaries, ctx)) {
+        var conf = ctx.getConfiguration();
+        boolean legacyA4s = conf.get(JUSTIN_ENABLED) && conf.get(A4S_ENABLED)
+                && !usesStandaloneA4s(conf);
+        if (legacyA4s
+                ? scalingWouldExceedLegacyA4sQuota(tunedConfig, jobTopology, scalingSummaries, ctx)
+                : scalingWouldExceedResourceQuota(tunedConfig, jobTopology, scalingSummaries, ctx)) {
             autoScalerEventHandler.handleEvent(
                     ctx,
                     AutoScalerEventHandler.Type.Warning,
@@ -791,6 +859,83 @@ public class ScalingExecutor<KEY, Context extends JobAutoScalerContext<KEY>> {
 
         return !resourceCheck.trySchedule(
                 currentNumTms, newNumTms, taskManagerCpu, taskManagerMemory);
+    }
+
+    private static boolean scalingWouldExceedLegacyA4sQuota(
+            Configuration tunedConfig,
+            JobTopology jobTopology,
+            Map<JobVertexID, ScalingSummary> scalingSummaries,
+            JobAutoScalerContext<?> ctx) {
+
+        if (jobTopology == null || jobTopology.getSlotSharingGroupMapping().isEmpty()) {
+            return false;
+        }
+
+        var cpuQuota = tunedConfig.getOptional(AutoScalerOptions.CPU_QUOTA);
+        var memoryQuota = tunedConfig.getOptional(AutoScalerOptions.MEMORY_QUOTA);
+        var tmMemory = MemoryTuning.getTotalMemory(tunedConfig, ctx);
+        var tmCpu = ctx.getTaskManagerCpu().orElse(0.);
+
+        if (cpuQuota.isPresent() || memoryQuota.isPresent()) {
+            var currentSlotSharingGroupMaxParallelisms = new HashMap<SlotSharingGroupId, Integer>();
+            var newSlotSharingGroupMaxParallelisms = new HashMap<SlotSharingGroupId, Integer>();
+            for (var e : jobTopology.getSlotSharingGroupMapping().entrySet()) {
+                int currentMaxParallelism =
+                        e.getValue().stream()
+                                .filter(scalingSummaries::containsKey)
+                                .mapToInt(v -> scalingSummaries.get(v).getCurrentParallelism())
+                                .max()
+                                .orElse(0);
+                currentSlotSharingGroupMaxParallelisms.put(e.getKey(), currentMaxParallelism);
+                int newMaxParallelism =
+                        e.getValue().stream()
+                                .filter(scalingSummaries::containsKey)
+                                .mapToInt(v -> scalingSummaries.get(v).getNewParallelism())
+                                .max()
+                                .orElse(0);
+                newSlotSharingGroupMaxParallelisms.put(e.getKey(), newMaxParallelism);
+            }
+
+            var numSlotsPerTm = tunedConfig.get(TaskManagerOptions.NUM_TASK_SLOTS);
+            var currentTotalSlots =
+                    currentSlotSharingGroupMaxParallelisms.values().stream()
+                            .mapToInt(Integer::intValue)
+                            .sum();
+            var currentNumTms = currentTotalSlots / numSlotsPerTm;
+            var newTotalSlots =
+                    newSlotSharingGroupMaxParallelisms.values().stream()
+                            .mapToInt(Integer::intValue)
+                            .sum();
+            var newNumTms = newTotalSlots / numSlotsPerTm;
+
+            if (newNumTms <= currentNumTms) {
+                LOG.debug(
+                        "Skipping quota check due to new resource allocation is less or equals than the current");
+                return false;
+            }
+
+            if (cpuQuota.isPresent()) {
+                LOG.debug("CPU resource quota is {}, checking limits", cpuQuota.get());
+                double totalCPU = tmCpu * newNumTms;
+                if (totalCPU > cpuQuota.get()) {
+                    LOG.info("CPU resource quota reached with value: {}", totalCPU);
+                    return true;
+                }
+            }
+
+            if (memoryQuota.isPresent()) {
+                LOG.debug("Memory resource quota is {}, checking limits", memoryQuota.get());
+                long totalMemory = tmMemory.getBytes() * newNumTms;
+                if (totalMemory > memoryQuota.get().getBytes()) {
+                    LOG.info(
+                            "Memory resource quota reached with value: {}",
+                            new MemorySize(totalMemory));
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     protected static boolean scalingWouldExceedResourceQuota(

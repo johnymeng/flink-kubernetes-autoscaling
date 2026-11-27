@@ -1,11 +1,14 @@
 # Standalone A4S
 
-A4S evaluates snapshots and recommends a memory and parallelism configuration. The Flink Kubernetes Operator owns reconciliation, checkpoint and recovery decisions, and the Justin resource update. The runner has no Flink client, Kubernetes credentials, or access to the streaming data path. Embedded mode remains the default.
+A4S evaluates snapshots and recommends a memory and parallelism configuration. The Flink Kubernetes Operator owns reconciliation, checkpoint and recovery decisions, and the Justin resource update. The runner has no Flink client, Kubernetes credentials, or access to the streaming data path. A4S uses the original Flink-integrated engine by default. Jobs can opt in to the standalone core in the operator or over HTTP.
 
 ```mermaid
 flowchart LR
     Cache["FRocksDB cache and SHARDS or QuickMRC"] -->|Histograms and counters| JM["Flink 1.18 JobManager"]
-    JM -->|Aggregated scaledMrc and job metrics| Adapter["Flink 1.18 adapter in the operator"]
+    JM -->|Aggregated scaledMrc and job metrics| Engine["A4S engine in the Flink operator"]
+    Engine -->|Default| Legacy["Original Flink-integrated A4S"]
+    Engine -->|Standalone opt-in| Adapter["Flink 1.18 adapter"]
+    Legacy -->|Recommendation| Executor
     Adapter -->|Same snapshot and policy state| Embedded["Embedded A4S Core"]
     Adapter -->|POST /v1/evaluate| Runner["A4S Runner"]
     Runner --> Remote["A4S Core"]
@@ -66,12 +69,28 @@ job.autoscaler.enabled: true
 job.autoscaler.scaling.enabled: true
 job.autoscaler.justin.enabled: true
 job.autoscaler.a4s.enabled: true
+job.autoscaler.a4s.engine: CORE_REMOTE
 job.autoscaler.a4s.runner.url: http://a4s-runner:8080
 job.autoscaler.a4s.runner.timeout: 3 s
 job.autoscaler.a4s.snapshot.max-age: 60 s
 ```
 
-Omit `job.autoscaler.a4s.runner.url` to use embedded mode. DS2 and Justin remain selected through the existing policy flags. A failed remote evaluation holds the current configuration. The same operator continues reconciling any previously persisted request and waits for observed applied profiles and parallelisms to match before admitting another request.
+The `job.autoscaler.a4s.engine` setting applies when the existing A4S and Justin flags are enabled.
+
+| Engine | Behavior |
+| --- | --- |
+| `LEGACY` (default) | Uses the original Flink-integrated policy and its existing Justin path. |
+| `CORE_EMBEDDED` | Evaluates with the standalone core in the operator process. |
+| `CORE_REMOTE` | Evaluates through the standalone runner. Set `job.autoscaler.a4s.runner.url` to its HTTP(S) origin. |
+
+For an existing A4S-enabled job, deploy the matching operator and Flink runtime and make the runner Service reachable. Once any active rescale settles, opt the job in with this command. Replace the namespace, deployment name and Service URL as needed.
+
+```bash
+kubectl -n "$FLINK_NAMESPACE" patch flinkdeployment "$FLINK_DEPLOYMENT" --type=merge \
+  -p '{"spec":{"flinkConfiguration":{"job.autoscaler.a4s.engine":"CORE_REMOTE","job.autoscaler.a4s.runner.url":"http://a4s-runner:8080"}}}'
+```
+
+To return to the original engine, run the same patch with `"job.autoscaler.a4s.engine":"LEGACY"`. The switch affects subsequent decisions. An already accepted conditional rescale can finish under the same operator. A failed or misconfigured remote evaluation holds the current configuration. DS2 and Justin remain selected through their existing policy flags.
 
 The adapter uses Justin's verified exclusive applied slot profiles to include a finite CPU quota in the snapshot when the current CPU fits that quota. It leaves the quota with the operator when the topology reports a shared group or has a finished vertex. The core accounts for unchanged vertices, and the operator still checks feasibility in whole TaskManagers.
 
@@ -97,7 +116,7 @@ For a conditional `PUT /jobs/:jobid/justin`, include the token as a top-level `e
 
 The native Kubernetes operator captures the token and a fingerprint of the autoscaler settings before evaluation. It persists them with the full target and expiry in the autoscaler ConfigMap. Before submitting, it checks the settings fingerprint and the current Kubernetes deployment UID and generation. Missing or changed settings evidence disables submission for that intent. The operator still observes a possibly accepted target before evaluating a new one, including after switching policies or disabling autoscaling. HTTP 409 discards the stale target. After an ambiguous reply, the operator reads live requirements before it can retry with the original token. It waits for the requested requirements, running task counts and applied profiles to agree before recording the overrides in deployment status. The pending target never enters the regular deployment upgrade path.
 
-The Kubernetes operator enables this behavior for native A4S by default. Use `job.autoscaler.a4s.conditional-justin.enabled: false` explicitly when pairing the operator with an older runtime image in legacy Justin mode. Conditional writes require a stable execution token and positive checkpoint recovery evidence from the runtime.
+The Kubernetes operator enables this behavior by default for native application deployments that opt in to a standalone engine. With an older runtime image, an opt-in engine can use the original Justin transport by setting `job.autoscaler.a4s.conditional-justin.enabled: false`. Conditional writes require a stable execution token and positive checkpoint recovery evidence from the runtime.
 
 ## API v1
 

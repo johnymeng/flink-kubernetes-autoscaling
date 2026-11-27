@@ -265,6 +265,8 @@ public final class LocalAdaptiveA4sSmoke {
 
                 var plannerConfig = new Configuration();
                 plannerConfig.set(AutoScalerOptions.A4S_ENABLED, true);
+                plannerConfig.set(
+                        AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_REMOTE);
                 plannerConfig.set(AutoScalerOptions.JUSTIN_ENABLED, true);
                 plannerConfig.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
                 plannerConfig.set(AutoScalerOptions.VERTEX_MIN_PARALLELISM, 1);

@@ -21,6 +21,7 @@ MATRIX = (
 RUNNER_URL = "http://a4s-runner:8080"
 SNAPSHOT_FILE = "a4s-snapshots.jsonl"
 MODE_SETTINGS = {
+    "job.autoscaler.a4s.engine",
     "job.autoscaler.a4s.runner.url",
     "job.autoscaler.a4s.snapshot.record-file",
 }
@@ -94,6 +95,7 @@ def render_arm(out, run_id, mode, args):
         "operatorPod": {"nodeSelector": {"kubernetes.io/hostname": args.jobmanager_node}},
     }
     if mode != "original":
+        config["job.autoscaler.a4s.engine"] = "CORE_" + mode.upper()
         config["job.autoscaler.a4s.snapshot.record-file"] = SNAPSHOT_FILE
         values["operatorPod"]["env"] = [{"name": "A4S_SNAPSHOT_DIR", "value": "/tmp"}]
     if mode == "remote":

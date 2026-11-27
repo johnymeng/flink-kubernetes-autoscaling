@@ -129,6 +129,7 @@ public class ScalingMetricsTest {
         var metrics = new HashMap<ScalingMetric, Double>();
         var conf = new Configuration();
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
 
         ScalingMetrics.computeDataRateMetrics(sink, Map.of(), metrics, topology, conf, () -> 0.0);

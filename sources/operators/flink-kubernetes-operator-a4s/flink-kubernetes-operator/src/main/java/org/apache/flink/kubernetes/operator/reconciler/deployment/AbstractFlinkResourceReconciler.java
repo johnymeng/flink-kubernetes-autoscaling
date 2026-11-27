@@ -56,9 +56,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
-import static org.apache.flink.autoscaler.config.AutoScalerOptions.A4S_ENABLED;
+import static org.apache.flink.autoscaler.config.AutoScalerOptions.usesStandaloneA4s;
 import static org.apache.flink.autoscaler.config.AutoScalerOptions.AUTOSCALER_ENABLED;
-import static org.apache.flink.autoscaler.config.AutoScalerOptions.JUSTIN_ENABLED;
 
 /**
  * Base class for all Flink resource reconcilers. It contains the general flow of reconciling Flink
@@ -162,8 +161,7 @@ public abstract class AbstractFlinkResourceReconciler<
 
             if (!scaled
                     && diffType == DiffType.SCALE
-                    && deployConfig.get(JUSTIN_ENABLED)
-                    && deployConfig.get(A4S_ENABLED)
+                    && usesStandaloneA4s(deployConfig)
                     && currentDeploySpec.getJob() != null
                     && currentDeploySpec.getJob().getUpgradeMode() == UpgradeMode.STATELESS) {
                 LOG.warn("Deferring A4S scale because Justin could not apply it in place");

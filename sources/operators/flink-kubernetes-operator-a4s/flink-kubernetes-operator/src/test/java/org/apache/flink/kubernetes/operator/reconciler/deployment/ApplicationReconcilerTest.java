@@ -944,6 +944,9 @@ public class ApplicationReconcilerTest extends OperatorTestBase {
         var config = deployment.getSpec().getFlinkConfiguration();
         config.put(AutoScalerOptions.JUSTIN_ENABLED.key(), "true");
         config.put(AutoScalerOptions.A4S_ENABLED.key(), "true");
+        config.put(
+                AutoScalerOptions.A4S_ENGINE.key(),
+                AutoScalerOptions.A4sEngine.CORE_EMBEDDED.name());
         deployment.getMetadata().setGeneration(1L);
 
         reconciler.reconcile(deployment, context);

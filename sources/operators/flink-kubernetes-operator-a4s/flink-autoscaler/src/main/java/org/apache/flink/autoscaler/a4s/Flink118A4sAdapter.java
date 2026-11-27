@@ -343,9 +343,17 @@ public final class Flink118A4sAdapter {
 
     public ScalingPlan evaluate(Configuration conf, EvaluationRequest request)
             throws IOException, InterruptedException {
-        String remote = conf.get(AutoScalerOptions.A4S_RUNNER_URL);
-        if (remote == null) {
+        var engine = conf.get(AutoScalerOptions.A4S_ENGINE);
+        if (engine == AutoScalerOptions.A4sEngine.CORE_EMBEDDED) {
             return embedded.evaluate(request);
+        }
+        if (engine != AutoScalerOptions.A4sEngine.CORE_REMOTE) {
+            throw new IllegalArgumentException("Expected a standalone A4S engine");
+        }
+        String remote = conf.get(AutoScalerOptions.A4S_RUNNER_URL);
+        if (remote == null || remote.isBlank()) {
+            throw new IllegalArgumentException(
+                    "CORE_REMOTE requires " + AutoScalerOptions.A4S_RUNNER_URL.key());
         }
         var endpoint = URI.create(remote);
         var timeout = conf.get(AutoScalerOptions.A4S_RUNNER_TIMEOUT);

@@ -92,10 +92,7 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
     @Override
     protected Map<JobVertexID, A4SAggregatedMetricsResponseBody> queryAllA4sMetrics(
             Context ctx, JobTopology topology, Collection<JobVertexID> jobVertexIds) {
-        var conf = ctx.getConfiguration();
-        boolean captureBacklog =
-                conf.get(AutoScalerOptions.JUSTIN_ENABLED)
-                        && conf.get(AutoScalerOptions.A4S_ENABLED);
+        boolean captureBacklog = AutoScalerOptions.usesStandaloneA4s(ctx.getConfiguration());
         var observations = new HashMap<JobVertexID, A4SAggregatedMetricsResponseBody>();
         for (JobVertexID vertex : jobVertexIds) {
             var observation =
@@ -158,9 +155,7 @@ public class RestApiMetricsCollector<KEY, Context extends JobAutoScalerContext<K
         ((JobIDPathParameter) pathIt.next()).resolve(jobId);
         ((JobVertexIdPathParameter) pathIt.next()).resolve(jobVertexID);
         var conf = ctx.getConfiguration();
-        boolean a4s =
-                conf.get(AutoScalerOptions.JUSTIN_ENABLED)
-                        && conf.get(AutoScalerOptions.A4S_ENABLED);
+        boolean a4s = AutoScalerOptions.usesStandaloneA4s(conf);
         boolean includeCacheCapacity =
                 a4s && conf.getBoolean("state.backend.rocksdb.metrics.block-cache-capacity", false);
         boolean includeCacheUsage =

@@ -95,11 +95,16 @@ public class ScalingMetricEvaluatorTest {
                             curves));
         }
 
-        var evaluated =
-                evaluator.evaluate(
-                        new Configuration(),
-                        new CollectedMetricHistory(topology, history, history.firstKey()),
-                        Duration.ZERO);
+        var conf = new Configuration();
+        conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
+        var collected = new CollectedMetricHistory(topology, history, history.firstKey());
+        var legacy = evaluator.evaluate(conf, collected, Duration.ZERO);
+        assertEquals(Set.of(downstream), legacy.getMemoryParallelismCurves().keySet());
+
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        var evaluated = evaluator.evaluate(conf, collected, Duration.ZERO);
+        assertTrue(evaluated.getMemoryParallelismCurves().isEmpty());
         assertEquals(
                 EvaluatedScalingMetric.avg(100),
                 evaluated.getVertexMetrics().get(source).get(ScalingMetric.TARGET_DATA_RATE));
@@ -122,6 +127,7 @@ public class ScalingMetricEvaluatorTest {
         var topology = new JobTopology(new VertexInfo(source, Map.of(), 1, 8));
         var conf = new Configuration();
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         var history = new TreeMap<Instant, CollectedMetrics>();
         Double[] counters = {first, middle, last};
@@ -167,6 +173,7 @@ public class ScalingMetricEvaluatorTest {
         var topology = new JobTopology(new VertexInfo(vertex, Map.of(), 1, 8));
         var conf = new Configuration();
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         var start = new TaskTimeTotals("roster-a", 100, 500, 300);
         var middle = new TaskTimeTotals("roster-a", 200, 600, 350);
@@ -241,6 +248,7 @@ public class ScalingMetricEvaluatorTest {
         var topology = new JobTopology(new VertexInfo(source, Map.of(), 1, 8));
         var conf = new Configuration();
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         var history = new TreeMap<Instant, CollectedMetrics>();
         for (int second : new int[] {0, 10}) {

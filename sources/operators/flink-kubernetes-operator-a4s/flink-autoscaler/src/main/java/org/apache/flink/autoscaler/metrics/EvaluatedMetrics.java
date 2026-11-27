@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler.metrics;
 
 import org.apache.flink.a4s.core.MissRateCurve;
+import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.CacheCounters;
 import org.apache.flink.autoscaler.utils.a4s.A4SAggregatedMetricsResponseBody.StateAccessTiming;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -38,6 +39,7 @@ public class EvaluatedMetrics {
     private Map<JobVertexID, Map<ScalingMetric, EvaluatedScalingMetric>> vertexMetrics;
     private Map<ScalingMetric, EvaluatedScalingMetric> globalMetrics;
     private Map<JobVertexID, MissRateCurve> missRateCurves = Map.of();
+    private Map<JobVertexID, MemoryParallelismCurve> memoryParallelismCurves = Map.of();
     private Instant windowStart;
     private Instant windowEnd;
     private Instant jobRunningSince;
@@ -81,6 +83,7 @@ public class EvaluatedMetrics {
                 vertexMetrics,
                 globalMetrics,
                 missRateCurves,
+                Map.of(),
                 windowStart,
                 windowEnd,
                 jobRunningSince,

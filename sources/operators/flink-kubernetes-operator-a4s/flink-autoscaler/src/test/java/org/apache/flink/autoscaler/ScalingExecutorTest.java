@@ -22,6 +22,7 @@ import org.apache.flink.api.common.JobStatus;
 import org.apache.flink.a4s.core.MissRateCurve;
 import org.apache.flink.autoscaler.ScalingExecutor.RuntimeObservation;
 import org.apache.flink.autoscaler.a4s.Flink118A4sAdapter;
+import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.event.TestingEventCollector;
 import org.apache.flink.autoscaler.metrics.EvaluatedMetrics;
@@ -163,6 +164,8 @@ public class ScalingExecutorTest {
             boolean scaleStateful, boolean statefulProfileAvailable) throws Exception {
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_RUNNER_URL, "invalid runner URL");
+        conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
         conf.set(AutoScalerOptions.MEMORY_SCALING_ENABLED, false);
         conf.set(TaskManagerOptions.TOTAL_PROCESS_MEMORY, MemorySize.ofMebiBytes(4096));
@@ -222,8 +225,6 @@ public class ScalingExecutorTest {
                                 stateful, statefulMetrics),
                         globalMetrics,
                         Map.of());
-        metrics.setWindowStart(Instant.now().minusSeconds(10));
-        metrics.setWindowEnd(Instant.now());
 
         scalingExecutor =
                 new ScalingExecutor<>(eventCollector, stateStore) {
@@ -232,7 +233,7 @@ public class ScalingExecutorTest {
                             JobAutoScalerContext<JobID> ctx,
                             EvaluatedMetrics evaluated,
                             JobTopology topology) {
-                        return new RuntimeObservation("generation", Map.of());
+                        throw new AssertionError("Legacy A4S does not use standalone observations");
                     }
                 };
         var scalingHistory = new HashMap<JobVertexID, SortedMap<Instant, ScalingSummary>>();
@@ -322,8 +323,11 @@ public class ScalingExecutorTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void testA4SMemoryOnlyScaling(boolean conditional) throws Exception {
+    @CsvSource({"false,false", "true,false", "true,true"})
+    void testA4SMemoryOnlyScaling(boolean standalone, boolean conditional) throws Exception {
+        if (standalone) {
+            conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
+        }
         conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, conditional);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
@@ -343,6 +347,13 @@ public class ScalingExecutorTest {
                                 stateful,
                                 new MissRateCurve(java.util.List.of(
                                         new MissRateCurve.Point(18L * 1024 * 1024, 0.1)))));
+        if (!standalone) {
+            metrics.setMemoryParallelismCurves(
+                    Map.of(
+                            stateful,
+                            new MemoryParallelismCurve(
+                                    100, List.of(new MemoryParallelismCurve.Point(1, 18)))));
+        }
         metrics.setWindowStart(Instant.now().minusSeconds(10));
         metrics.setWindowEnd(Instant.now());
         var original =
@@ -515,9 +526,14 @@ public class ScalingExecutorTest {
     @ParameterizedTest
     @ValueSource(strings = {
         "embedded", "remote", "remote-observe-only", "stale", "unavailable", "timeout",
-        "unverified-migration"
+        "unverified-migration", "missing-runner"
     })
     void storesA4sRecommendationsOnlyWhenValidAndScalingIsEnabled(String mode) throws Exception {
+        conf.set(
+                AutoScalerOptions.A4S_ENGINE,
+                mode.equals("embedded")
+                        ? AutoScalerOptions.A4sEngine.CORE_EMBEDDED
+                        : AutoScalerOptions.A4sEngine.CORE_REMOTE);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
         if (mode.equals("remote-observe-only")) {
@@ -579,8 +595,11 @@ public class ScalingExecutorTest {
         var received = new CompletableFuture<EvaluationRequest>();
         var releaseResponse = new CountDownLatch(1);
         var delayedResponse = new CompletableFuture<Void>();
+        if (mode.equals("embedded")) {
+            conf.set(AutoScalerOptions.A4S_RUNNER_URL, "invalid runner URL");
+        }
         var server =
-                mode.equals("embedded")
+                Set.of("embedded", "missing-runner").contains(mode)
                         ? null
                         : HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         if (server != null) {
@@ -673,7 +692,9 @@ public class ScalingExecutorTest {
             }
         }
 
-        if (Set.of("remote-observe-only", "stale", "unavailable", "timeout", "unverified-migration")
+        if (Set.of(
+                        "remote-observe-only", "stale", "unavailable", "timeout",
+                        "unverified-migration", "missing-runner")
                 .contains(mode)) {
             assertFalse(scaled);
             assertThat(validated).isEmpty();
@@ -848,6 +869,7 @@ public class ScalingExecutorTest {
     @CsvSource({"true,false", "false,true", "false,false"})
     void discardsA4sRecommendationAfterGenerationOrAppliedProfileChanges(
             boolean restart, boolean profileChange) throws Exception {
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_MEMORY_BASE_MB, 16.0);

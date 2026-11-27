@@ -18,6 +18,7 @@
 package org.apache.flink.autoscaler;
 
 import org.apache.flink.annotation.VisibleForTesting;
+import org.apache.flink.autoscaler.a4s.MemoryParallelismCurve;
 import org.apache.flink.autoscaler.config.AutoScalerOptions;
 import org.apache.flink.autoscaler.metrics.CollectedMetricHistory;
 import org.apache.flink.autoscaler.metrics.CollectedMetrics;
@@ -65,19 +66,25 @@ public class ScalingMetricEvaluator {
         var metricsHistory = collectedMetrics.getMetricHistory();
         var topology = collectedMetrics.getJobTopology();
         CollectedMetrics latestCollectedMetrics = metricsHistory.get(metricsHistory.lastKey());
+        boolean standaloneA4s = AutoScalerOptions.usesStandaloneA4s(conf);
+        boolean legacyA4s =
+                conf.get(AutoScalerOptions.JUSTIN_ENABLED)
+                        && conf.get(AutoScalerOptions.A4S_ENABLED)
+                        && !standaloneA4s;
         Map<JobVertexID, MissRateCurve> collectedMissRateCurves =
                 latestCollectedMetrics.getMissRateCurves() == null
                         ? Map.of()
-                        : latestCollectedMetrics.getMissRateCurves().entrySet().stream()
-                                .filter(entry -> entry.getValue() != null && entry.getValue().isUsable())
-                                .collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+                        : latestCollectedMetrics.getMissRateCurves();
+        var memoryParallelismCurves = new HashMap<JobVertexID, MemoryParallelismCurve>();
         boolean processingBacklog = isProcessingBacklog(topology, metricsHistory, conf);
 
         var taskTimeFractions = new HashMap<JobVertexID, TaskTimeFractions>();
         for (var vertex : topology.getVerticesInTopologicalOrder()) {
-            var fractions = computeTaskTimeFractions(vertex, metricsHistory);
-            if (fractions != null) {
-                taskTimeFractions.put(vertex, fractions);
+            if (standaloneA4s) {
+                var fractions = computeTaskTimeFractions(vertex, metricsHistory);
+                if (fractions != null) {
+                    taskTimeFractions.put(vertex, fractions);
+                }
             }
             scalingOutput.put(
                     vertex,
@@ -90,12 +97,27 @@ public class ScalingMetricEvaluator {
                             processingBacklog,
                             restartTime));
 
+            var curve = collectedMissRateCurves.get(vertex);
+            if (legacyA4s && curve != null) {
+                var mpc =
+                        MemoryParallelismCurve.fromMissRateCurve(
+                                scalingOutput.get(vertex).get(TARGET_DATA_RATE).getAverage(),
+                                conf.get(AutoScalerOptions.A4S_MISS_LATENCY_SEC),
+                                conf.get(AutoScalerOptions.A4S_HIT_LATENCY_SEC),
+                                conf.get(AutoScalerOptions.VERTEX_MIN_PARALLELISM),
+                                conf.get(AutoScalerOptions.VERTEX_MAX_PARALLELISM),
+                                curve);
+                if (mpc != null) {
+                    memoryParallelismCurves.put(vertex, mpc);
+                }
+            }
         }
 
         return new EvaluatedMetrics(
                 scalingOutput,
                 evaluateGlobalMetrics(metricsHistory),
                 collectedMissRateCurves,
+                memoryParallelismCurves,
                 metricsHistory.firstKey(),
                 metricsHistory.lastKey(),
                 collectedMetrics.getJobRunningTs(),
@@ -167,7 +189,8 @@ public class ScalingMetricEvaluator {
                 computeBusyTimeAvg(conf, metricsHistory, vertex, vertexInfo.getParallelism());
 
         evaluatedMetrics.put(INPUT_RATE, EvaluatedScalingMetric.avg(inputRateAvg));
-        if (latestVertexMetrics.containsKey(OBSERVED_NUM_RECORDS_OUT)) {
+        if (latestVertexMetrics.containsKey(OBSERVED_NUM_RECORDS_OUT)
+                && AutoScalerOptions.usesStandaloneA4s(conf)) {
             double outputRate = getCompleteOutputRate(vertex, metricsHistory);
             if (Double.isFinite(outputRate)) {
                 evaluatedMetrics.put(OUTPUT_RATE, EvaluatedScalingMetric.avg(outputRate));

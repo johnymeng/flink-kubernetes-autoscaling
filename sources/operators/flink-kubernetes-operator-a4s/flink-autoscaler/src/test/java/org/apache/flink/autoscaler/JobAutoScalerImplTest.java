@@ -247,6 +247,7 @@ public class JobAutoScalerImplTest {
     void a4sRealizesOnlyCompleteOverridesAfterSuccessfulPersistence() throws Exception {
         var conf = context.getConfiguration();
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.MEMORY_TUNING_ENABLED, false);
 
@@ -316,6 +317,7 @@ public class JobAutoScalerImplTest {
         var conf = context.getConfiguration();
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, true);
         conf.set(SCALING_ENABLED, true);
         var vertex = new JobVertexID();
@@ -392,11 +394,12 @@ public class JobAutoScalerImplTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"quota", "policy", "guard", "disabled", "legacy-intent"})
+    @ValueSource(strings = {"quota", "policy", "guard", "disabled", "legacy-intent", "engine"})
     void changedSettingsPreventResubmissionButAllowConfirmation(String change) throws Exception {
         var conf = context.getConfiguration();
         conf.set(AutoScalerOptions.JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.A4S_ENABLED, true);
+        conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, true);
         conf.set(AutoScalerOptions.CPU_QUOTA, 4.0);
         String fingerprint =
@@ -420,6 +423,9 @@ public class JobAutoScalerImplTest {
                 break;
             case "policy":
                 conf.set(AutoScalerOptions.JUSTIN_ENABLED, false);
+                break;
+            case "engine":
+                conf.set(AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.LEGACY);
                 break;
             case "guard":
                 conf.set(AutoScalerOptions.A4S_CONDITIONAL_JUSTIN_ENABLED, false);
@@ -584,6 +590,8 @@ public class JobAutoScalerImplTest {
         stateStore.flush(context);
 
         context.getConfiguration().set(AutoScalerOptions.A4S_ENABLED, true);
+        context.getConfiguration().set(
+                AutoScalerOptions.A4S_ENGINE, AutoScalerOptions.A4sEngine.CORE_EMBEDDED);
         context.getConfiguration().set(AutoScalerOptions.JUSTIN_ENABLED, true);
         autoscaler.applyConfigOverrides(context);
         assertThat(scalingRealizer.events).isEmpty();
