@@ -84,6 +84,69 @@ class CheckpointRescaleManagerTest {
     }
 
     @Test
+    void successfulPollMaterializesTargetInTheSameRealization() throws Exception {
+        var context = createContext();
+        var realizer = new KubernetesScalingRealizer(manager);
+        realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM, TARGET_PROFILES);
+        realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM, TARGET_PROFILES);
+        assertPhase(context, Phase.CHECKPOINT_TRIGGERED);
+        assertThat(manager.blocksScalingApplication(context)).isTrue();
+        assertThat(
+                        Configuration.fromMap(deployment.getSpec().getFlinkConfiguration())
+                                .get(PipelineOptions.PARALLELISM_OVERRIDES))
+                .isEqualTo(PREVIOUS_PARALLELISM);
+        realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM, TARGET_PROFILES);
+        assertPhase(context, Phase.APPLYING);
+        assertThat(transaction(context).getCompletedCheckpointId()).isNotNull();
+        var desired = Configuration.fromMap(deployment.getSpec().getFlinkConfiguration());
+        assertThat(desired.get(PipelineOptions.PARALLELISM_OVERRIDES))
+                .isEqualTo(TARGET_PARALLELISM);
+        assertThat(desired.get(KubernetesScalingRealizer.RESOURCE_PROFILE_OVERRIDES))
+                .isEqualTo(TARGET_PROFILES);
+        assertThat(manager.blocksScalingApplication(context)).isFalse();
+    }
+
+    @Test
+    void failedPollDoesNotApplyTheTarget() throws Exception {
+        var context = createContext();
+        var realizer = new KubernetesScalingRealizer(manager);
+        realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM, TARGET_PROFILES);
+        var triggered = transaction(context);
+        triggered.setCheckpointTriggerId("unknown-to-flink");
+        stateStore.storeCheckpointRescaleTransaction(context, triggered);
+        stateStore.flush(context);
+        realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM, TARGET_PROFILES);
+        assertPhase(context, Phase.FAILED);
+        assertThat(manager.blocksScalingApplication(context)).isTrue();
+        assertThat(transaction(context).isTargetApplied()).isFalse();
+        assertThat(
+                        Configuration.fromMap(deployment.getSpec().getFlinkConfiguration())
+                                .get(PipelineOptions.PARALLELISM_OVERRIDES))
+                .isEqualTo(PREVIOUS_PARALLELISM);
+    }
+
+    @Test
+    void restartFromPersistedReadyStateStillApplies() throws Exception {
+        var context = createContext();
+        manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES);
+        var ready = transaction(context);
+        ready.setCompletedCheckpointId(16L);
+        ready.setCheckpointCompletedTimestamp(DECISION_TIME);
+        ready.setPhase(Phase.READY_TO_APPLY);
+        stateStore.storeCheckpointRescaleTransaction(context, ready);
+        stateStore.flush(context);
+        stateStore = new KubernetesAutoScalerStateStore(new ConfigMapStore(kubernetesClient));
+        manager = new TestingCheckpointRescaleManager(stateStore);
+        manager.setClock(Clock.fixed(APPLY_TIME, ZoneOffset.UTC));
+        var recovered = createContext();
+        new KubernetesScalingRealizer(manager)
+                .realizeParallelismOverrides(recovered, TARGET_PARALLELISM, TARGET_PROFILES);
+        assertPhase(recovered, Phase.APPLYING);
+        assertThat(transaction(recovered).getCompletedCheckpointId()).isEqualTo(16L);
+        assertThat(manager.blocksScalingApplication(recovered)).isFalse();
+    }
+
+    @Test
     void testCheckpointCompletesBeforeTargetIsApplied() throws Exception {
         var context = createContext();
 
@@ -96,11 +159,12 @@ class CheckpointRescaleManagerTest {
         assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES)).isEmpty();
         assertPhase(context, Phase.CHECKPOINT_TRIGGERED);
 
-        assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES)).isEmpty();
-        assertPhase(context, Phase.READY_TO_APPLY);
+        manager.setClock(Clock.fixed(APPLY_TIME, ZoneOffset.UTC));
+        assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES)).isPresent();
+        assertPhase(context, Phase.APPLYING);
         assertThat(manager.blocksScalingApplication(context)).isTrue();
 
-        // Simulate an operator restart after checkpoint completion.
+        // Reload the recorded apply intent before the realizer has received the target.
         stateStore = new KubernetesAutoScalerStateStore(new ConfigMapStore(kubernetesClient));
         manager = new TestingCheckpointRescaleManager(stateStore);
         manager.setClock(Clock.fixed(APPLY_TIME, ZoneOffset.UTC));
@@ -188,8 +252,7 @@ class CheckpointRescaleManagerTest {
                 .isEqualTo(PREVIOUS_PROFILES);
         realizer.realizeParallelismOverrides(context, PREVIOUS_PARALLELISM, TARGET_PROFILES);
         realizer.realizeParallelismOverrides(context, PREVIOUS_PARALLELISM, TARGET_PROFILES);
-        assertPhase(context, Phase.READY_TO_APPLY);
-        realizer.realizeParallelismOverrides(context, PREVIOUS_PARALLELISM, TARGET_PROFILES);
+        assertPhase(context, Phase.APPLYING);
         var applied = Configuration.fromMap(deployment.getSpec().getFlinkConfiguration());
         assertThat(applied.get(PipelineOptions.PARALLELISM_OVERRIDES))
                 .isEqualTo(PREVIOUS_PARALLELISM);
@@ -219,9 +282,8 @@ class CheckpointRescaleManagerTest {
         assertPhase(context, Phase.CHECKPOINT_TRIGGERED);
         assertThat(transaction(context).getCheckpointTriggerId()).isNotBlank();
 
-        manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES);
-        manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES);
-        assertPhase(context, Phase.READY_TO_APPLY);
+        assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES)).isEmpty();
+        assertPhase(context, Phase.CHECKPOINT_TRIGGERED);
 
         manager.setClock(Clock.fixed(APPLY_TIME, ZoneOffset.UTC));
         assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES))
@@ -293,9 +355,8 @@ class CheckpointRescaleManagerTest {
     void testApplyingTargetIsReemittedAfterOperatorRestart() throws Exception {
         var context = createContext();
         manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES);
-        manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES);
-        manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES);
-        assertPhase(context, Phase.READY_TO_APPLY);
+        assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES)).isEmpty();
+        assertPhase(context, Phase.CHECKPOINT_TRIGGERED);
 
         manager.setClock(Clock.fixed(APPLY_TIME, ZoneOffset.UTC));
         assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES))
@@ -362,8 +423,7 @@ class CheckpointRescaleManagerTest {
         var realizer = new KubernetesScalingRealizer(manager);
         realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM);
         realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM);
-        realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM);
-        assertPhase(context, Phase.READY_TO_APPLY);
+        assertPhase(context, Phase.CHECKPOINT_TRIGGERED);
 
         manager.setClock(Clock.fixed(APPLY_TIME, ZoneOffset.UTC));
         realizer.realizeParallelismOverrides(context, TARGET_PARALLELISM);

@@ -208,7 +208,10 @@ public class CheckpointRescaleManager
                     return Optional.empty();
                 case CHECKPOINT_TRIGGERED:
                     pollCheckpoint(context, transaction);
-                    return Optional.empty();
+                    if (transaction.getPhase() != Phase.READY_TO_APPLY) {
+                        return Optional.empty();
+                    }
+                    // Fall through after the successful checkpoint has been persisted.
                 case READY_TO_APPLY:
                     transaction.setAppliedTimestamp(clock.instant());
                     transaction.setTargetApplied(true);
