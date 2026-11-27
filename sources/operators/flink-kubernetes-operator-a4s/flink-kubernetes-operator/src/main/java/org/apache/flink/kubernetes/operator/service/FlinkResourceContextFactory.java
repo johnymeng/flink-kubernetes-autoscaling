@@ -19,6 +19,7 @@ package org.apache.flink.kubernetes.operator.service;
 
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.kubernetes.operator.api.AbstractFlinkResource;
 import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkSessionJob;
@@ -73,6 +74,10 @@ public class FlinkResourceContextFactory {
                 Executors.newFixedThreadPool(
                         configManager.getOperatorConfiguration().getReconcilerMaxParallelism(),
                         new ExecutorThreadFactory("Flink-RestClusterClient-IO"));
+    }
+
+    public Configuration getDefaultConfig() {
+        return configManager.getDefaultConfig();
     }
 
     public FlinkStateSnapshotContext getFlinkStateSnapshotContext(

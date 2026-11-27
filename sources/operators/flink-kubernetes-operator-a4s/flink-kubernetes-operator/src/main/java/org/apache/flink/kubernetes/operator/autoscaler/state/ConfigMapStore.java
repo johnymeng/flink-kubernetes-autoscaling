@@ -39,7 +39,7 @@ public class ConfigMapStore {
 
     private static final Logger LOG = LoggerFactory.getLogger(KubernetesAutoScalerStateStore.class);
 
-    private static final String LABEL_COMPONENT_AUTOSCALER = "autoscaler";
+    static final String LABEL_COMPONENT_AUTOSCALER = "autoscaler";
 
     private final KubernetesClient kubernetesClient;
 
@@ -106,9 +106,13 @@ public class ConfigMapStore {
         return new ConfigMapView(configMapSkeleton, kubernetesClient::resource);
     }
 
+    static String configMapName(String deploymentName) {
+        return "autoscaler-" + deploymentName;
+    }
+
     private ObjectMeta createCmObjectMeta(ResourceID uid) {
         var objectMeta = new ObjectMeta();
-        objectMeta.setName("autoscaler-" + uid.getName());
+        objectMeta.setName(configMapName(uid.getName()));
         uid.getNamespace().ifPresent(objectMeta::setNamespace);
         objectMeta.setLabels(
                 Map.of(

@@ -489,6 +489,16 @@ public class KubernetesOperatorConfigOptions {
                     .withDescription("The port the health probe will use to expose the status.");
 
     @Documentation.Section(SECTION_ADVANCED)
+    public static final ConfigOption<Boolean> OPERATOR_CHECKPOINT_RESCALE_WATCH_ENABLED =
+            operatorConfig("checkpoint-rescale.watch.enabled")
+                    .booleanType()
+                    .noDefaultValue()
+                    .withDescription(
+                            "Watch Kubernetes HA checkpoint ConfigMaps to wake pending autoscaler resizes. "
+                                    + "At operator startup, this defaults to the operator-wide value of "
+                                    + "job.autoscaler.checkpoint-rescale.enabled.");
+
+    @Documentation.Section(SECTION_ADVANCED)
     public static final ConfigOption<Boolean> OPERATOR_STOP_ON_INFORMER_ERROR =
             operatorConfig("startup.stop-on-informer-error")
                     .booleanType()

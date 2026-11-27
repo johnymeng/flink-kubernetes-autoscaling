@@ -22,6 +22,7 @@ import org.apache.flink.kubernetes.operator.api.FlinkDeployment;
 import org.apache.flink.kubernetes.operator.api.FlinkStateSnapshot;
 import org.apache.flink.kubernetes.operator.api.status.FlinkDeploymentStatus;
 import org.apache.flink.kubernetes.operator.api.status.JobManagerDeploymentStatus;
+import org.apache.flink.kubernetes.operator.autoscaler.state.CheckpointCompletionEvents;
 import org.apache.flink.kubernetes.operator.exception.DeploymentFailedException;
 import org.apache.flink.kubernetes.operator.exception.ReconciliationException;
 import org.apache.flink.kubernetes.operator.exception.UpgradeFailureException;
@@ -207,6 +208,8 @@ public class FlinkDeploymentController
         List<EventSource> eventSources = new ArrayList<>();
         eventSources.add(EventSourceUtils.getSessionJobInformerEventSource(context));
         eventSources.add(EventSourceUtils.getDeploymentInformerEventSource(context));
+        eventSources.addAll(
+                CheckpointCompletionEvents.sources(context, ctxFactory.getDefaultConfig()));
 
         if (KubernetesClientUtils.isCrdInstalled(FlinkStateSnapshot.class)) {
             eventSources.add(

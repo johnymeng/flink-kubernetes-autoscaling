@@ -49,6 +49,11 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 
 /** Tests the durable checkpoint-rescale transaction. */
 @EnableKubernetesMockClient(crud = true)
@@ -81,6 +86,28 @@ class CheckpointRescaleManagerTest {
         manager = new TestingCheckpointRescaleManager(stateStore);
         manager.setClock(Clock.fixed(DECISION_TIME, ZoneOffset.UTC));
         manager.runningTimestamp = DECISION_TIME.minusSeconds(60).toEpochMilli();
+    }
+
+    @Test
+    void jobWithoutCheckpointSupportCanResizeByDefault() throws Exception {
+        flinkService = spy(flinkService);
+        doThrow(new IllegalStateException("Checkpointing is disabled for this job"))
+                .when(flinkService)
+                .getCheckpointInfo(any(), any());
+        var config = deployment.getSpec().getFlinkConfiguration();
+        config.remove(AutoScalerOptions.CHECKPOINT_RESCALE_ENABLED.key());
+        var context = createContext();
+        assertThat(manager.prepareScaling(context, TARGET_PARALLELISM, TARGET_PROFILES))
+                .isPresent();
+        verify(flinkService, never()).getCheckpointInfo(any(), any());
+        assertThat(stateStore.getCheckpointRescaleTransaction(context)).isEmpty();
+
+        config.put(AutoScalerOptions.CHECKPOINT_RESCALE_ENABLED.key(), "true");
+        var gated = createContext();
+        assertThat(manager.prepareScaling(gated, TARGET_PARALLELISM, TARGET_PROFILES)).isEmpty();
+        assertPhase(gated, Phase.FAILED);
+        assertThat(manager.blocksNewDecision(gated)).isTrue();
+        assertThat(manager.blocksScalingApplication(gated)).isTrue();
     }
 
     @Test

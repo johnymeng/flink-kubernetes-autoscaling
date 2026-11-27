@@ -96,6 +96,10 @@ Both options default to `false`. When checkpoint gating is enabled, the operator
 
 The operator stores the target and progress in the job's autoscaler ConfigMap. If the checkpoint fails or times out, the resize stays blocked. After resolving the cause, increase the numeric `autoscaling.flink.apache.org/checkpoint-rescale-retry-nonce` annotation on the FlinkDeployment to retry. The optional producer pause requires an external controller that acknowledges pause and resume requests.
 
+With Kubernetes high availability, the operator can watch for completed checkpoints and check the pending request immediately. A notification wakes the deployment that owns the checkpoint. The operator confirms the request through Flink's REST API before applying the resize. Scheduled reconciliation also checks for completion, including when a notification is missed or the job uses another HA backend.
+
+The operator starts this watch automatically when its **operator-wide** configuration enables `job.autoscaler.checkpoint-rescale.enabled`. If you enable checkpoint waiting only on individual FlinkDeployments, set `kubernetes.operator.checkpoint-rescale.watch.enabled: "true"` in the **operator configuration** to use the watch. Set the watch option to `"false"` to use scheduled checks alone. Restart the operator after changing the watch setting. Its service account needs permission to list and watch ConfigMaps in the watched namespaces. The Helm chart grants both.
+
 ## Job Requirements and Limitations
 
 ### Requirements
